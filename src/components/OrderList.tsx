@@ -12,9 +12,10 @@ import { motion, AnimatePresence } from "motion/react";
 interface OrderListProps {
   orders: Order[];
   onOrderUpdated: () => void;
+  userRole?: string | null;
 }
 
-export default function OrderList({ orders, onOrderUpdated }: OrderListProps) {
+export default function OrderList({ orders, onOrderUpdated, userRole }: OrderListProps) {
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<Order | null>(null);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
@@ -268,14 +269,19 @@ export default function OrderList({ orders, onOrderUpdated }: OrderListProps) {
                       </div>
 
                       <div className="flex items-center space-x-1.5">
-                        {order.status === "pending" && (
+                        {order.status === "pending" && (order.paymentMethod === 'cash' || order.paymentStatus === 'completed') && (
                           <button
                             onClick={() => handleStatusChange(order.id, "pending", "preparing")}
                             disabled={loadingId === order.id}
                             className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1.5 rounded-lg font-medium cursor-pointer transition-colors"
                           >
-                            Accept & Cook
+                            Start Preparing
                           </button>
+                        )}
+                        {order.status === "pending" && order.paymentMethod === 'chapa' && order.paymentStatus !== 'completed' && (
+                          <span className="bg-stone-200 text-stone-600 text-[10px] font-bold px-3 py-1.5 rounded-lg border border-stone-300">
+                            AWAITING PAYMENT
+                          </span>
                         )}
                         {order.status === "preparing" && (
                           <button
@@ -335,20 +341,20 @@ export default function OrderList({ orders, onOrderUpdated }: OrderListProps) {
                                   exit={{ opacity: 0, scale: 0.95, y: 10 }}
                                   className="absolute right-0 bottom-full mb-2 w-48 bg-white border border-stone-200 rounded-xl shadow-xl z-30 py-1.5 overflow-hidden flex flex-col"
                                 >
-                                  {order.paymentStatus === "pending" && order.paymentMethod === "chapa" && (
+                                  {order.paymentStatus === "pending" && order.paymentMethod === "cash" && (
                                     <button
                                       onClick={() => {
                                         updateStatus(order.id, order.status, "completed");
                                         setActiveMenuId(null);
                                       }}
                                       disabled={loadingId === order.id}
-                                      className="flex items-center px-4 py-2 text-xs text-stone-700 hover:bg-stone-50 transition-colors w-full text-left font-medium"
+                                      className="flex items-center px-4 py-2 text-xs text-emerald-700 hover:bg-emerald-50 transition-colors w-full text-left font-medium"
                                     >
-                                      <CheckCircle className="w-3.5 h-3.5 mr-2 text-emerald-600" />
-                                      Confirm Chapa Payment
+                                      <CheckCircle className="w-3.5 h-3.5 mr-2" />
+                                      Mark as Paid (Cash)
                                     </button>
                                   )}
-                                  
+
                                   {order.paymentStatus === "completed" && order.paymentMethod === "chapa" && (
                                     <button
                                       onClick={() => {

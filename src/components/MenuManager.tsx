@@ -10,9 +10,10 @@ import { Plus, Edit2, Trash2, Save, X, Utensils, Tag, Clock } from "lucide-react
 interface MenuManagerProps {
   onMenuUpdated: () => void;
   menu: MenuItem[];
+  userRole?: string | null;
 }
 
-export default function MenuManager({ menu, onMenuUpdated }: MenuManagerProps) {
+export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManagerProps) {
   const [selectedItem, setSelectedItem] = useState<MenuItem | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -314,6 +315,7 @@ export default function MenuManager({ menu, onMenuUpdated }: MenuManagerProps) {
                   type="number"
                   step="0.01"
                   required
+                  disabled={userRole === 'kitchen'}
                   value={price || ""}
                   onChange={e => {
                     const val = parseFloat(e.target.value) || 0;
@@ -323,7 +325,7 @@ export default function MenuManager({ menu, onMenuUpdated }: MenuManagerProps) {
                     }
                   }}
                   placeholder="320"
-                  className="w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                  className={`w-full text-xs border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 ${userRole === 'kitchen' ? 'bg-stone-100 text-stone-500 cursor-not-allowed' : 'bg-white'}`}
                 />
               </div>
 
@@ -428,14 +430,46 @@ export default function MenuManager({ menu, onMenuUpdated }: MenuManagerProps) {
               </div>
 
               <div className="col-span-2">
-                <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-1">Additional Gallery Images (Comma Separated URLs)</label>
-                <textarea
-                  value={galleryImages}
-                  onChange={e => setGalleryImages(e.target.value)}
-                  placeholder="https://image1.jpg, https://image2.jpg"
-                  rows={2}
-                  className="w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500"
-                />
+                <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-1">Additional Gallery Images</label>
+                <div className="space-y-2 bg-white p-3 border border-stone-250 rounded-xl">
+                  <textarea
+                    value={galleryImages}
+                    onChange={e => setGalleryImages(e.target.value)}
+                    placeholder="Provide URLs (comma separated) or use the upload button..."
+                    rows={2}
+                    className="w-full text-xs bg-stone-50 border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                  />
+                  <div className="flex items-center justify-between mt-2">
+                    <label className="flex items-center justify-center px-3 py-1.5 border border-stone-300 rounded-lg shadow-xs text-xs font-semibold text-stone-700 bg-white hover:bg-stone-50 cursor-pointer transition-all focus-within:ring-2 focus-within:ring-amber-500">
+                      <span>Upload Local Photos</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className="sr-only"
+                        onChange={async (e) => {
+                          const files = e.target.files;
+                          if (files && files.length > 0) {
+                            const newUrls: string[] = [];
+                            for (let i = 0; i < files.length; i++) {
+                              const file = files[i];
+                              const reader = new FileReader();
+                              const dataUrl = await new Promise<string>((resolve) => {
+                                reader.onloadend = () => resolve(reader.result as string);
+                                reader.readAsDataURL(file);
+                              });
+                              newUrls.push(dataUrl);
+                            }
+                            setGalleryImages(prev => prev ? `${prev}, ${newUrls.join(', ')}` : newUrls.join(', '));
+                          }
+                        }}
+                      />
+                    </label>
+                    <span className="text-[10px] text-stone-400">
+                      {galleryImages.split(',').filter(s => s.trim().length > 0).length} images added
+                    </span>
+                  </div>
+                </div>
               </div>
 
               <div>

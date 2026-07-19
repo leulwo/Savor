@@ -88,6 +88,39 @@ export interface VpsStats {
   revenue: number;
 }
 
+export interface UserProfile {
+  uid: string;
+  email: string;
+  displayName: string;
+  savedAddresses: string[];
+  favoriteItems: string[];
+  createdAt: string;
+}
+
+export interface Reservation {
+  id?: string;
+  userId?: string;
+  customerName: string;
+  customerEmail: string;
+  customerPhone: string;
+  date: string;
+  time: string;
+  partySize: number;
+  notes?: string;
+  status: 'pending' | 'confirmed' | 'cancelled';
+  createdAt: string;
+}
+
+export interface Review {
+  id?: string;
+  menuItemId: string;
+  userId: string;
+  customerName: string;
+  rating: number;
+  comment: string;
+  createdAt: string;
+}
+
 export interface ChatMessage {
   role: 'user' | 'model';
   text: string;

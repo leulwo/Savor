@@ -35,7 +35,8 @@ const db = getFirestore(appFirebase, (firebaseConfig as any).firestoreDatabaseId
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Helper to trigger Shipday order creation
 async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number) {
@@ -79,20 +80,6 @@ async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number
       paymentMethod: orderData.paymentMethod === 'cash' ? 'cash' : 'credit_card',
       paymentType: orderData.paymentMethod === 'cash' ? 'cash' : 'credit_card'
     };
-
-    // Set delivery time
-    const deliveryDate = new Date();
-    const finalDeliveryMins = deliveryMinutes || settings.shipdayDeliveryMinutes || 20;
-    deliveryDate.setMinutes(deliveryDate.getMinutes() + finalDeliveryMins);
-    
-    // Set pickup time (relative to NOW, as requested: "10 min after cooking")
-    const pickupDate = new Date();
-    pickupDate.setMinutes(pickupDate.getMinutes() + pickupLeadTime);
-
-    // Shipday v2 fields
-    payload.expectedDeliveryDate = deliveryDate.toISOString().split('T')[0];
-    payload.expectedDeliveryTime = deliveryDate.toISOString().split('T')[1].split('.')[0];
-    payload.expectedPickupTime = pickupDate.toISOString().split('T')[1].split('.')[0];
 
     const shipdayResponse = await axios.post(
       "https://api.shipday.com/orders", 

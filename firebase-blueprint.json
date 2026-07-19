@@ -1,5 +1,56 @@
 {
   "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account information including saved addresses and favorites.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "savedAddresses": { 
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "favoriteItems": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Reservation": {
+      "title": "Table Reservation",
+      "description": "A booking for a table.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Optional user ID" },
+        "customerName": { "type": "string" },
+        "customerEmail": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "time": { "type": "string", "format": "time" },
+        "partySize": { "type": "integer" },
+        "status": { "type": "string", "enum": ["pending", "confirmed", "cancelled"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["customerName", "date", "time", "partySize", "status"]
+    },
+    "Review": {
+      "title": "Item Review",
+      "description": "A customer review and rating for a menu item.",
+      "type": "object",
+      "properties": {
+        "menuItemId": { "type": "string" },
+        "userId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "rating": { "type": "integer" },
+        "comment": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["menuItemId", "rating", "createdAt"]
+    },
     "ChatMessage": {
       "title": "Chat Message",
       "description": "A message in a chat conversation.",
@@ -26,6 +77,18 @@
     }
   },
   "firestore": {
+    "users/{userId}": {
+      "schema": "User",
+      "description": "Collection of user profiles."
+    },
+    "reservations/{reservationId}": {
+      "schema": "Reservation",
+      "description": "Collection of table reservations."
+    },
+    "reviews/{reviewId}": {
+      "schema": "Review",
+      "description": "Collection of item reviews."
+    },
     "chat_messages/{messageId}": {
       "schema": "ChatMessage",
       "description": "Collection of chatbot messages."

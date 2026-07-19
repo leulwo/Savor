@@ -16,6 +16,7 @@
     "@vis.gl/react-google-maps": "^1.9.0",
     "@vitejs/plugin-react": "^5.0.4",
     "axios": "^1.18.1",
+    "date-fns": "^4.4.0",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "firebase": "^12.16.0",
@@ -24,6 +25,7 @@
     "motion": "^12.23.24",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "recharts": "^3.9.2",
     "vite": "^6.2.3"
   },
   "devDependencies": {

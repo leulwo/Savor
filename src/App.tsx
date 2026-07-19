@@ -24,13 +24,16 @@ import {
   User,
   RotateCcw,
   ChevronDown,
-  Truck
+  Truck,
+  Heart,
+  CalendarDays
 } from "lucide-react";
 import { db, auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged } from "./firebase";
 import { collection, onSnapshot, doc, query, where, setDoc, getDoc, deleteDoc } from "firebase/firestore";
 import { APIProvider } from "@vis.gl/react-google-maps";
 import GoogleMapsAddressInput from "./components/GoogleMapsAddressInput";
 import Chatbot from "./components/Chatbot";
+import ItemReviews from "./components/ItemReviews";
 // @ts-ignore
 import chapaLogoImg from "./images.png";
 
@@ -93,6 +96,7 @@ export default function App() {
   
   // Auth state
   const [user, setUser] = useState<any>(null);
+  const [userProfile, setUserProfile] = useState<any>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -118,6 +122,16 @@ export default function App() {
   });
   const [cartLoadedFromDb, setCartLoadedFromDb] = useState(false);
   const [isCartOpen, setIsCartOpen] = useState(false);
+  
+  // Reservation state
+  const [isReservationOpen, setIsReservationOpen] = useState(false);
+  const [reservationForm, setReservationForm] = useState({
+    date: "",
+    time: "19:00",
+    partySize: 2,
+    notes: ""
+  });
+  const [isSubmittingReservation, setIsSubmittingReservation] = useState(false);
   
   // Checkout Form State
   const [isCheckingOut, setIsCheckingOut] = useState(false);
@@ -221,6 +235,29 @@ export default function App() {
         if (!localStorage.getItem("lastCheckoutEmail")) {
           setCustomerEmail(currentUser.email || "");
         }
+        
+        try {
+          const userDocRef = doc(db, "users", currentUser.uid);
+          const userDocSnap = await getDoc(userDocRef);
+          
+          if (!userDocSnap.exists()) {
+            const newProfile = {
+              uid: currentUser.uid,
+              email: currentUser.email || "",
+              displayName: currentUser.displayName || "",
+              savedAddresses: [],
+              favoriteItems: [],
+              createdAt: new Date().toISOString()
+            };
+            await setDoc(userDocRef, newProfile);
+            setUserProfile(newProfile);
+          } else {
+            setUserProfile(userDocSnap.data());
+          }
+        } catch (error) {
+          console.error("Error loading user profile:", error);
+        }
+
         try {
           const cartDoc = await getDoc(doc(db, "carts", currentUser.uid));
           if (cartDoc.exists()) {
@@ -410,6 +447,64 @@ export default function App() {
       await signOut(auth);
     } catch (error) {
       console.error("Logout failed", error);
+    }
+  };
+
+  const handleToggleFavorite = async (itemId: string) => {
+    if (!user || !userProfile) {
+      alert("Please log in to save your favorite dishes.");
+      return;
+    }
+    
+    try {
+      const isFavorite = userProfile.favoriteItems?.includes(itemId);
+      const newFavorites = isFavorite 
+        ? userProfile.favoriteItems.filter((id: string) => id !== itemId)
+        : [...(userProfile.favoriteItems || []), itemId];
+      
+      await setDoc(doc(db, "users", user.uid), {
+        favoriteItems: newFavorites
+      }, { merge: true });
+      
+      setUserProfile((prev: any) => ({ ...prev, favoriteItems: newFavorites }));
+    } catch (err) {
+      console.error("Failed to toggle favorite:", err);
+    }
+  };
+
+  const handleReservationSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) {
+      alert("Please sign in to make a reservation.");
+      return;
+    }
+    
+    setIsSubmittingReservation(true);
+    try {
+      const reservation = {
+        userId: user.uid,
+        customerName: user.displayName || customerName,
+        customerEmail: user.email || customerEmail,
+        customerPhone: customerPhone,
+        date: reservationForm.date,
+        time: reservationForm.time,
+        partySize: reservationForm.partySize,
+        notes: reservationForm.notes,
+        status: 'pending',
+        createdAt: new Date().toISOString()
+      };
+      
+      const resRef = doc(collection(db, "reservations"));
+      await setDoc(resRef, reservation);
+      
+      alert("Reservation requested successfully! We will confirm shortly.");
+      setIsReservationOpen(false);
+      setReservationForm({ date: "", time: "19:00", partySize: 2 });
+    } catch (error) {
+      console.error("Reservation failed:", error);
+      alert("Failed to submit reservation. Please try again.");
+    } finally {
+      setIsSubmittingReservation(false);
     }
   };
 
@@ -663,6 +758,13 @@ export default function App() {
 
           {/* Action Header Items */}
           <div className="flex items-center space-x-3 relative">
+            <button
+              onClick={() => setIsReservationOpen(true)}
+              className="hidden sm:flex items-center space-x-2 p-2 px-4 bg-stone-900 hover:bg-amber-600 text-white rounded-xl transition-all cursor-pointer font-bold text-xs"
+            >
+              <CalendarDays className="w-4 h-4" />
+              <span>Book Table</span>
+            </button>
             {user ? (
               <div className="relative">
                 <button
@@ -867,6 +969,17 @@ export default function App() {
                             </span>
                           ))}
                         </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleToggleFavorite(dish.id);
+                          }}
+                          className="absolute top-3 right-3 p-1.5 bg-white/90 backdrop-blur-md rounded-full shadow-sm hover:scale-110 transition-transform cursor-pointer z-10"
+                        >
+                          <Heart 
+                            className={`w-4 h-4 ${userProfile?.favoriteItems?.includes(dish.id) ? 'fill-rose-500 text-rose-500' : 'text-stone-400'}`} 
+                          />
+                        </button>
                         <span className="absolute bottom-3 right-3 bg-white/90 backdrop-blur-md text-stone-900 text-[10px] font-semibold px-2 py-0.5 rounded-md flex items-center shadow-sm">
                           <Clock className="w-3.5 h-3.5 mr-1 text-amber-600" />
                           {dish.prepTime || '15 mins'}
@@ -1924,6 +2037,11 @@ export default function App() {
                   {checkoutSettings.isOpen && <span className="font-mono bg-white/20 px-2 py-1 rounded">{(expandedProduct.price * expandedQuantity).toFixed(2)} ETB</span>}
                 </button>
               </div>
+
+              {/* Reviews Section */}
+              <div className="mt-8">
+                <ItemReviews menuItemId={expandedProduct.id} user={user} />
+              </div>
             </div>
           </div>
         </div>
@@ -1978,6 +2096,98 @@ export default function App() {
         </div>
       </footer>
       <Chatbot />
+      
+      {/* Reservation Drawer Overlay */}
+      {isReservationOpen && (
+        <div className="fixed inset-0 bg-black/45 z-50 flex justify-center items-center backdrop-blur-xs p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden animate-scale-up font-sans">
+            <div className="p-5 border-b border-stone-100 flex items-center justify-between bg-stone-50">
+              <div className="flex items-center space-x-2.5">
+                <CalendarDays className="w-5 h-5 text-stone-800" />
+                <h3 className="font-serif text-lg font-bold text-stone-900">Book a Table</h3>
+              </div>
+              <button
+                onClick={() => setIsReservationOpen(false)}
+                className="p-1 text-stone-400 hover:text-stone-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleReservationSubmit} className="p-6 space-y-4">
+              <div className="space-y-3">
+                <div className="flex gap-3">
+                  <div className="flex-1">
+                    <label className="block text-xs font-bold text-stone-700 mb-1">Date</label>
+                    <input
+                      type="date"
+                      required
+                      min={new Date().toISOString().split('T')[0]}
+                      value={reservationForm.date}
+                      onChange={(e) => setReservationForm({...reservationForm, date: e.target.value})}
+                      className="w-full px-3 py-2 border border-stone-200 rounded-lg text-sm bg-stone-50 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <label className="block text-xs font-bold text-stone-700 mb-1">Time</label>
+                    <input
+                      type="time"
+                      required
+                      value={reservationForm.time}
+                      onChange={(e) => setReservationForm({...reservationForm, time: e.target.value})}
+                      className="w-full px-3 py-2 border border-stone-200 rounded-lg text-sm bg-stone-50 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-stone-700 mb-1">Party Size</label>
+                  <select
+                    value={reservationForm.partySize}
+                    onChange={(e) => setReservationForm({...reservationForm, partySize: parseInt(e.target.value)})}
+                    className="w-full px-3 py-2 border border-stone-200 rounded-lg text-sm bg-stone-50 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                  >
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                      <option key={n} value={n}>{n} {n === 1 ? 'Person' : 'People'}</option>
+                    ))}
+                    <option value={11}>More than 10</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-stone-700 mb-1">Special Requests (Optional)</label>
+                  <textarea
+                    value={reservationForm.notes}
+                    onChange={(e) => setReservationForm({...reservationForm, notes: e.target.value})}
+                    placeholder="Any allergies, special requests, etc."
+                    rows={2}
+                    className="w-full px-3 py-2 border border-stone-200 rounded-lg text-sm bg-stone-50 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                  />
+                </div>
+                
+                {!user && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 flex items-start space-x-2 mt-4">
+                    <User className="w-4 h-4 shrink-0 mt-0.5" />
+                    <p>Please log in from the main menu before making a reservation so we can associate it with your profile.</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="pt-4 border-t border-stone-100 flex justify-end">
+                <button
+                  type="submit"
+                  disabled={isSubmittingReservation || !user}
+                  className="bg-stone-900 hover:bg-amber-600 text-white font-bold py-2.5 px-6 rounded-xl transition-colors disabled:opacity-50 text-sm flex items-center space-x-2 cursor-pointer"
+                >
+                  {isSubmittingReservation ? (
+                    <span className="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full" />
+                  ) : (
+                    <CheckCircle className="w-4 h-4" />
+                  )}
+                  <span>{isSubmittingReservation ? 'Requesting...' : 'Request Booking'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
     </APIProvider>
   );

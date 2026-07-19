@@ -10,8 +10,6 @@ import { Settings, Save, AlertCircle, CheckCircle, RotateCcw, Truck, CreditCard,
 export default function CheckoutSettingsPanel() {
   const [serviceTaxPercent, setServiceTaxPercent] = useState<number>(15);
   const [flatFeeETB, setFlatFeeETB] = useState<number>(0);
-  const [shipdayDeliveryMinutes, setShipdayDeliveryMinutes] = useState<number>(20);
-  const [shipdayPickupMinutes, setShipdayPickupMinutes] = useState<number>(10);
   const [enableCOD, setEnableCOD] = useState<boolean>(true);
   const [isOpen, setIsOpen] = useState<boolean>(true);
   const [loading, setLoading] = useState(false);
@@ -31,8 +29,6 @@ export default function CheckoutSettingsPanel() {
         if (data) {
           setServiceTaxPercent(data.serviceTaxPercent !== undefined ? data.serviceTaxPercent : 15);
           setFlatFeeETB(data.flatFeeETB !== undefined ? data.flatFeeETB : 0);
-          setShipdayDeliveryMinutes(data.shipdayDeliveryMinutes !== undefined ? data.shipdayDeliveryMinutes : 20);
-          setShipdayPickupMinutes(data.shipdayPickupMinutes !== undefined ? data.shipdayPickupMinutes : 10);
           setEnableCOD(data.enableCOD !== undefined ? data.enableCOD : true);
           setIsOpen(data.isOpen !== undefined ? data.isOpen : true);
         }
@@ -57,8 +53,6 @@ export default function CheckoutSettingsPanel() {
         body: JSON.stringify({
           serviceTaxPercent,
           flatFeeETB,
-          shipdayDeliveryMinutes,
-          shipdayPickupMinutes,
           enableCOD,
           isOpen
         })
@@ -192,44 +186,6 @@ export default function CheckoutSettingsPanel() {
             </div>
             
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1.5 flex items-center">
-                    <Truck className="w-3 h-3 mr-1" />
-                    Delivery Arrival Time
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="number"
-                      min="1"
-                      required
-                      value={shipdayDeliveryMinutes}
-                      onChange={e => setShipdayDeliveryMinutes(parseInt(e.target.value) || 0)}
-                      className="w-full text-xs bg-stone-50/50 border border-stone-300 rounded-xl pl-3 pr-16 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
-                    />
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-stone-400">MINS</span>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1.5 flex items-center">
-                    <RotateCcw className="w-3 h-3 mr-1" />
-                    Requested Pickup Time (After Cooking)
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="number"
-                      min="1"
-                      required
-                      value={shipdayPickupMinutes}
-                      onChange={e => setShipdayPickupMinutes(parseInt(e.target.value) || 0)}
-                      className="w-full text-xs bg-stone-50/50 border border-stone-300 rounded-xl pl-3 pr-16 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
-                    />
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-stone-400">MINS</span>
-                  </div>
-                </div>
-              </div>
-
               <div className="flex flex-col space-y-3 p-4 bg-blue-50/30 rounded-2xl border border-blue-100">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-2 text-blue-700">
