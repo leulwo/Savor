@@ -147,6 +147,12 @@ export default function App() {
   const [paymentMethod, setPaymentMethod] = useState<'chapa' | 'cash'>('chapa');
   const [checkoutLoading, setCheckoutLoading] = useState(false);
   
+  // Promo Code & Loyalty State
+  const [promoCodeInput, setPromoCodeInput] = useState("");
+  const [appliedPromo, setAppliedPromo] = useState<any>(null);
+  const [promoError, setPromoError] = useState("");
+  const [usePoints, setUsePoints] = useState(false);
+  
   // Product Expansion State
   const [expandedProduct, setExpandedProduct] = useState<MenuItem | null>(null);
   const [expandedQuantity, setExpandedQuantity] = useState(1);
@@ -537,7 +543,65 @@ export default function App() {
 
   const cartTotal = cart.reduce((acc, item) => acc + (item.menuItem.price * item.quantity), 0);
   const taxAmount = cartTotal * (checkoutSettings.serviceTaxPercent / 100);
-  const finalTotal = cartTotal + taxAmount + checkoutSettings.flatFeeETB;
+  
+  let discountAmount = 0;
+  if (appliedPromo) {
+    if (appliedPromo.type === 'percentage') {
+      discountAmount = cartTotal * (appliedPromo.value / 100);
+      if (appliedPromo.maxDiscount) {
+        discountAmount = Math.min(discountAmount, appliedPromo.maxDiscount);
+      }
+    } else {
+      discountAmount = appliedPromo.value;
+    }
+  }
+
+  let pointsDiscount = 0;
+  let pointsUsed = 0;
+  // 1 point = 1 ETB
+  if (usePoints && userProfile?.points > 0) {
+    pointsDiscount = Math.min(userProfile.points, (cartTotal + taxAmount + checkoutSettings.flatFeeETB - discountAmount));
+    pointsUsed = pointsDiscount;
+  }
+
+  const finalTotal = Math.max(0, cartTotal + taxAmount + checkoutSettings.flatFeeETB - discountAmount - pointsDiscount);
+  // Earn 1 point for every 100 ETB spent (on final total after discounts, before tax/fees preferably, but we'll just use finalTotal)
+  const pointsEarned = Math.floor(finalTotal / 100);
+
+  const handleApplyPromo = async () => {
+    if (!promoCodeInput) return;
+    setPromoError("");
+    setAppliedPromo(null);
+    try {
+      const docRef = doc(db, 'promoCodes', promoCodeInput.toUpperCase());
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        const promo = docSnap.data();
+        if (!promo.active) {
+          setPromoError("This promo code is inactive.");
+          return;
+        }
+        if (promo.expiresAt && new Date(promo.expiresAt) < new Date()) {
+          setPromoError("This promo code has expired.");
+          return;
+        }
+        if (promo.minOrderAmount && cartTotal < promo.minOrderAmount) {
+          setPromoError(`Minimum order amount of ${promo.minOrderAmount} ETB required.`);
+          return;
+        }
+        if (promo.maxUsages && promo.usageCount >= promo.maxUsages) {
+          setPromoError("This promo code has reached its usage limit.");
+          return;
+        }
+        setAppliedPromo(promo);
+        setPromoCodeInput("");
+      } else {
+        setPromoError("Invalid promo code.");
+      }
+    } catch (e) {
+      setPromoError("Error verifying promo code.");
+    }
+  };
 
   const handleCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -592,7 +656,11 @@ export default function App() {
             items: cart,
             userId: user?.uid,
             serviceTax: taxAmount,
-            flatFee: checkoutSettings.flatFeeETB
+            flatFee: checkoutSettings.flatFeeETB,
+            promoCode: appliedPromo?.code,
+            discountAmount,
+            pointsUsed,
+            pointsEarned
           })
         });
         
@@ -645,7 +713,11 @@ export default function App() {
             status: "pending",
             userId: user?.uid,
             serviceTax: taxAmount,
-            flatFee: checkoutSettings.flatFeeETB
+            flatFee: checkoutSettings.flatFeeETB,
+            promoCode: appliedPromo?.code,
+            discountAmount,
+            pointsUsed,
+            pointsEarned
           })
         });
         const data = await res.json();
@@ -1269,6 +1341,59 @@ export default function App() {
             {/* Footer Summary & Main Action */}
             {cart.length > 0 && (
               <div className="p-6 border-t border-stone-150 bg-stone-50">
+                
+                {isCheckingOut && (
+                  <div className="mb-4 space-y-3 pb-4 border-b border-stone-200">
+                    <div>
+                      <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1">Promo Code</label>
+                      <div className="flex space-x-2">
+                        <input
+                          type="text"
+                          value={promoCodeInput}
+                          onChange={(e) => setPromoCodeInput(e.target.value)}
+                          placeholder="Enter code"
+                          disabled={!!appliedPromo}
+                          className="flex-1 text-xs border border-stone-355 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 bg-white"
+                        />
+                        {appliedPromo ? (
+                          <button
+                            type="button"
+                            onClick={() => setAppliedPromo(null)}
+                            className="bg-stone-200 text-stone-700 px-3 py-2 rounded-lg text-xs font-bold"
+                          >
+                            Remove
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={handleApplyPromo}
+                            className="bg-stone-900 text-white px-3 py-2 rounded-lg text-xs font-bold"
+                          >
+                            Apply
+                          </button>
+                        )}
+                      </div>
+                      {promoError && <p className="text-rose-500 text-[10px] mt-1">{promoError}</p>}
+                    </div>
+
+                    {userProfile?.points > 0 && (
+                      <div className="flex items-center justify-between bg-white p-3 rounded-xl border border-stone-200 shadow-sm">
+                        <div className="flex items-center space-x-2">
+                          <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
+                          <div>
+                            <p className="text-xs font-bold text-stone-900">Use Loyalty Points</p>
+                            <p className="text-[10px] text-stone-500">You have {userProfile.points} points ({userProfile.points} ETB)</p>
+                          </div>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input type="checkbox" className="sr-only peer" checked={usePoints} onChange={() => setUsePoints(!usePoints)} />
+                          <div className="w-9 h-5 bg-stone-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-stone-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-600"></div>
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="space-y-1.5 mb-4 text-xs text-stone-600">
                   <div className="flex justify-between">
                     <span>Subtotal</span>
@@ -1288,10 +1413,29 @@ export default function App() {
                       <span className="text-emerald-700 font-bold">FREE</span>
                     )}
                   </div>
+                  {appliedPromo && (
+                    <div className="flex justify-between text-emerald-700 font-semibold">
+                      <span>Promo ({appliedPromo.code})</span>
+                      <span className="font-mono">-{discountAmount.toFixed(2)} ETB</span>
+                    </div>
+                  )}
+                  {usePoints && pointsUsed > 0 && (
+                    <div className="flex justify-between text-amber-600 font-semibold">
+                      <span>Points Used</span>
+                      <span className="font-mono">-{pointsUsed.toFixed(2)} ETB</span>
+                    </div>
+                  )}
                   <div className="flex justify-between text-stone-900 font-bold text-sm pt-2 border-t border-stone-200">
                     <span>Total Bill:</span>
                     <span className="font-mono text-amber-700">{finalTotal.toFixed(2)} ETB</span>
                   </div>
+                  {isCheckingOut && finalTotal > 0 && (
+                    <div className="text-right mt-1">
+                      <span className="text-[10px] text-stone-500 font-semibold">
+                        Earns <strong className="text-amber-600">{pointsEarned}</strong> points
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {!isCheckingOut ? (

@@ -74,6 +74,10 @@ export interface Order {
     status: string;
     simulated?: boolean;
   };
+  promoCode?: string;
+  discountAmount?: number;
+  pointsUsed?: number;
+  pointsEarned?: number;
 }
 
 export interface VpsStats {
@@ -94,6 +98,21 @@ export interface UserProfile {
   displayName: string;
   savedAddresses: string[];
   favoriteItems: string[];
+  points: number; // loyalty points
+  createdAt: string;
+}
+
+export interface PromoCode {
+  id?: string;
+  code: string;
+  type: 'percentage' | 'fixed';
+  value: number; // percentage (e.g. 10 for 10%) or fixed amount (e.g. 50 ETB)
+  minOrderAmount?: number;
+  maxDiscount?: number;
+  active: boolean;
+  expiresAt?: string;
+  usageCount: number;
+  maxUsages?: number;
   createdAt: string;
 }
 

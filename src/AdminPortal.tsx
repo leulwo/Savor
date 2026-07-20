@@ -9,7 +9,8 @@ import AdminChat from "./components/AdminChat";
 import ReservationManager from "./components/ReservationManager";
 import KitchenDisplaySystem from "./components/KitchenDisplaySystem";
 import TeamManager from "./components/TeamManager";
-import { Utensils, Settings, LogOut, LayoutDashboard, MessageSquare, CalendarDays, ChefHat, ShoppingBag } from "lucide-react";
+import PromoManager from "./components/PromoManager";
+import { Utensils, Settings, LogOut, LayoutDashboard, MessageSquare, CalendarDays, ChefHat, ShoppingBag, Percent } from "lucide-react";
 import { db, auth } from "./firebase";
 import { collection, query, where, orderBy, onSnapshot, doc, getDoc, setDoc, getDocs } from "firebase/firestore";
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "firebase/auth";
@@ -25,7 +26,7 @@ export default function AdminPortal() {
 
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
-  const [activeTab, setActiveTab] = useState<'overview' | 'menu' | 'orders' | 'chat' | 'reservations' | 'kds' | 'settings'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'menu' | 'orders' | 'chat' | 'reservations' | 'kds' | 'marketing' | 'settings'>('overview');
   const [totalUnread, setTotalUnread] = useState(0);
   const [lastSeenTimestamp, setLastSeenTimestamp] = useState<number>(() => {
     const saved = localStorage.getItem("admin_last_seen_chat_time");
@@ -353,6 +354,18 @@ export default function AdminPortal() {
               <span>Settings</span>
             </button>
           )}
+          
+          {(adminRole === 'admin' || adminRole === 'manager') && (
+            <button
+              onClick={() => setActiveTab('marketing')}
+              className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
+                activeTab === 'marketing' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+              }`}
+            >
+              <Percent className="w-4 h-4" />
+              <span>Marketing & Loyalty</span>
+            </button>
+          )}
         </nav>
 
         <div className="p-4 border-t border-stone-200">
@@ -395,6 +408,12 @@ export default function AdminPortal() {
             <div className="space-y-8 animate-fade-in max-w-4xl mx-auto">
               <CheckoutSettingsPanel />
               <TeamManager currentUserEmail={adminUser?.email || ''} userRole={adminRole} />
+            </div>
+          )}
+
+          {activeTab === 'marketing' && (
+            <div className="animate-fade-in max-w-5xl mx-auto space-y-8">
+              <PromoManager />
             </div>
           )}
 

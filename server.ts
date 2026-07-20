@@ -107,6 +107,33 @@ async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number
   }
 }
 
+
+async function applyLoyaltyAndPromo(orderData: any, db: any) {
+  try {
+    if (orderData.promoCode) {
+      const promoRef = doc(db, "promoCodes", orderData.promoCode);
+      const promoSnap = await getDoc(promoRef);
+      if (promoSnap.exists()) {
+        const promo = promoSnap.data();
+        await updateDoc(promoRef, { usageCount: (promo.usageCount || 0) + 1 });
+      }
+    }
+    
+    if (orderData.userId && (orderData.pointsUsed > 0 || orderData.pointsEarned > 0)) {
+      const userRef = doc(db, "users", orderData.userId);
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        const user = userSnap.data();
+        const currentPoints = user.points || 0;
+        const newPoints = currentPoints - (orderData.pointsUsed || 0) + (orderData.pointsEarned || 0);
+        await updateDoc(userRef, { points: newPoints });
+      }
+    }
+  } catch (error) {
+    console.error("[LOYALTY] Error applying loyalty/promo:", error);
+  }
+}
+
 // 0. Category Endpoints
 app.get("/api/categories", async (req, res) => {
   try {
@@ -244,10 +271,15 @@ app.post("/api/orders", async (req, res) => {
       createdAt: new Date().toISOString(),
       userId: orderData.userId || null,
       serviceTax: orderData.serviceTax || 0,
-      flatFee: orderData.flatFee || 0
+      flatFee: orderData.flatFee || 0,
+      promoCode: orderData.promoCode || null,
+      discountAmount: orderData.discountAmount || 0,
+      pointsUsed: orderData.pointsUsed || 0,
+      pointsEarned: orderData.pointsEarned || 0
     };
 
     await setDoc(doc(db, "orders", orderId), newOrder);
+    await applyLoyaltyAndPromo(newOrder, db);
     
     res.json({ success: true, order: newOrder });
   } catch (error: any) {
@@ -322,6 +354,7 @@ app.post("/api/chapa/webhook", async (req, res) => {
           });
           
           console.log(`[CHAPA WEBHOOK] Successfully verified payment for order ${txRef}`);
+          if (orderData.paymentStatus !== "completed") { await applyLoyaltyAndPromo(orderData, db); }
         } 
         
         // Handle REFUND
@@ -409,7 +442,11 @@ app.post("/api/chapa/initialize", async (req, res) => {
       createdAt: new Date().toISOString(),
       userId: req.body.userId || null,
       serviceTax: req.body.serviceTax || 0,
-      flatFee: req.body.flatFee || 0
+      flatFee: req.body.flatFee || 0,
+      promoCode: req.body.promoCode || null,
+      discountAmount: req.body.discountAmount || 0,
+      pointsUsed: req.body.pointsUsed || 0,
+      pointsEarned: req.body.pointsEarned || 0
     };
 
     await setDoc(doc(db, "orders", tx_ref), newOrder);
@@ -496,6 +533,7 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
             status: "pending",
             receipt: receiptInfo
           });
+          if (orderData.paymentStatus !== "completed") { await applyLoyaltyAndPromo(orderData, db); }
 
           const updatedDoc = await getDoc(orderRef);
           return res.json({ success: true, status: "completed", order: { id: updatedDoc.id, ...updatedDoc.data() } });
@@ -529,6 +567,7 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
         status: "pending",
         receipt: receiptInfo
       });
+      if (orderData.paymentStatus !== "completed") { await applyLoyaltyAndPromo(orderData, db); }
       const finalDoc = await getDoc(orderRef);
       return res.json({ success: true, status: "completed", order: { id: finalDoc.id, ...finalDoc.data() }, simulated: true });
     }
@@ -867,10 +906,10 @@ app.get("/api/shipday/test", async (req, res) => {
 app.post("/api/shipday/webhook", async (req, res) => {
   try {
     const token = req.query.token || req.headers['x-shipday-token'];
-    const expectedToken = process.env.SHIPDAY_WEBHOOK_TOKEN;
+    const expectedToken = process.env.SHIPDAY_WEBHOOK_TOKEN ? String(process.env.SHIPDAY_WEBHOOK_TOKEN).trim() : "";
 
-    // Only verify if a token is configured in environment
-    if (expectedToken && token !== expectedToken) {
+    // Only verify if a token is configured in environment as a non-empty string
+    if (expectedToken && expectedToken !== "" && token !== expectedToken) {
       console.warn("[SHIPDAY WEBHOOK] Unauthorized access attempt with invalid token.");
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -878,12 +917,32 @@ app.post("/api/shipday/webhook", async (req, res) => {
     const payload = req.body;
     console.log("[SHIPDAY WEBHOOK] Received payload:", JSON.stringify(payload, null, 2));
 
-    // Shipday sends orderNumber (our Firestore order ID) and status
-    const orderId = payload.orderNumber || payload.order_number || payload.orderId || payload.order_id;
-    const shipdayStatus = payload.status || payload.orderStatus || payload.order_status;
+    // Helper to extract values from nested or top-level objects in the webhook payload
+    const extractValue = (obj: any, keys: string[]): any => {
+      if (!obj || typeof obj !== 'object') return undefined;
+      for (const key of keys) {
+        if (obj[key] !== undefined) return obj[key];
+      }
+      // Check common nested structures like obj.order, obj.data, etc.
+      const nestedContainers = ['order', 'data', 'eventData', 'payload'];
+      for (const container of nestedContainers) {
+        if (obj[container] && typeof obj[container] === 'object') {
+          const val = extractValue(obj[container], keys);
+          if (val !== undefined) return val;
+        }
+      }
+      return undefined;
+    };
 
-    if (orderId && shipdayStatus) {
-      console.log(`[SHIPDAY WEBHOOK] Updating order ${orderId} status to: ${shipdayStatus}`);
+    // Extract orderNumber/orderId and status robustly
+    const orderIdRaw = extractValue(payload, ['orderNumber', 'order_number', 'orderId', 'order_id', 'id']);
+    const shipdayStatusRaw = extractValue(payload, ['status', 'orderStatus', 'order_status', 'state', 'event', 'deliveryStatus', 'delivery_status']);
+
+    if (orderIdRaw && shipdayStatusRaw) {
+      const orderId = String(orderIdRaw).trim();
+      const shipdayStatus = String(shipdayStatusRaw).trim();
+
+      console.log(`[SHIPDAY WEBHOOK] Found order ${orderId} and status: ${shipdayStatus}`);
       const orderRef = doc(db, "orders", orderId);
       
       const updateData: any = {
@@ -891,13 +950,48 @@ app.post("/api/shipday/webhook", async (req, res) => {
         shipdayLastUpdate: new Date().toISOString()
       };
 
-      // Map Shipday status to our internal order status
-      const normalizedStatus = (shipdayStatus || "").toUpperCase();
+      // Clean up the status string to make comparisons more forgiving
+      const normalizedStatus = shipdayStatus
+        .toUpperCase()
+        .replace(/[.\-\s]+/g, '_')
+        .trim();
+
       console.log(`[SHIPDAY WEBHOOK] Normalized status for order ${orderId}: ${normalizedStatus}`);
       
-      const completionStatuses = ["COMPLETED", "DELIVERED", "COMPLETE", "DONE", "FINISHED"];
-      const cancellationStatuses = ["CANCELLED", "DELETED", "REJECTED"];
-      const activeStatuses = ["ASSIGNED", "STARTED", "PICKED_UP", "ARRIVED", "ACTIVE", "DISPATCHED"];
+      const completionStatuses = [
+        "COMPLETED", 
+        "DELIVERED", 
+        "COMPLETE", 
+        "DONE", 
+        "FINISHED", 
+        "DELIVERY_COMPLETED", 
+        "ORDER_COMPLETED",
+        "SUCCESS", 
+        "SUCCESSFUL", 
+        "ALREADY_DELIVERED"
+      ];
+      const cancellationStatuses = [
+        "CANCELLED", 
+        "CANCELED",
+        "DELETED", 
+        "REJECTED", 
+        "FAILED", 
+        "NOT_DELIVERED",
+        "DELIVERY_FAILED",
+        "ORDER_CANCELLED"
+      ];
+      const activeStatuses = [
+        "ASSIGNED", 
+        "STARTED", 
+        "PICKED_UP", 
+        "ARRIVED", 
+        "ACTIVE", 
+        "DISPATCHED", 
+        "ON_THE_WAY", 
+        "IN_TRANSIT", 
+        "OUT_FOR_DELIVERY",
+        "PICKUP"
+      ];
 
       if (completionStatuses.includes(normalizedStatus)) {
         updateData.status = "delivered";
@@ -926,6 +1020,8 @@ app.post("/api/shipday/webhook", async (req, res) => {
 
       await setDoc(orderRef, updateData, { merge: true });
       console.log(`[SHIPDAY WEBHOOK] Order ${orderId} successfully updated in Firestore with status: ${normalizedStatus}`);
+    } else {
+      console.warn(`[SHIPDAY WEBHOOK] Webhook received but orderIdRaw (${orderIdRaw}) or shipdayStatusRaw (${shipdayStatusRaw}) is missing.`, payload);
     }
 
     res.json({ success: true });
