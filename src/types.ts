@@ -102,6 +102,26 @@ export interface UserProfile {
   createdAt: string;
 }
 
+export interface GlobalSettings {
+  // General
+  restaurantName?: string;
+  logoUrl?: string;
+
+  // Checkout
+  serviceTaxPercent?: number;
+  flatFeeETB?: number;
+  enableCOD?: boolean;
+  isOpen?: boolean;
+
+  // Features
+  enableMarketing?: boolean;
+  enableLoyalty?: boolean;
+  enableReservations?: boolean;
+  enableChatbot?: boolean;
+  
+  updatedAt?: string;
+}
+
 export interface PromoCode {
   id?: string;
   code: string;

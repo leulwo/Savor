@@ -422,13 +422,12 @@ app.post("/api/chapa/initialize", async (req, res) => {
     
     console.log(`[CHAPA INITIALIZE] Base URL resolved to: ${baseUrl} (Host: ${requestHost}, Proto: ${requestProto})`);
 
-    const chapaPayload = {
+    const chapaPayload: any = {
       amount: amount.toString(),
       currency: "ETB",
       email: email,
       first_name: first_name,
       last_name: last_name,
-      phone_number: phone_number || "",
       tx_ref: tx_ref,
       callback_url: `${baseUrl}/api/chapa/webhook`,
       return_url: `${baseUrl}/?status=success&tx_ref=${tx_ref}`,
@@ -437,6 +436,9 @@ app.post("/api/chapa/initialize", async (req, res) => {
         description: `Payment for ${items?.length || 1} items`
       }
     };
+    if (phone_number) {
+      chapaPayload.phone_number = phone_number;
+    }
 
     const newOrder = {
       id: tx_ref,

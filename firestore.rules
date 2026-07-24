@@ -24,6 +24,17 @@ service cloud.firestore {
       allow write: if isStaff();
     }
 
+    // Settings (Global & Checkout Settings): Anyone can read, staff can write
+    match /settings/{document=**} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
+    // Users: Users can read/write their own profile, staff can read/write all
+    match /users/{userId} {
+      allow read, write: if isStaff() || (request.auth != null && request.auth.uid == userId);
+    }
+
     // Admins List: Only existing admins can read/write this.
     // This prevents regular users from elevating their privileges.
     match /admins/{email} {

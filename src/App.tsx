@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from "react";
+import { Routes, Route, useNavigate, useParams, Link, useLocation } from "react-router-dom";
 import { MenuItem, Order, OrderItem } from "./types";
 import AdminPortal from "./AdminPortal";
 import {
@@ -84,18 +85,14 @@ export const groupOrdersByDate = (ordersList: Order[]) => {
   return groups;
 };
 
-export default function App() {
-  // Simple routing for Admin Portal
-  if (window.location.pathname.startsWith('/admin')) {
-    return <AdminPortal />;
-  }
-
+export function MainApp() {
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>("");
 
   // Auth state
   const [user, setUser] = useState<any>(null);
+  const [isGuest, setIsGuest] = useState(false);
   const [userProfile, setUserProfile] = useState<any>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
@@ -153,10 +150,32 @@ export default function App() {
   const [promoError, setPromoError] = useState("");
   const [usePoints, setUsePoints] = useState(false);
 
-  // Product Expansion State
   const [expandedProduct, setExpandedProduct] = useState<MenuItem | null>(null);
   const [expandedQuantity, setExpandedQuantity] = useState(1);
   const [activeImageIndex, setActiveImageIndex] = useState(0);
+
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const match = location.pathname.match(/^\/food\/(.+)/);
+    if (match) {
+      const foodId = match[1];
+      const food = menu.find(m => m.id === foodId);
+      if (food) {
+        setExpandedProduct(food);
+      }
+    } else {
+      if (expandedProduct && location.pathname === "/") {
+        setExpandedProduct(null);
+      }
+    }
+  }, [location.pathname, menu]);
+
+  const handleCloseProductModal = () => {
+    setExpandedProduct(null);
+    navigate("/");
+  };
 
   // Success Order Overlay
   const [placedOrder, setPlacedOrder] = useState<Order | null>(null);
@@ -168,6 +187,8 @@ export default function App() {
     isOpen: true,
     enableCOD: true
   });
+  
+  const [globalSettings, setGlobalSettings] = useState<any>(null);
 
   const [subscribeEmail, setSubscribeEmail] = useState("");
   const [subscribeStatus, setSubscribeStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
@@ -214,8 +235,19 @@ export default function App() {
     }, (error) => {
       console.error("Failed to subscribe to checkout settings", error);
     });
+    
+    const unsubscribeGlobal = onSnapshot(doc(db, "settings", "global"), (docSnap) => {
+      if (docSnap.exists()) {
+        setGlobalSettings(docSnap.data());
+      }
+    }, (error) => {
+      console.error("Failed to subscribe to global settings", error);
+    });
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      unsubscribeGlobal();
+    };
   }, []);
 
   const [activeOrderId, setActiveOrderId] = useState<string | null>(() => {
@@ -626,6 +658,7 @@ export default function App() {
     localStorage.setItem("lastCheckoutSpecialInstructions", specialInstructions.trim());
 
     if (subscribeNewsletter && customerEmail) {
+      localStorage.setItem("newsletterAgreed", "true");
       fetch("/api/subscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -690,7 +723,9 @@ export default function App() {
             window.location.href = data.checkoutUrl;
           }
         } else {
-          alert("Failed to initialize Chapa payment: " + (data.error || "Unknown error"));
+          console.error("Chapa initialization failed details:", data);
+          const errorMsg = typeof data.error === 'object' ? JSON.stringify(data.error) : (data.error || "Unknown error");
+          alert("Failed to initialize Chapa payment: " + errorMsg);
           setCheckoutLoading(false);
         }
       } else {
@@ -764,28 +799,42 @@ export default function App() {
     );
   }
 
-  if (!user) {
+  if (!user && !isGuest) {
     return (
       <div className="min-h-screen bg-stone-50 flex flex-col items-center justify-center px-4 py-12">
         <div className="bg-white p-8 md:p-10 rounded-3xl shadow-xl max-w-md w-full text-center border border-stone-200">
-          <div className="bg-amber-600 text-white p-4 rounded-2xl mx-auto w-16 h-16 flex items-center justify-center mb-6 shadow-md shadow-amber-600/20">
-            <Utensils className="w-8 h-8" />
-          </div>
-          <h1 className="font-serif text-3xl font-bold text-stone-900 mb-2">Welcome to SAVORY</h1>
-          <p className="text-stone-500 mb-8 text-sm">Please sign in to view our menu and place orders.</p>
+          {globalSettings?.logoUrl ? (
+            <img src={globalSettings.logoUrl} alt="Logo" className="mx-auto h-16 w-auto object-contain rounded-2xl mb-6 shadow-md shadow-amber-600/20" />
+          ) : (
+            <div className="bg-amber-600 text-white p-4 rounded-2xl mx-auto w-16 h-16 flex items-center justify-center mb-6 shadow-md shadow-amber-600/20">
+              <Utensils className="w-8 h-8" />
+            </div>
+          )}
+          <h1 className="font-serif text-3xl font-bold text-stone-900 mb-2">Welcome to {globalSettings?.restaurantName || "SAVORY"}</h1>
+          <p className="text-stone-500 mb-6 text-sm">Sign in to sync your profile and rewards, or browse as a guest.</p>
 
-          <button
-            onClick={handleLogin}
-            disabled={loginLoading}
-            className="w-full flex items-center justify-center space-x-3 bg-stone-900 hover:bg-stone-800 text-white p-4 rounded-xl font-bold transition-all cursor-pointer disabled:opacity-50"
-          >
-            {loginLoading ? (
-              <span className="animate-spin inline-block w-5 h-5 border-2 border-white border-t-transparent rounded-full" />
-            ) : (
-              <User className="w-5 h-5" />
-            )}
-            <span>{loginLoading ? "Signing in..." : "Sign in with Google"}</span>
-          </button>
+          <div className="space-y-3">
+            <button
+              onClick={handleLogin}
+              disabled={loginLoading}
+              className="w-full flex items-center justify-center space-x-3 bg-stone-900 hover:bg-stone-800 text-white p-4 rounded-xl font-bold transition-all cursor-pointer disabled:opacity-50 shadow-md"
+            >
+              {loginLoading ? (
+                <span className="animate-spin inline-block w-5 h-5 border-2 border-white border-t-transparent rounded-full" />
+              ) : (
+                <User className="w-5 h-5" />
+              )}
+              <span>{loginLoading ? "Signing in..." : "Sign in with Google"}</span>
+            </button>
+
+            <button
+              onClick={() => setIsGuest(true)}
+              className="w-full flex items-center justify-center space-x-2 bg-stone-100 hover:bg-amber-600 hover:text-white text-stone-800 p-3.5 rounded-xl font-bold transition-all cursor-pointer border border-stone-300 text-sm"
+            >
+              <span>Browse Menu as Guest</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          </div>
 
           {loginError && (
             <div className="mt-4 p-3.5 bg-red-50 border border-red-100 rounded-xl text-left text-xs text-red-700 leading-relaxed font-sans">
@@ -819,24 +868,32 @@ export default function App() {
           <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
             {/* Logo / Brand */}
             <div className="flex items-center space-x-3 cursor-pointer">
-              <div className="bg-amber-600 text-white p-2.5 rounded-2xl shadow-md shadow-amber-600/10 flex items-center justify-center">
-                <Utensils className="w-6 h-6" />
-              </div>
+              {globalSettings?.logoUrl ? (
+                <img src={globalSettings.logoUrl} alt="Logo" className="h-10 w-auto object-contain rounded" />
+              ) : (
+                <div className="bg-amber-600 text-white p-2.5 rounded-2xl shadow-md shadow-amber-600/10 flex items-center justify-center">
+                  <Utensils className="w-6 h-6" />
+                </div>
+              )}
               <div>
-                <span className="font-serif text-xl font-bold tracking-tight text-stone-900 block leading-none">SAVORY</span>
+                <span className="font-serif text-xl font-bold tracking-tight text-stone-900 block leading-none">
+                  {globalSettings?.restaurantName || "SAVORY"}
+                </span>
                 <span className="text-[10px] font-mono tracking-widest text-stone-500 uppercase">Gourmet Dining</span>
               </div>
             </div>
 
             {/* Action Header Items */}
             <div className="flex items-center space-x-3 relative">
-              <button
-                onClick={() => setIsReservationOpen(true)}
-                className="hidden sm:flex items-center space-x-2 p-2 px-4 bg-stone-900 hover:bg-amber-600 text-white rounded-xl transition-all cursor-pointer font-bold text-xs"
-              >
-                <CalendarDays className="w-4 h-4" />
-                <span>Book Table</span>
-              </button>
+              {globalSettings?.enableReservations !== false && (
+                <button
+                  onClick={() => setIsReservationOpen(true)}
+                  className="hidden sm:flex items-center space-x-2 p-2 px-4 bg-stone-900 hover:bg-amber-600 text-white rounded-xl transition-all cursor-pointer font-bold text-xs"
+                >
+                  <CalendarDays className="w-4 h-4" />
+                  <span>Book Table</span>
+                </button>
+              )}
               {user ? (
                 <div className="relative">
                   <button
@@ -999,101 +1056,65 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Menu Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {/* Menu Paper Design */}
+              <div className="bg-[#FAF9F6] border-2 border-stone-200 shadow-xl max-w-4xl mx-auto p-6 md:p-16 relative">
+                {/* Decorative border */}
+                <div className="absolute inset-3 border border-stone-300 pointer-events-none"></div>
+                
+                <div className="text-center mb-10 relative z-10">
+                  <h2 className="font-serif text-2xl md:text-3xl font-bold text-stone-900 tracking-widest uppercase">The Menu</h2>
+                  <div className="w-16 h-px bg-stone-400 mx-auto mt-4"></div>
+                </div>
+
                 {filteredMenu.length === 0 ? (
-                  <div className="col-span-full text-center py-20 bg-white border border-stone-200 rounded-3xl">
+                  <div className="text-center py-20 bg-transparent relative z-10">
                     <Utensils className="w-12 h-12 text-stone-300 mx-auto mb-3 stroke-1" />
                     <p className="text-stone-800 font-semibold text-sm">No dishes found matching your selection.</p>
                     <p className="text-xs text-stone-500 mt-1">Add items in the Admin Portal to customize this template catalog!</p>
                   </div>
                 ) : (
-                  filteredMenu.map(dish => (
-                    <div
-                      key={dish.id}
-                      className="bg-white border border-stone-200 rounded-2xl overflow-hidden hover:shadow-md transition-all flex flex-col justify-between cursor-pointer"
-                      onClick={() => {
-                        setExpandedProduct(dish);
-                        setExpandedQuantity(1);
-                        setActiveImageIndex(0);
-                      }}
-                    >
-                      {/* Dish Image */}
-                      <div className="relative h-48 bg-stone-100 overflow-hidden group">
-                        <img
-                          src={dish.image}
-                          alt={dish.name}
-                          className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
-                        />
-                        <div className="absolute top-3 left-3 flex flex-col gap-1.5 items-start">
-                          {dish.popular && (
-                            <span className="bg-amber-500 text-stone-950 text-[9px] font-bold px-2 py-0.5 rounded-md font-mono tracking-wide uppercase flex items-center shadow-sm">
-                              <Star className="w-3 h-3 mr-0.5 fill-current" />
-                              Popular Choice
-                            </span>
-                          )}
-                          {dish.promoStickers?.map(sticker => (
-                            <span key={sticker} className="bg-white text-stone-950 text-[9px] font-bold px-2 py-0.5 rounded-md font-mono tracking-wide uppercase shadow-sm border border-stone-200">
-                              {sticker}
-                            </span>
-                          ))}
-                        </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleToggleFavorite(dish.id);
-                          }}
-                          className="absolute top-3 right-3 p-1.5 bg-white/90 backdrop-blur-md rounded-full shadow-sm hover:scale-110 transition-transform cursor-pointer z-10"
-                        >
-                          <Heart
-                            className={`w-4 h-4 ${userProfile?.favoriteItems?.includes(dish.id) ? 'fill-rose-500 text-rose-500' : 'text-stone-400'}`}
-                          />
-                        </button>
-                        <span className="absolute bottom-3 right-3 bg-white/90 backdrop-blur-md text-stone-900 text-[10px] font-semibold px-2 py-0.5 rounded-md flex items-center shadow-sm">
-                          <Clock className="w-3.5 h-3.5 mr-1 text-amber-600" />
-                          {dish.prepTime || '15 mins'}
-                        </span>
-                      </div>
-
-                      {/* Content */}
-                      <div className="p-5 flex-grow flex flex-col justify-between space-y-4">
-                        <div className="space-y-2">
-                          <div className="flex justify-between items-start gap-x-2">
-                            <div>
-                              <h3 className="font-serif font-bold text-stone-950 text-base leading-snug group-hover:text-amber-700 transition-colors">{dish.name}</h3>
-                              {dish.menuTiming && dish.menuTiming !== "All Day" && (
-                                <span className="inline-block bg-amber-50 text-amber-700 text-[9px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded mt-1 border border-amber-200/50">
-                                  {dish.menuTiming}
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-right shrink-0">
-                              <span className="font-mono text-sm font-bold text-amber-700 whitespace-nowrap block">{dish.price.toFixed(2)} ETB</span>
-                            </div>
+                  <div className="space-y-8 relative z-10">
+                    {filteredMenu.map(dish => (
+                      <Link
+                        key={dish.id}
+                        to={`/food/${dish.id}`}
+                        className="group flex flex-col sm:flex-row justify-between items-baseline cursor-pointer hover:bg-stone-100/50 p-3 -mx-3 rounded transition-colors"
+                      >
+                        <div className="flex-1 pr-4 w-full">
+                          <div className="flex items-baseline w-full">
+                            <h3 className="font-serif font-bold text-base md:text-lg text-stone-900 group-hover:text-amber-700 whitespace-nowrap">{dish.name}</h3>
+                            <div className="flex-grow border-b-2 border-dotted border-stone-300 mx-3 opacity-50 relative top-[-6px]"></div>
                           </div>
-                          <p className="text-xs text-stone-500 leading-relaxed line-clamp-2">{dish.description}</p>
+                          <p className="text-xs md:text-sm text-stone-600 mt-1 font-serif italic line-clamp-2">{dish.description}</p>
+                          <div className="flex space-x-2 mt-2 font-sans items-center">
+                            {dish.popular && <span className="text-[10px] font-bold text-amber-700 uppercase tracking-widest">★ Popular</span>}
+                            {dish.prepTime && <span className="text-[10px] text-stone-500 uppercase tracking-widest">{dish.popular ? '• ' : ''}{dish.prepTime}</span>}
+                            {dish.menuTiming && dish.menuTiming !== "All Day" && (
+                              <span className="text-[10px] text-emerald-700 uppercase tracking-widest">• {dish.menuTiming}</span>
+                            )}
+                          </div>
                         </div>
-
-                        {/* Pricing Details & Action */}
-                        <div className="pt-3 border-t border-stone-100 flex items-center justify-between">
-                          <span className="text-[10px] text-stone-400 font-mono font-medium block">
-                            Base: <strong className="text-stone-700 font-semibold">{(dish.basePrice !== undefined ? dish.basePrice : dish.price).toFixed(2)} ETB</strong>
-                          </span>
+                        <div className="pl-0 sm:pl-4 mt-3 sm:mt-0 shrink-0 flex flex-row sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto">
+                          <span className="font-mono text-base md:text-lg font-bold text-stone-900 group-hover:text-amber-700 transition-colors">{dish.price.toFixed(2)} ETB</span>
                           <button
                             disabled={!checkoutSettings.isOpen}
                             onClick={(e) => {
+                              e.preventDefault();
                               e.stopPropagation();
                               addToCart(dish);
                             }}
-                            className={`text-xs font-semibold px-3.5 py-1.5 rounded-lg transition-colors z-10 ${checkoutSettings.isOpen ? 'bg-stone-900 hover:bg-amber-600 text-white cursor-pointer' : 'bg-stone-300 text-stone-500 cursor-not-allowed'
-                              }`}
+                            className={`mt-0 sm:mt-2 text-[10px] font-bold uppercase tracking-widest px-4 py-1.5 rounded transition-colors ${
+                              checkoutSettings.isOpen 
+                                ? 'bg-stone-200 text-stone-800 hover:bg-amber-600 hover:text-white' 
+                                : 'bg-stone-200 text-stone-400 cursor-not-allowed'
+                            }`}
                           >
-                            {checkoutSettings.isOpen ? 'Add to Cart' : 'Closed'}
+                            {checkoutSettings.isOpen ? 'Add' : 'Closed'}
                           </button>
                         </div>
-                      </div>
-                    </div>
-                  ))
+                      </Link>
+                    ))}
+                  </div>
                 )}
               </div>
             </div>
@@ -1274,18 +1295,20 @@ export default function App() {
                           />
                         </div>
 
-                        <div className="flex items-start space-x-2 pt-1 pb-1">
-                          <input
-                            type="checkbox"
-                            id="subscribeNewsletter"
-                            checked={subscribeNewsletter}
-                            onChange={(e) => setSubscribeNewsletter(e.target.checked)}
-                            className="mt-0.5 rounded border-stone-300 text-amber-600 focus:ring-amber-500"
-                          />
-                          <label htmlFor="subscribeNewsletter" className="text-xs text-stone-600 leading-tight">
-                            Keep me updated on new menus, special offers, and events via email.
-                          </label>
-                        </div>
+                        {globalSettings?.enableMarketing !== false && localStorage.getItem("newsletterAgreed") !== "true" && (
+                          <div className="flex items-start space-x-2 pt-1 pb-1">
+                            <input
+                              type="checkbox"
+                              id="subscribeNewsletter"
+                              checked={subscribeNewsletter}
+                              onChange={(e) => setSubscribeNewsletter(e.target.checked)}
+                              className="mt-0.5 rounded border-stone-300 text-amber-600 focus:ring-amber-500"
+                            />
+                            <label htmlFor="subscribeNewsletter" className="text-xs text-stone-600 leading-tight">
+                              Keep me updated on new menus, special offers, and events via email.
+                            </label>
+                          </div>
+                        )}
 
                         {/* Payment Method Selector */}
                         <div className="pt-2">
@@ -1574,7 +1597,13 @@ export default function App() {
                   <div className="space-y-1.5">
                     {selectedReceiptOrder.items.map((item, idx) => (
                       <div key={idx} className="flex justify-between text-[11px]">
-                        <span className="text-stone-800">{item.quantity}x {item.menuItem?.name || "Gourmet Dish"}</span>
+                        <span className="text-stone-800">
+                          {item.quantity}x {item.menuItem?.id ? (
+                            <Link to={`/food/${item.menuItem.id}`} onClick={() => setSelectedReceiptOrder(null)} className="hover:text-amber-700 hover:underline">{item.menuItem.name}</Link>
+                          ) : (
+                            item.menuItem?.name || "Gourmet Dish"
+                          )}
+                        </span>
                         <span className="font-mono text-stone-950 font-medium">{((item.menuItem?.price || 0) * item.quantity).toFixed(2)} ETB</span>
                       </div>
                     ))}
@@ -1924,7 +1953,13 @@ export default function App() {
                               <div className="pt-2 border-t border-stone-200">
                                 {order.items.map((item, idx) => (
                                   <div key={idx} className="flex justify-between text-xs py-1">
-                                    <span className="text-stone-700">{item.quantity}x {item.menuItem?.name || "Dish"}</span>
+                                    <span className="text-stone-700">
+                                      {item.quantity}x {item.menuItem?.id ? (
+                                        <Link to={`/food/${item.menuItem.id}`} onClick={() => setIsMyOrdersOpen(false)} className="hover:text-amber-700 hover:underline">{item.menuItem.name}</Link>
+                                      ) : (
+                                        item.menuItem?.name || "Dish"
+                                      )}
+                                    </span>
                                     <span className="font-mono font-medium text-stone-900">{((item.menuItem?.price || 0) * item.quantity).toFixed(2)} ETB</span>
                                   </div>
                                 ))}
@@ -2049,7 +2084,7 @@ export default function App() {
 
         {/* Expanded Product Modal */}
         {expandedProduct && (
-          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={() => setExpandedProduct(null)}>
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={handleCloseProductModal}>
             <div
               className="bg-white rounded-3xl max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl animate-scale-up"
               onClick={e => e.stopPropagation()}
@@ -2077,7 +2112,7 @@ export default function App() {
                       </div>
                     )}
                     <button
-                      onClick={() => setExpandedProduct(null)}
+                      onClick={handleCloseProductModal}
                       className="absolute top-4 right-4 bg-black/50 hover:bg-black text-white p-2 rounded-full backdrop-blur-md transition-colors"
                     >
                       <X className="w-5 h-5" />
@@ -2160,7 +2195,7 @@ export default function App() {
                           addToCart(expandedProduct);
                         }
                       }
-                      setExpandedProduct(null);
+                      handleCloseProductModal();
                     }}
                     className={`flex-grow font-bold py-3.5 px-6 rounded-xl transition-colors w-full flex justify-between items-center text-sm tracking-wide shadow-md ${checkoutSettings.isOpen ? 'bg-stone-900 hover:bg-amber-600 text-white cursor-pointer' : 'bg-stone-300 text-stone-500 cursor-not-allowed'
                       }`}
@@ -2228,10 +2263,10 @@ export default function App() {
             </div>
           </div>
           <div className="max-w-7xl mx-auto px-6 mt-8 pt-6 border-t border-stone-800 text-center text-xs text-stone-500">
-            © {new Date().getFullYear()} Savory Gourmet Restaurant • All rights reserved.
+            © {new Date().getFullYear()} {globalSettings?.restaurantName || "Savory Gourmet Restaurant"} • All rights reserved.
           </div>
         </footer>
-        <Chatbot />
+        {globalSettings?.enableChatbot !== false && <Chatbot />}
 
         {/* Reservation Drawer Overlay */}
         {isReservationOpen && (
@@ -2326,5 +2361,14 @@ export default function App() {
         )}
       </div>
     </APIProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/admin/*" element={<AdminPortal />} />
+      <Route path="*" element={<MainApp />} />
+    </Routes>
   );
 }

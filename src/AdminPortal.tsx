@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from "react";
-import { MenuItem, Order } from "./types";
+import { MenuItem, Order, GlobalSettings } from "./types";
 import MenuManager from "./components/MenuManager";
 import OrderList from "./components/OrderList";
 import CategoryManager from "./components/CategoryManager";
-import CheckoutSettingsPanel from "./components/CheckoutSettingsPanel";
+import GlobalSettingsPanel from "./components/GlobalSettingsPanel";
 import AnalyticsDashboard from "./components/AnalyticsDashboard";
 import AdminChat from "./components/AdminChat";
 import ReservationManager from "./components/ReservationManager";
@@ -28,6 +28,8 @@ export default function AdminPortal() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [activeTab, setActiveTab] = useState<'overview' | 'menu' | 'orders' | 'chat' | 'reservations' | 'kds' | 'marketing' | 'settings'>('overview');
   const [totalUnread, setTotalUnread] = useState(0);
+  const [globalSettings, setGlobalSettings] = useState<GlobalSettings | null>(null);
+  
   const [lastSeenTimestamp, setLastSeenTimestamp] = useState<number>(() => {
     const saved = localStorage.getItem("admin_last_seen_chat_time");
     return saved ? parseInt(saved) : Date.now();
@@ -185,8 +187,8 @@ export default function AdminPortal() {
 
   const fetchMenu = async () => {
     try {
-      const menuRes = await fetch("/api/menu");
-      const menuData = await menuRes.json();
+      const snapshot = await getDocs(collection(db, "menu"));
+      const menuData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as MenuItem[];
       setMenu(menuData);
     } catch (e) {
       console.error("Failed to sync menu state", e);
@@ -202,7 +204,16 @@ export default function AdminPortal() {
       setOrders(updatedOrders);
     });
 
-    return () => unsubscribe();
+    const unsubscribeSettings = onSnapshot(doc(db, "settings", "global"), (doc) => {
+      if (doc.exists()) {
+        setGlobalSettings(doc.data() as GlobalSettings);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+      unsubscribeSettings();
+    };
   }, []);
 
   if (isAdminAuthLoading) {
@@ -219,7 +230,7 @@ export default function AdminPortal() {
             </div>
             <div>
               <span className="font-serif text-xl font-bold tracking-tight block leading-none">Admin Portal</span>
-              <span className="text-[10px] font-mono tracking-widest text-stone-500 uppercase">Savory Restaurant</span>
+              <span className="text-[10px] font-mono tracking-widest text-stone-500 uppercase">{globalSettings?.restaurantName || "Savory Restaurant"}</span>
             </div>
           </div>
           <form onSubmit={handleAdminLogin} className="space-y-4">
@@ -258,18 +269,27 @@ export default function AdminPortal() {
   }
 
   return (
-    <div className="min-h-screen bg-stone-50 text-stone-900 font-sans flex flex-col md:flex-row">
-      <aside className="w-full md:w-64 bg-white border-r border-stone-200 flex-shrink-0 flex flex-col min-h-screen sticky top-0">
-        <div className="p-6 pb-8">
-          <span className="font-serif text-2xl font-bold tracking-tight block leading-none">Admin</span>
-          <span className="text-[10px] font-mono tracking-widest text-stone-500 uppercase">Savory Restaurant</span>
+    <div className="h-[100dvh] bg-stone-50 text-stone-900 font-sans flex flex-col md:flex-row overflow-hidden">
+      <aside className="w-full md:w-64 bg-white border-b md:border-b-0 md:border-r border-stone-200 flex-shrink-0 flex flex-col z-20 h-auto md:h-full">
+        <div className="p-4 md:p-6 md:pb-8 flex justify-between items-center md:block">
+          <div>
+            <span className="font-serif text-xl md:text-2xl font-bold tracking-tight block leading-none">Admin</span>
+            <span className="text-[10px] font-mono tracking-widest text-stone-500 uppercase">{globalSettings?.restaurantName || "Savory Restaurant"}</span>
+          </div>
+          <button 
+            onClick={handleAdminLogout}
+            className="md:hidden flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 transition-colors"
+          >
+            <LogOut className="w-3 h-3" />
+            <span>Log Out</span>
+          </button>
         </div>
         
-        <nav className="flex-1 px-4 space-y-1">
+        <nav className="flex-1 px-4 md:space-y-1 flex flex-row md:flex-col overflow-x-auto md:overflow-visible gap-2 md:gap-0 pb-2 md:pb-0 scrollbar-hide">
           {(adminRole === 'admin' || adminRole === 'manager') && (
             <button
               onClick={() => setActiveTab('overview')}
-              className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
+              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
                 activeTab === 'overview' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
               }`}
             >
@@ -281,7 +301,7 @@ export default function AdminPortal() {
           {(adminRole === 'admin' || adminRole === 'manager' || adminRole === 'kitchen') && (
             <button
               onClick={() => setActiveTab('menu')}
-              className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
+              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
                 activeTab === 'menu' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
               }`}
             >
@@ -294,7 +314,7 @@ export default function AdminPortal() {
             <>
               <button
                 onClick={() => setActiveTab('orders')}
-                className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
+                className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
                   activeTab === 'orders' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
                 }`}
               >
@@ -302,51 +322,55 @@ export default function AdminPortal() {
                 <span>Orders</span>
               </button>
               
-              <button
-                onClick={() => setActiveTab('chat')}
-                className={`w-full flex items-center justify-between px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
-                  activeTab === 'chat' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-                }`}
-              >
-                <div className="flex items-center space-x-3">
-                  <MessageSquare className="w-4 h-4" />
-                  <span>Inbox</span>
-                </div>
-                {totalUnread > 0 && (
-                  <span className="bg-amber-500 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center">
-                    {totalUnread}
-                  </span>
-                )}
-              </button>
+              {globalSettings?.enableChatbot !== false && (
+                <button
+                  onClick={() => setActiveTab('chat')}
+                  className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
+                    activeTab === 'chat' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                  }`}
+                >
+                  <div className="flex items-center space-x-2 md:space-x-3">
+                    <MessageSquare className="w-4 h-4" />
+                    <span>Inbox</span>
+                  </div>
+                  {totalUnread > 0 && (
+                    <span className="bg-amber-500 text-white text-[10px] font-bold w-4 h-4 md:w-5 md:h-5 rounded-full flex items-center justify-center">
+                      {totalUnread}
+                    </span>
+                  )}
+                </button>
+              )}
               
-              <button
-                onClick={() => setActiveTab('reservations')}
-                className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
-                  activeTab === 'reservations' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-                }`}
-              >
-                <CalendarDays className="w-4 h-4" />
-                <span>Reservations</span>
-              </button>
+              {globalSettings?.enableReservations !== false && (
+                <button
+                  onClick={() => setActiveTab('reservations')}
+                  className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
+                    activeTab === 'reservations' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                  }`}
+                >
+                  <CalendarDays className="w-4 h-4" />
+                  <span>Reservations</span>
+                </button>
+              )}
             </>
           )}
 
           {(adminRole === 'admin' || adminRole === 'manager' || adminRole === 'kitchen') && (
             <button
               onClick={() => setActiveTab('kds')}
-              className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
+              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
                 activeTab === 'kds' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
               }`}
             >
               <ChefHat className="w-4 h-4" />
-              <span>Kitchen (KDS)</span>
+              <span>KDS</span>
             </button>
           )}
 
           {(adminRole === 'admin' || adminRole === 'manager') && (
             <button
               onClick={() => setActiveTab('settings')}
-              className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
+              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
                 activeTab === 'settings' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
               }`}
             >
@@ -355,20 +379,20 @@ export default function AdminPortal() {
             </button>
           )}
           
-          {(adminRole === 'admin' || adminRole === 'manager') && (
+          {(adminRole === 'admin' || adminRole === 'manager') && globalSettings?.enableMarketing !== false && (
             <button
               onClick={() => setActiveTab('marketing')}
-              className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
+              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
                 activeTab === 'marketing' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
               }`}
             >
               <Percent className="w-4 h-4" />
-              <span>Marketing & Loyalty</span>
+              <span>Marketing</span>
             </button>
           )}
         </nav>
 
-        <div className="p-4 border-t border-stone-200">
+        <div className="hidden md:block p-4 border-t border-stone-200 mt-auto">
           <div className="px-4 py-2 mb-2">
             <p className="text-xs text-stone-500">Logged in as</p>
             <p className="text-sm font-bold text-stone-900 truncate">{adminUser?.email}</p>
@@ -384,20 +408,20 @@ export default function AdminPortal() {
         </div>
       </aside>
       
-      <main className="flex-1 min-w-0 flex flex-col">
-        <header className="bg-white border-b border-stone-200 px-8 py-5 flex justify-between items-center sticky top-0 z-10">
-          <h1 className="text-2xl font-serif font-bold text-stone-900 capitalize">
+      <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
+        <header className="bg-white border-b border-stone-200 px-4 md:px-8 py-3 md:py-5 flex justify-between items-center z-10 shrink-0">
+          <h1 className="text-lg md:text-2xl font-serif font-bold text-stone-900 capitalize">
             {activeTab === 'kds' ? 'Kitchen Display System' : activeTab}
           </h1>
           <button 
             onClick={() => window.location.href = '/'}
-            className="flex items-center space-x-2 text-stone-500 hover:text-stone-900 transition-colors text-sm font-medium cursor-pointer"
+            className="flex items-center space-x-1 md:space-x-2 text-stone-500 hover:text-stone-900 transition-colors text-xs md:text-sm font-medium cursor-pointer"
           >
             <span>View Live Site</span>
           </button>
         </header>
 
-        <div className="p-8 flex-1 overflow-y-auto">
+        <div key={activeTab} className="p-4 md:p-8 flex-1 overflow-y-auto">
           {activeTab === 'overview' && (
             <div className="animate-fade-in max-w-5xl mx-auto space-y-8">
               <AnalyticsDashboard />
@@ -406,7 +430,7 @@ export default function AdminPortal() {
 
           {activeTab === 'settings' && (
             <div className="space-y-8 animate-fade-in max-w-4xl mx-auto">
-              <CheckoutSettingsPanel />
+              <GlobalSettingsPanel />
               <TeamManager currentUserEmail={adminUser?.email || ''} userRole={adminRole} />
             </div>
           )}

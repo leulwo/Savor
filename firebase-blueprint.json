@@ -96,6 +96,9 @@
     "feedback/{feedbackId}": {
       "schema": "Feedback",
       "description": "Collection of customer feedback."
+    },
+    "settings/{settingId}": {
+      "description": "Global and checkout restaurant settings."
     }
   }
 }
