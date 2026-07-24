@@ -14,16 +14,30 @@ import fs from "fs";
 
 dotenv.config();
 
-let firebaseConfig = {};
+let firebaseConfig: any = {
+  apiKey: process.env.VITE_FIREBASE_API_KEY || "",
+  authDomain: process.env.VITE_FIREBASE_AUTH_DOMAIN || "",
+  projectId: process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || "",
+  storageBucket: process.env.VITE_FIREBASE_STORAGE_BUCKET || "",
+  messagingSenderId: process.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "",
+  appId: process.env.VITE_FIREBASE_APP_ID || "",
+  measurementId: process.env.VITE_FIREBASE_MEASUREMENT_ID || ""
+};
+
 try {
-  const configRaw = fs.readFileSync(path.join(process.cwd(), "firebase-applet-config.json"), "utf-8");
-  firebaseConfig = JSON.parse(configRaw);
+  const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+  if (fs.existsSync(configPath)) {
+    const configRaw = fs.readFileSync(configPath, "utf-8");
+    firebaseConfig = { ...firebaseConfig, ...JSON.parse(configRaw) };
+  }
 } catch (e) {
   console.warn("Could not load firebase-applet-config.json", e);
 }
 
 const appFirebase = initializeApp(firebaseConfig);
-const db = getFirestore(appFirebase, (firebaseConfig as any).firestoreDatabaseId || "ai-studio-restaurantwebsit-315fb01e-8f08-42d3-b0aa-03636feabfef");
+const db = firebaseConfig.firestoreDatabaseId 
+  ? getFirestore(appFirebase, firebaseConfig.firestoreDatabaseId)
+  : getFirestore(appFirebase);
 // Note: In typical GCP containers, ADC defaults to default DB. If you created a custom DB ID,
 // you might need `admin.firestore({ databaseId: 'ai-studio-restaurantwebsit-315fb01e-8f08-42d3-b0aa-03636feabfef' })`.
 // Wait, the documentation for custom DB in admin SDK is tricky, we can just fetch collections.
@@ -1049,7 +1063,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[SERVER] Ready! Savory VPS Server running on http://localhost:${PORT}`);
+    console.log(`[SERVER] Ready! on http://localhost:${PORT}`);
   });
 }
 

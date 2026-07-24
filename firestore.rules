@@ -1,8 +1,74 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    
+    // Function to check if the current user is an admin
+    // This looks up the user's email in the 'admins' collection
+    function isStaff() {
+      return request.auth != null && 
+             request.auth.token.email != null &&
+             exists(/databases/$(database)/documents/admins/$(request.auth.token.email.lower()));
+    }
+    
+    // Public Collections: Anyone can view, but only staff can edit
+    match /menu/{document=**} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /categories/{document=**} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /promoCodes/{document=**} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
+    // Admins List: Only existing admins can read/write this.
+    // This prevents regular users from elevating their privileges.
+    match /admins/{email} {
+      allow read, write: if isStaff();
+    }
+
+    // Orders: 
+    // - Anyone can create an order (for guest checkout)
+    // - Users can only read/delete their OWN orders
+    // - Staff can read, update, and delete ALL orders
+    match /orders/{orderId} {
+      allow create: if true;
+      allow read, delete: if isStaff() || (request.auth != null && resource.data.userId == request.auth.uid);
+      allow update: if isStaff();
+    }
+
+    // Carts: 
+    // - Users can read/write their own cart
+    // - Staff can read/write all carts
+    match /carts/{userId} {
+      allow read, write: if isStaff() || (request.auth != null && request.auth.uid == userId);
+    }
+    
+    // Reservations: Anyone can create, only staff can view/manage
+    match /reservations/{document=**} {
+      allow create: if true;
+      allow read, update, delete: if isStaff();
+    }
+
+    // Reviews: Anyone can view and create, only staff can manage
+    match /reviews/{document=**} {
+      allow read, create: if true;
+      allow update, delete: if isStaff();
+    }
+
+    // Chat Messages: Anyone can create and read (required for the chatbot)
+    // Only staff can update/delete
+    match /chat_messages/{document=**} {
+      allow read, create: if true;
+      allow update, delete: if isStaff();
+    }
+
+    // Fallback: Deny everything else securely
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }
