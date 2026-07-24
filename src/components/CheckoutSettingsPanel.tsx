@@ -6,6 +6,8 @@
 
 import React, { useState, useEffect } from "react";
 import { Settings, Save, AlertCircle, CheckCircle, RotateCcw, Truck, CreditCard, ChevronDown, ChevronUp } from "lucide-react";
+import { db } from "../firebase";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 
 export default function CheckoutSettingsPanel() {
   const [serviceTaxPercent, setServiceTaxPercent] = useState<number>(15);
@@ -24,9 +26,9 @@ export default function CheckoutSettingsPanel() {
   useEffect(() => {
     const fetchSettings = async () => {
       try {
-        const res = await fetch("/api/settings");
-        const data = await res.json();
-        if (data) {
+        const docSnap = await getDoc(doc(db, "settings", "checkout"));
+        if (docSnap.exists()) {
+          const data = docSnap.data();
           setServiceTaxPercent(data.serviceTaxPercent !== undefined ? data.serviceTaxPercent : 15);
           setFlatFeeETB(data.flatFeeETB !== undefined ? data.flatFeeETB : 0);
           setEnableCOD(data.enableCOD !== undefined ? data.enableCOD : true);
@@ -47,23 +49,16 @@ export default function CheckoutSettingsPanel() {
     setSuccess(false);
 
     try {
-      const res = await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          serviceTaxPercent,
-          flatFeeETB,
-          enableCOD,
-          isOpen
-        })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setSuccess(true);
-        setTimeout(() => setSuccess(false), 3000);
-      } else {
-        setError(data.error || "Failed to save settings");
-      }
+      await setDoc(doc(db, "settings", "checkout"), {
+        serviceTaxPercent: parseFloat(serviceTaxPercent.toString()) || 0,
+        flatFeeETB: parseFloat(flatFeeETB.toString()) || 0,
+        enableCOD,
+        isOpen,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+      
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 3000);
     } catch (e: any) {
       setError(e.message || "Network error occurred");
     } finally {

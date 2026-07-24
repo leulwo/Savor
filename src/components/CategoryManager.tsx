@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { Category } from "../types";
 import { Plus, Trash2, Tag } from "lucide-react";
+import { db } from "../firebase";
+import { collection, getDocs, doc, setDoc, deleteDoc } from "firebase/firestore";
 
 export default function CategoryManager() {
   const [categories, setCategories] = useState<Category[]>([]);
@@ -9,8 +11,8 @@ export default function CategoryManager() {
 
   const fetchCategories = async () => {
     try {
-      const res = await fetch("/api/categories");
-      const data = await res.json();
+      const snapshot = await getDocs(collection(db, "categories"));
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Category[];
       setCategories(data);
     } catch (e) {
       console.error(e);
@@ -27,16 +29,10 @@ export default function CategoryManager() {
     setLoading(true);
 
     try {
-      const res = await fetch("/api/categories", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim() })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setCategories(data.categories);
-        setName("");
-      }
+      const id = name.trim().toLowerCase().replace(/\s+/g, '-');
+      await setDoc(doc(db, "categories", id), { name: name.trim() });
+      await fetchCategories();
+      setName("");
     } catch (error) {
       console.error(error);
     } finally {
@@ -48,13 +44,8 @@ export default function CategoryManager() {
     if (!confirm("Are you sure you want to delete this category?")) return;
     setLoading(true);
     try {
-      const res = await fetch(`/api/categories/${id}`, {
-        method: "DELETE"
-      });
-      const data = await res.json();
-      if (data.success) {
-        setCategories(data.categories);
-      }
+      await deleteDoc(doc(db, "categories", id));
+      await fetchCategories();
     } catch (error) {
       console.error(error);
     } finally {

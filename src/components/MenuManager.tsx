@@ -6,6 +6,8 @@
 import React, { useState, useEffect } from "react";
 import { MenuItem } from "../types";
 import { Plus, Edit2, Trash2, Save, X, Utensils, Tag, Clock } from "lucide-react";
+import { db } from "../firebase";
+import { doc, setDoc, deleteDoc, collection, getDocs } from "firebase/firestore";
 
 interface MenuManagerProps {
   onMenuUpdated: () => void;
@@ -34,8 +36,8 @@ export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManag
   useEffect(() => {
     const fetchCategories = async () => {
       try {
-        const res = await fetch("/api/categories");
-        const data = await res.json();
+        const snapshot = await getDocs(collection(db, "categories"));
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as {id: string, name: string}[];
         setCategories(data);
         if (data.length > 0 && !category) {
           setCategory(data[0].id);
@@ -133,8 +135,10 @@ export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManag
       .map(url => url.trim())
       .filter(url => url.length > 0);
 
+    const itemId = id || Math.random().toString(36).substring(2, 11);
+
     const payload = {
-      id: id || undefined, // Create if empty
+      id: itemId,
       name,
       description,
       price: parseFloat(price.toString()),
@@ -159,19 +163,10 @@ export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManag
     };
 
     try {
-      const res = await fetch("/api/menu", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setMessage({ type: 'success', text: id ? 'Item updated successfully!' : 'New menu item added successfully!' });
-        onMenuUpdated();
-        resetForm();
-      } else {
-        setMessage({ type: 'error', text: data.error || 'Failed to save menu item.' });
-      }
+      await setDoc(doc(db, "menu", itemId), payload);
+      setMessage({ type: 'success', text: id ? 'Item updated successfully!' : 'New menu item added successfully!' });
+      onMenuUpdated();
+      resetForm();
     } catch (err: any) {
       setMessage({ type: 'error', text: `Connection error: ${err.message}` });
     } finally {
@@ -184,16 +179,10 @@ export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManag
     
     setLoading(true);
     try {
-      const res = await fetch(`/api/menu/${itemId}`, {
-        method: "DELETE"
-      });
-      if (res.ok) {
-        setMessage({ type: 'success', text: 'Item successfully deleted.' });
-        onMenuUpdated();
-        resetForm();
-      } else {
-        setMessage({ type: 'error', text: 'Failed to delete item.' });
-      }
+      await deleteDoc(doc(db, "menu", itemId));
+      setMessage({ type: 'success', text: 'Item successfully deleted.' });
+      onMenuUpdated();
+      resetForm();
     } catch (err: any) {
       setMessage({ type: 'error', text: `Connection error: ${err.message}` });
     } finally {
