@@ -187,7 +187,7 @@ export function MainApp() {
     isOpen: true,
     enableCOD: true
   });
-  
+
   const [globalSettings, setGlobalSettings] = useState<any>(null);
 
   const [subscribeEmail, setSubscribeEmail] = useState("");
@@ -235,7 +235,7 @@ export function MainApp() {
     }, (error) => {
       console.error("Failed to subscribe to checkout settings", error);
     });
-    
+
     const unsubscribeGlobal = onSnapshot(doc(db, "settings", "global"), (docSnap) => {
       if (docSnap.exists()) {
         setGlobalSettings(docSnap.data());
@@ -697,7 +697,14 @@ export function MainApp() {
           })
         });
 
-        const data = await res.json();
+        const resText = await res.text();
+        let data: any = {};
+        try {
+          data = resText ? JSON.parse(resText) : {};
+        } catch (e) {
+          console.error("Failed to parse JSON response from /api/chapa/initialize. Raw response:", resText);
+          throw new Error(`Server response error (${res.status}): ${resText.slice(0, 150) || "Empty response from backend server."}`);
+        }
 
         if (data.success) {
           if (data.simulated) {
@@ -842,18 +849,6 @@ export function MainApp() {
               <p className="opacity-90">{loginError}</p>
             </div>
           )}
-
-          <div className="mt-6 p-4 bg-amber-50/60 border border-amber-100/80 rounded-xl text-left text-[11px] text-stone-600 leading-relaxed font-sans">
-            <p className="font-bold text-amber-800 uppercase tracking-wider mb-1 flex items-center">
-              <span>💡 Embedded Preview Note</span>
-            </p>
-            <p className="mb-1.5">
-              Because this application is running inside a development preview iframe, browser security settings can block the sign-in popup from communicating back.
-            </p>
-            <p className="font-semibold text-stone-800">
-              If sign-in fails or stays loading, click the <span className="underline">"Open in New Tab"</span> icon in the top right of the preview panel to run the app in full mode.
-            </p>
-          </div>
         </div>
       </div>
     );
@@ -879,7 +874,7 @@ export function MainApp() {
                 <span className="font-serif text-xl font-bold tracking-tight text-stone-900 block leading-none">
                   {globalSettings?.restaurantName || "SAVORY"}
                 </span>
-                <span className="text-[10px] font-mono tracking-widest text-stone-500 uppercase">Gourmet Dining</span>
+                <span className="text-[10px] font-mono tracking-widest text-stone-500 uppercase">RESTAURANT</span>
               </div>
             </div>
 
@@ -1023,7 +1018,7 @@ export function MainApp() {
               <div className="flex flex-col md:flex-row justify-between items-start md:items-end border-b border-stone-200 pb-5 gap-y-4">
                 <div>
                   <h2 className="font-serif text-2xl font-bold text-stone-900">Our Menu</h2>
-                  <p className="text-xs text-stone-500 mt-1">Select from our fresh starters, premium mains, decadent desserts, and beverages.</p>
+                  <p className="text-xs text-stone-500 mt-1">Select from our fresh starters, mains, and beverages.</p>
                 </div>
 
                 {/* Search and Category filters */}
@@ -1060,7 +1055,7 @@ export function MainApp() {
               <div className="bg-[#FAF9F6] border-2 border-stone-200 shadow-xl max-w-4xl mx-auto p-6 md:p-16 relative">
                 {/* Decorative border */}
                 <div className="absolute inset-3 border border-stone-300 pointer-events-none"></div>
-                
+
                 <div className="text-center mb-10 relative z-10">
                   <h2 className="font-serif text-2xl md:text-3xl font-bold text-stone-900 tracking-widest uppercase">The Menu</h2>
                   <div className="w-16 h-px bg-stone-400 mx-auto mt-4"></div>
@@ -1070,7 +1065,6 @@ export function MainApp() {
                   <div className="text-center py-20 bg-transparent relative z-10">
                     <Utensils className="w-12 h-12 text-stone-300 mx-auto mb-3 stroke-1" />
                     <p className="text-stone-800 font-semibold text-sm">No dishes found matching your selection.</p>
-                    <p className="text-xs text-stone-500 mt-1">Add items in the Admin Portal to customize this template catalog!</p>
                   </div>
                 ) : (
                   <div className="space-y-8 relative z-10">
@@ -1103,11 +1097,10 @@ export function MainApp() {
                               e.stopPropagation();
                               addToCart(dish);
                             }}
-                            className={`mt-0 sm:mt-2 text-[10px] font-bold uppercase tracking-widest px-4 py-1.5 rounded transition-colors ${
-                              checkoutSettings.isOpen 
-                                ? 'bg-stone-200 text-stone-800 hover:bg-amber-600 hover:text-white' 
-                                : 'bg-stone-200 text-stone-400 cursor-not-allowed'
-                            }`}
+                            className={`mt-0 sm:mt-2 text-[10px] font-bold uppercase tracking-widest px-4 py-1.5 rounded transition-colors ${checkoutSettings.isOpen
+                              ? 'bg-stone-200 text-stone-800 hover:bg-amber-600 hover:text-white'
+                              : 'bg-stone-200 text-stone-400 cursor-not-allowed'
+                              }`}
                           >
                             {checkoutSettings.isOpen ? 'Add' : 'Closed'}
                           </button>
@@ -2220,23 +2213,23 @@ export function MainApp() {
             <div className="md:col-span-1">
               <span className="font-serif text-lg font-bold text-white tracking-tight">About</span>
               <p className="text-xs mt-2 leading-relaxed">
-                We are an located in Addis Ababa Science and Technology University, Ethiopia. We specialize in 
-                offering a range of traditional Ethiopian dishes, made with fresh and high-quality 
-                ingredients. Our menu features a variety of vegetarian and meat options, all prepared 
-                with authentic Ethiopian spices and flavors. Whether you're looking for a quick meal or a 
+                We are an located in Addis Ababa Science and Technology University, Ethiopia. We specialize in
+                offering a range of traditional Ethiopian dishes, made with fresh and high-quality
+                ingredients. Our menu features a variety of vegetarian and meat options, all prepared
+                with authentic Ethiopian spices and flavors. Whether you're looking for a quick meal or a
                 place to relax and enjoy a good meal, we have something for everyone.
               </p>
             </div>
             <div className="space-y-2">
-              <h4 className="text-xs font-bold uppercase tracking-widest text-white">Security & API Gateway</h4>
+              <h4 className="text-xs font-bold uppercase tracking-widest text-white">CONTACT US</h4>
               <p className="text-xs leading-relaxed">
-                Fully integrated with standard local flat-file storage databases and secure Chapa API gateways for telebirr, CBE Birr, and card checkouts.
+                {/* contact us info */}
               </p>
             </div>
             <div className="space-y-2">
-              <h4 className="text-xs font-bold uppercase tracking-widest text-white">Chapa Merchant Key</h4>
+              <h4 className="text-xs font-bold uppercase tracking-widest text-white">Location</h4>
               <p className="text-xs leading-relaxed font-sans">
-                To trigger live payments, supply your merchant credentials under <code className="bg-stone-800 px-1 rounded text-amber-400">CHAPA_SECRET_KEY</code> inside your secure environment secrets panel.
+                {/*add location info */}
               </p>
             </div>
             <div className="space-y-3 md:col-span-1">
@@ -2263,7 +2256,7 @@ export function MainApp() {
             </div>
           </div>
           <div className="max-w-7xl mx-auto px-6 mt-8 pt-6 border-t border-stone-800 text-center text-xs text-stone-500">
-            © {new Date().getFullYear()} {globalSettings?.restaurantName || "Savory Gourmet Restaurant"} • All rights reserved.
+            © {new Date().getFullYear()} {globalSettings?.restaurantName || "Savory"} • All rights reserved.
           </div>
         </footer>
         {globalSettings?.enableChatbot !== false && <Chatbot />}

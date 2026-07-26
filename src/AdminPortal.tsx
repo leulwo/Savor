@@ -29,7 +29,7 @@ export default function AdminPortal() {
   const [activeTab, setActiveTab] = useState<'overview' | 'menu' | 'orders' | 'chat' | 'reservations' | 'kds' | 'marketing' | 'settings'>('overview');
   const [totalUnread, setTotalUnread] = useState(0);
   const [globalSettings, setGlobalSettings] = useState<GlobalSettings | null>(null);
-  
+
   const [lastSeenTimestamp, setLastSeenTimestamp] = useState<number>(() => {
     const saved = localStorage.getItem("admin_last_seen_chat_time");
     return saved ? parseInt(saved) : Date.now();
@@ -65,7 +65,7 @@ export default function AdminPortal() {
         const time = m.createdAt?.toMillis ? m.createdAt.toMillis() : 0;
         return time > lastSeenTimestamp;
       }).length;
-      
+
       setTotalUnread(unread);
     });
 
@@ -159,7 +159,7 @@ export default function AdminPortal() {
         const emailLower = email.toLowerCase();
         const adminDocRef = doc(db, "admins", emailLower);
         const adminDocSnap = await getDoc(adminDocRef);
-        
+
         if (!adminDocSnap.exists() && emailLower !== "admin@savory.com") { // Keep admin@savory.com as fallback if empty
           const adminsSnapshot = await getDocs(collection(db, "admins"));
           if (!adminsSnapshot.empty) {
@@ -167,7 +167,7 @@ export default function AdminPortal() {
             return;
           }
         }
-        
+
         await createUserWithEmailAndPassword(auth, email, password);
       } else {
         await signInWithEmailAndPassword(auth, email, password);
@@ -256,12 +256,8 @@ export default function AdminPortal() {
               </button>
             </div>
           </form>
-          <div className="mt-4 p-3 bg-amber-50/50 border border-amber-100 rounded-lg text-[11px] text-stone-600 leading-normal">
-            <p className="font-bold mb-0.5 text-amber-800">Secure Administrator Access</p>
-            <p>Access is restricted. If you were invited by an admin, select "First time setup" to create your password.</p>
-          </div>
           <div className="mt-6 text-center">
-             <button onClick={() => window.location.href = '/'} className="text-xs text-stone-500 hover:text-stone-800 underline">Back to site</button>
+            <button onClick={() => window.location.href = '/'} className="text-xs text-stone-500 hover:text-stone-800 underline">Back to site</button>
           </div>
         </div>
       </div>
@@ -276,7 +272,7 @@ export default function AdminPortal() {
             <span className="font-serif text-xl md:text-2xl font-bold tracking-tight block leading-none">Admin</span>
             <span className="text-[10px] font-mono tracking-widest text-stone-500 uppercase">{globalSettings?.restaurantName || "Savory Restaurant"}</span>
           </div>
-          <button 
+          <button
             onClick={handleAdminLogout}
             className="md:hidden flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 transition-colors"
           >
@@ -284,26 +280,24 @@ export default function AdminPortal() {
             <span>Log Out</span>
           </button>
         </div>
-        
+
         <nav className="flex-1 px-4 md:space-y-1 flex flex-row md:flex-col overflow-x-auto md:overflow-visible gap-2 md:gap-0 pb-2 md:pb-0 scrollbar-hide">
           {(adminRole === 'admin' || adminRole === 'manager') && (
             <button
               onClick={() => setActiveTab('overview')}
-              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
-                activeTab === 'overview' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-              }`}
+              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${activeTab === 'overview' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                }`}
             >
               <LayoutDashboard className="w-4 h-4" />
               <span>Overview</span>
             </button>
           )}
-          
+
           {(adminRole === 'admin' || adminRole === 'manager' || adminRole === 'kitchen') && (
             <button
               onClick={() => setActiveTab('menu')}
-              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
-                activeTab === 'menu' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-              }`}
+              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${activeTab === 'menu' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                }`}
             >
               <Utensils className="w-4 h-4" />
               <span>Menu</span>
@@ -314,20 +308,18 @@ export default function AdminPortal() {
             <>
               <button
                 onClick={() => setActiveTab('orders')}
-                className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
-                  activeTab === 'orders' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-                }`}
+                className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${activeTab === 'orders' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                  }`}
               >
                 <ShoppingBag className="w-4 h-4" />
                 <span>Orders</span>
               </button>
-              
+
               {globalSettings?.enableChatbot !== false && (
                 <button
                   onClick={() => setActiveTab('chat')}
-                  className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
-                    activeTab === 'chat' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-                  }`}
+                  className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${activeTab === 'chat' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
                 >
                   <div className="flex items-center space-x-2 md:space-x-3">
                     <MessageSquare className="w-4 h-4" />
@@ -340,13 +332,12 @@ export default function AdminPortal() {
                   )}
                 </button>
               )}
-              
+
               {globalSettings?.enableReservations !== false && (
                 <button
                   onClick={() => setActiveTab('reservations')}
-                  className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
-                    activeTab === 'reservations' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-                  }`}
+                  className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${activeTab === 'reservations' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
                 >
                   <CalendarDays className="w-4 h-4" />
                   <span>Reservations</span>
@@ -358,9 +349,8 @@ export default function AdminPortal() {
           {(adminRole === 'admin' || adminRole === 'manager' || adminRole === 'kitchen') && (
             <button
               onClick={() => setActiveTab('kds')}
-              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
-                activeTab === 'kds' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-              }`}
+              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${activeTab === 'kds' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                }`}
             >
               <ChefHat className="w-4 h-4" />
               <span>KDS</span>
@@ -370,21 +360,19 @@ export default function AdminPortal() {
           {(adminRole === 'admin' || adminRole === 'manager') && (
             <button
               onClick={() => setActiveTab('settings')}
-              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
-                activeTab === 'settings' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-              }`}
+              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${activeTab === 'settings' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                }`}
             >
               <Settings className="w-4 h-4" />
               <span>Settings</span>
             </button>
           )}
-          
+
           {(adminRole === 'admin' || adminRole === 'manager') && globalSettings?.enableMarketing !== false && (
             <button
               onClick={() => setActiveTab('marketing')}
-              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${
-                activeTab === 'marketing' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-              }`}
+              className={`flex items-center space-x-2 md:space-x-3 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-xs md:text-sm transition-colors whitespace-nowrap ${activeTab === 'marketing' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                }`}
             >
               <Percent className="w-4 h-4" />
               <span>Marketing</span>
@@ -398,7 +386,7 @@ export default function AdminPortal() {
             <p className="text-sm font-bold text-stone-900 truncate">{adminUser?.email}</p>
             <p className="text-[10px] font-mono text-stone-400 uppercase mt-0.5">{adminRole}</p>
           </div>
-          <button 
+          <button
             onClick={handleAdminLogout}
             className="w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm font-medium text-stone-600 hover:bg-stone-50 transition-colors cursor-pointer"
           >
@@ -407,13 +395,13 @@ export default function AdminPortal() {
           </button>
         </div>
       </aside>
-      
+
       <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
         <header className="bg-white border-b border-stone-200 px-4 md:px-8 py-3 md:py-5 flex justify-between items-center z-10 shrink-0">
           <h1 className="text-lg md:text-2xl font-serif font-bold text-stone-900 capitalize">
             {activeTab === 'kds' ? 'Kitchen Display System' : activeTab}
           </h1>
-          <button 
+          <button
             onClick={() => window.location.href = '/'}
             className="flex items-center space-x-1 md:space-x-2 text-stone-500 hover:text-stone-900 transition-colors text-xs md:text-sm font-medium cursor-pointer"
           >
@@ -444,9 +432,9 @@ export default function AdminPortal() {
           {activeTab === 'menu' && (
             <div className="space-y-8 animate-fade-in max-w-5xl mx-auto">
               <CategoryManager />
-              <MenuManager 
-                menu={menu} 
-                onMenuUpdated={fetchMenu} 
+              <MenuManager
+                menu={menu}
+                onMenuUpdated={fetchMenu}
                 userRole={adminRole}
               />
             </div>
@@ -454,9 +442,9 @@ export default function AdminPortal() {
 
           {activeTab === 'orders' && (
             <div className="animate-fade-in max-w-5xl mx-auto">
-              <OrderList 
-                orders={orders} 
-                onOrderUpdated={() => {}} 
+              <OrderList
+                orders={orders}
+                onOrderUpdated={() => { }}
                 userRole={adminRole}
               />
             </div>

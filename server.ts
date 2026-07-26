@@ -35,7 +35,7 @@ try {
 }
 
 const appFirebase = initializeApp(firebaseConfig);
-const db = firebaseConfig.firestoreDatabaseId 
+const db = firebaseConfig.firestoreDatabaseId
   ? getFirestore(appFirebase, firebaseConfig.firestoreDatabaseId)
   : getFirestore(appFirebase);
 // Note: In typical GCP containers, ADC defaults to default DB. If you created a custom DB ID,
@@ -58,10 +58,10 @@ async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number
     // Fetch settings first to get API Key and Pickup Lead Time
     const settingsSnap = await getDoc(doc(db, "settings", "checkout"));
     const settings = settingsSnap.exists() ? settingsSnap.data() : {};
-    
+
     const shipdayKey = process.env.SHIPDAY_API_KEY || settings.shipdayApiKey;
     const pickupLeadTime = settings.shipdayPickupMinutes || 10;
-    
+
     if (!shipdayKey) {
       console.warn(`[SHIPDAY] Skip: API key not configured for order ${orderId}`);
       return;
@@ -72,7 +72,7 @@ async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number
     if (!docSnap.exists()) return;
 
     const orderData = docSnap.data();
-    
+
     console.log(`[SHIPDAY] Triggering order ${orderId} (Delivery: ${deliveryMinutes || 'auto'}, Pickup Lead: ${pickupLeadTime})...`);
 
     const payload: any = {
@@ -96,7 +96,7 @@ async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number
     };
 
     const shipdayResponse = await axios.post(
-      "https://api.shipday.com/orders", 
+      "https://api.shipday.com/orders",
       payload,
       {
         headers: {
@@ -132,7 +132,7 @@ async function applyLoyaltyAndPromo(orderData: any, db: any) {
         await updateDoc(promoRef, { usageCount: (promo.usageCount || 0) + 1 });
       }
     }
-    
+
     if (orderData.userId && (orderData.pointsUsed > 0 || orderData.pointsEarned > 0)) {
       const userRef = doc(db, "users", orderData.userId);
       const userSnap = await getDoc(userRef);
@@ -165,10 +165,10 @@ app.post("/api/categories", async (req, res) => {
     if (!name) {
       return res.status(400).json({ error: "Category name is required." });
     }
-    
+
     const id = name.toLowerCase().replace(/\s+/g, '-');
     await setDoc(doc(db, "categories", id), { name });
-    
+
     const snapshot = await getDocs(collection(db, "categories"));
     const categories = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, categories });
@@ -181,7 +181,7 @@ app.delete("/api/categories/:id", async (req, res) => {
   try {
     const { id } = req.params;
     await deleteDoc(doc(db, "categories", id));
-    
+
     const snapshot = await getDocs(collection(db, "categories"));
     const categories = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, categories });
@@ -224,9 +224,9 @@ app.post("/api/menu", async (req, res) => {
       promoStickers: item.promoStickers || [],
       galleryImages: item.galleryImages || []
     };
-    
+
     await setDoc(doc(db, "menu", itemId), newItem);
-    
+
     const snapshot = await getDocs(collection(db, "menu"));
     const menu = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, menu });
@@ -239,7 +239,7 @@ app.delete("/api/menu/:id", async (req, res) => {
   try {
     const { id } = req.params;
     await deleteDoc(doc(db, "menu", id));
-    
+
     const snapshot = await getDocs(collection(db, "menu"));
     const menu = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, menu });
@@ -294,7 +294,7 @@ app.post("/api/orders", async (req, res) => {
 
     await setDoc(doc(db, "orders", orderId), newOrder);
     await applyLoyaltyAndPromo(newOrder, db);
-    
+
     res.json({ success: true, order: newOrder });
   } catch (error: any) {
     res.status(500).json({ error: "Failed to place order", details: error.message });
@@ -312,14 +312,14 @@ app.patch("/api/orders/:id", async (req, res) => {
 
     if (Object.keys(updates).length > 0) {
       await updateDoc(doc(db, "orders", id), updates);
-      
+
       // Trigger Shipday ONLY when status becomes 'ready'
       if (status === "ready") {
         console.log(`[SHIPDAY] Status for ${id} changed to ready. Syncing...`);
         triggerShipday(id, db, deliveryMinutes);
       }
     }
-    
+
     const orderRef = doc(db, "orders", id);
     const docSnap = await getDoc(orderRef);
     res.json({ success: true, order: { id: docSnap.id, ...docSnap.data() } });
@@ -341,7 +341,7 @@ app.post("/api/chapa/webhook", async (req, res) => {
     if (txRef) {
       const orderRef = doc(db, "orders", txRef);
       const docSnap = await getDoc(orderRef);
-      
+
       if (docSnap.exists()) {
         const orderData = docSnap.data();
 
@@ -366,11 +366,11 @@ app.post("/api/chapa/webhook", async (req, res) => {
             receipt: receiptInfo,
             updatedAt: new Date().toISOString()
           });
-          
+
           console.log(`[CHAPA WEBHOOK] Successfully verified payment for order ${txRef}`);
           if (orderData.paymentStatus !== "completed") { await applyLoyaltyAndPromo(orderData, db); }
-        } 
-        
+        }
+
         // Handle REFUND
         else if (status === 'refund.success' || status === 'refunded') {
           console.log(`[CHAPA WEBHOOK] Handling refund event for order ${txRef}`);
@@ -415,11 +415,11 @@ app.post("/api/chapa/initialize", async (req, res) => {
     const chapaKey = process.env.CHAPA_SECRET_KEY;
 
     // Dynamically detect the base URL of the request (works across development and preview containers)
-    const requestHost = req.headers.host || "ais-pre-x3ydxtiptsndkmo4idfvrk-375232154731.europe-west2.run.app";
+    const requestHost = req.headers.host || "https://donated-habitat-treo-weapon.trycloudflare.com";
     const requestProto = (req.headers['x-forwarded-proto'] as string) || req.protocol || "https";
     const requestOrigin = `${requestProto}://${requestHost}`;
     const baseUrl = process.env.APP_URL || requestOrigin;
-    
+
     console.log(`[CHAPA INITIALIZE] Base URL resolved to: ${baseUrl} (Host: ${requestHost}, Proto: ${requestProto})`);
 
     const chapaPayload: any = {
@@ -473,14 +473,24 @@ app.post("/api/chapa/initialize", async (req, res) => {
         const response = await fetch("https://api.chapa.co/v1/transaction/initialize", {
           method: "POST",
           headers: {
-            "Authorization": `Bearer ${chapaKey}`,
+            "Authorization": `Bearer ${chapaKey.trim()}`,
             "Content-Type": "application/json"
           },
           body: JSON.stringify(chapaPayload)
         });
 
-        const chapaData = await response.json();
-        
+        const rawText = await response.text();
+        let chapaData: any = {};
+        try {
+          chapaData = JSON.parse(rawText);
+        } catch (e) {
+          console.error("[CHAPA INITIALIZE] Invalid JSON from Chapa API:", rawText);
+          return res.status(502).json({ success: false, error: "Chapa API returned non-JSON response", raw: rawText.slice(0, 200) });
+        }
+
+        console.log(`[CHAPA INITIALIZE] Response status: ${response.status}`, chapaData);
+
+
         if (chapaData.status === "success" && chapaData.data?.checkout_url) {
           await updateDoc(doc(db, "orders", tx_ref), { chapaCheckoutUrl: chapaData.data.checkout_url });
           return res.json({ success: true, checkoutUrl: chapaData.data.checkout_url, txRef: tx_ref, simulated: false });
@@ -488,10 +498,12 @@ app.post("/api/chapa/initialize", async (req, res) => {
           return res.status(400).json({ success: false, error: chapaData.message || "Chapa API initialization failed", details: chapaData });
         }
       } catch (err: any) {
+        console.error("[CHAPA INITIALIZE] Fetch error:", err);
         return res.status(500).json({ success: false, error: "Chapa connection failed: " + err.message });
       }
     } else {
-      return res.status(400).json({ success: false, error: "Missing CHAPA_SECRET_KEY in the backend environment." });
+      console.warn("[CHAPA INITIALIZE] CHAPA_SECRET_KEY missing or placeholder in .env");
+      return res.status(400).json({ success: false, error: "Missing CHAPA_SECRET_KEY in backend environment (.env)." });
     }
   } catch (error: any) {
     res.status(500).json({ error: "Failed to initialize payment", details: error.message });
@@ -544,8 +556,8 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
             simulated: false
           };
 
-          await updateDoc(orderRef, { 
-            paymentStatus: "completed", 
+          await updateDoc(orderRef, {
+            paymentStatus: "completed",
             status: "pending",
             receipt: receiptInfo
           });
@@ -578,8 +590,8 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
         simulated: true
       };
 
-      await updateDoc(orderRef, { 
-        paymentStatus: "completed", 
+      await updateDoc(orderRef, {
+        paymentStatus: "completed",
         status: "pending",
         receipt: receiptInfo
       });
@@ -641,7 +653,7 @@ app.post("/api/chapa/refund", async (req, res) => {
         });
 
         console.log(`[CHAPA REFUND] Primary API (v1/transaction/refund) status: ${response.status}`);
-        
+
         // If primary fails with 405 (Method Not Allowed) or 404, try singular v1/refund as fallback
         if (response.status === 405 || response.status === 404) {
           console.log(`[CHAPA REFUND] v1/transaction/refund not supported. Trying fallback v1/refund (singular)...`);
@@ -679,7 +691,7 @@ app.post("/api/chapa/refund", async (req, res) => {
 
           await updateDoc(orderRef, {
             paymentStatus: "refunded",
-            status: "cancelled", 
+            status: "cancelled",
             refund: refundInfo
           });
 
@@ -687,14 +699,14 @@ app.post("/api/chapa/refund", async (req, res) => {
           return res.json({ success: true, message: "Refund processed successfully via Chapa!", order: { id: updatedDoc.id, ...updatedDoc.data() } });
         } else {
           console.warn(`[CHAPA REFUND] Chapa API refund failed. Status: ${response.status}. Data:`, chapaData);
-          
-          const isMethodNotSupported = (response.status === 405) || 
-                                       (chapaData.message && chapaData.message.toLowerCase().includes("not supported")) ||
-                                       (chapaData.error && chapaData.error.toLowerCase().includes("not supported"));
+
+          const isMethodNotSupported = (response.status === 405) ||
+            (chapaData.message && chapaData.message.toLowerCase().includes("not supported")) ||
+            (chapaData.error && chapaData.error.toLowerCase().includes("not supported"));
 
           if (isMethodNotSupported || response.status === 404) {
-            return res.status(405).json({ 
-              success: false, 
+            return res.status(405).json({
+              success: false,
               error: "Chapa's API does not support programmatic refunds for this account type or in test mode.",
               message: "Please complete the refund manually in your Chapa Merchant Dashboard. The order status has NOT been changed."
             });
@@ -770,15 +782,15 @@ app.get("/api/mailchimp/test", async (req, res) => {
     const listId = process.env.MAILCHIMP_LIST_ID;
 
     if (!apiKey || !listId || apiKey === "YOUR_MAILCHIMP_API_KEY") {
-      return res.status(400).json({ 
-        success: false, 
-        error: "Mailchimp is not configured in the environment variables." 
+      return res.status(400).json({
+        success: false,
+        error: "Mailchimp is not configured in the environment variables."
       });
     }
 
     const datacenter = apiKey.split("-")[1] || "us1";
     const mailchimpUrl = `https://${datacenter}.api.mailchimp.com/3.0/lists/${listId}`;
-    
+
     const response = await fetch(mailchimpUrl, {
       method: "GET",
       headers: {
@@ -788,7 +800,7 @@ app.get("/api/mailchimp/test", async (req, res) => {
     });
 
     const data = await response.json();
-    
+
     if (response.ok) {
       res.json({ success: true, message: `Connected to Mailchimp! List: ${data.name}` });
     } else {
@@ -804,11 +816,11 @@ app.post("/api/shipday/order", async (req, res) => {
   try {
     const settingsSnap = await getDoc(doc(db, "settings", "checkout"));
     const settings = settingsSnap.exists() ? settingsSnap.data() : {};
-    
+
     const shipdayKey = process.env.SHIPDAY_API_KEY || settings.shipdayApiKey;
     if (!shipdayKey) {
-      return res.status(500).json({ 
-        error: "Shipday API is not configured.", 
+      return res.status(500).json({
+        error: "Shipday API is not configured.",
         details: "Please add your SHIPDAY_API_KEY to the environment secrets."
       });
     }
@@ -821,7 +833,7 @@ app.post("/api/shipday/order", async (req, res) => {
     console.log(`[SHIPDAY] Sending order ${orderData.id} to Shipday using axios...`);
 
     const shipdayResponse = await axios.post(
-      "https://api.shipday.com/orders", 
+      "https://api.shipday.com/orders",
       {
         orderNumber: String(orderData.id),
         customerName: orderData.customerName,
@@ -849,7 +861,7 @@ app.post("/api/shipday/order", async (req, res) => {
 
     const data = shipdayResponse.data;
     console.log(`[SHIPDAY] Order ${orderData.id} successfully created in Shipday.`);
-    
+
     // Update order in Firestore with Shipday info
     if (data.orderId) {
       await setDoc(doc(db, "orders", orderData.id), {
@@ -863,9 +875,9 @@ app.post("/api/shipday/order", async (req, res) => {
     res.json({ success: true, shipdayData: data });
   } catch (error: any) {
     console.error("[SHIPDAY] API Error Details:", error.response?.data || error.message);
-    res.status(error.response?.status || 500).json({ 
-      error: "Failed to connect to Shipday", 
-      details: error.response?.data || error.message 
+    res.status(error.response?.status || 500).json({
+      error: "Failed to connect to Shipday",
+      details: error.response?.data || error.message
     });
   }
 });
@@ -874,11 +886,11 @@ app.get("/api/shipday/test", async (req, res) => {
   try {
     const settingsSnap = await getDoc(doc(db, "settings", "checkout"));
     const settings = settingsSnap.exists() ? settingsSnap.data() : {};
-    
-    const shipdayKey = process.env.SHIPDAY_API_KEY || settings.shipdayApiKey; 
-    
+
+    const shipdayKey = process.env.SHIPDAY_API_KEY || settings.shipdayApiKey;
+
     if (!shipdayKey || shipdayKey === "") {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
         error: "Shipday API key not found in environment secrets.",
         hint: "Please ensure SHIPDAY_API_KEY is configured in the environment."
@@ -895,14 +907,14 @@ app.get("/api/shipday/test", async (req, res) => {
     const orders = shipdayResponse.data;
     const orderCount = Array.isArray(orders) ? orders.length : 0;
 
-    res.json({ 
-      success: true, 
-      message: "Successfully connected to Shipday API", 
+    res.json({
+      success: true,
+      message: "Successfully connected to Shipday API",
       orderCount: orderCount
     });
   } catch (error: any) {
     console.error("[SHIPDAY TEST] Error details:", error.response?.data || error.message);
-    
+
     let errorMessage = "Connection failed. Check your API key.";
     if (error.response?.status === 401) {
       errorMessage = "Invalid API Key (Unauthorized).";
@@ -910,8 +922,8 @@ app.get("/api/shipday/test", async (req, res) => {
       errorMessage = "Could not reach Shipday API (Network Error).";
     }
 
-    res.status(400).json({ 
-      success: false, 
+    res.status(400).json({
+      success: false,
       error: errorMessage,
       details: error.response?.data || error.message
     });
@@ -960,7 +972,7 @@ app.post("/api/shipday/webhook", async (req, res) => {
 
       console.log(`[SHIPDAY WEBHOOK] Found order ${orderId} and status: ${shipdayStatus}`);
       const orderRef = doc(db, "orders", orderId);
-      
+
       const updateData: any = {
         shipdayStatus: shipdayStatus,
         shipdayLastUpdate: new Date().toISOString()
@@ -973,38 +985,38 @@ app.post("/api/shipday/webhook", async (req, res) => {
         .trim();
 
       console.log(`[SHIPDAY WEBHOOK] Normalized status for order ${orderId}: ${normalizedStatus}`);
-      
+
       const completionStatuses = [
-        "COMPLETED", 
-        "DELIVERED", 
-        "COMPLETE", 
-        "DONE", 
-        "FINISHED", 
-        "DELIVERY_COMPLETED", 
+        "COMPLETED",
+        "DELIVERED",
+        "COMPLETE",
+        "DONE",
+        "FINISHED",
+        "DELIVERY_COMPLETED",
         "ORDER_COMPLETED",
-        "SUCCESS", 
-        "SUCCESSFUL", 
+        "SUCCESS",
+        "SUCCESSFUL",
         "ALREADY_DELIVERED"
       ];
       const cancellationStatuses = [
-        "CANCELLED", 
+        "CANCELLED",
         "CANCELED",
-        "DELETED", 
-        "REJECTED", 
-        "FAILED", 
+        "DELETED",
+        "REJECTED",
+        "FAILED",
         "NOT_DELIVERED",
         "DELIVERY_FAILED",
         "ORDER_CANCELLED"
       ];
       const activeStatuses = [
-        "ASSIGNED", 
-        "STARTED", 
-        "PICKED_UP", 
-        "ARRIVED", 
-        "ACTIVE", 
-        "DISPATCHED", 
-        "ON_THE_WAY", 
-        "IN_TRANSIT", 
+        "ASSIGNED",
+        "STARTED",
+        "PICKED_UP",
+        "ARRIVED",
+        "ACTIVE",
+        "DISPATCHED",
+        "ON_THE_WAY",
+        "IN_TRANSIT",
         "OUT_FOR_DELIVERY",
         "PICKUP"
       ];
