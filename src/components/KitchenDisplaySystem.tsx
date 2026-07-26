@@ -18,6 +18,15 @@ export default function KitchenDisplaySystem() {
       const ordersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Order));
       setOrders(ordersData);
       setLoading(false);
+    }, (err) => {
+      console.warn("KDS query error, falling back to simple query:", err);
+      onSnapshot(collection(db, 'orders'), (snapshot) => {
+        const ordersData = snapshot.docs
+          .map(doc => ({ id: doc.id, ...doc.data() } as Order))
+          .filter(o => o.status === 'pending' || o.status === 'preparing');
+        setOrders(ordersData);
+        setLoading(false);
+      }, () => setLoading(false));
     });
 
     return () => unsubscribe();
@@ -69,7 +78,14 @@ export default function KitchenDisplaySystem() {
                   <div className="text-right">
                     <span className="text-xs text-stone-400 flex items-center">
                       <Clock className="w-3 h-3 mr-1" />
-                      {new Date(order.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {(() => {
+                        try {
+                          const d = typeof order.createdAt === 'object' && order.createdAt?.toDate ? order.createdAt.toDate() : new Date(order.createdAt);
+                          return isNaN(d.getTime()) ? 'Just now' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        } catch (e) {
+                          return 'Just now';
+                        }
+                      })()}
                     </span>
                   </div>
                 </div>
