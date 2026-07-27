@@ -15,7 +15,7 @@ interface MenuManagerProps {
   userRole?: string | null;
 }
 
-export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManagerProps) {
+export default function MenuManager({ menu = [], onMenuUpdated, userRole }: MenuManagerProps) {
   const [selectedItem, setSelectedItem] = useState<MenuItem | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -37,7 +37,7 @@ export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManag
     const fetchCategories = async () => {
       try {
         const snapshot = await getDocs(collection(db, "categories"));
-        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as {id: string, name: string}[];
+        const data = (snapshot?.docs || []).map(doc => ({ id: doc.id, ...doc.data() })) as {id: string, name: string}[];
         setCategories(data);
         if (data.length > 0 && !category) {
           setCategory(data[0].id);
@@ -70,7 +70,7 @@ export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManag
     setName("");
     setDescription("");
     setPrice(0);
-    setCategory(categories.length > 0 ? categories[0].id : "starters");
+    setCategory(categories && categories.length > 0 ? categories[0].id : "starters");
     setSelectedCategories([]);
     setSelectedPromoStickers([]);
     setImage("");
@@ -91,23 +91,24 @@ export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManag
   };
 
   const loadItemToForm = (item: MenuItem) => {
+    if (!item) return;
     setSelectedItem(item);
-    setId(item.id);
-    setName(item.name);
-    setDescription(item.description);
-    setPrice(item.price);
-    setCategory(item.category);
-    setSelectedCategories(item.categories || [item.category]);
-    setSelectedPromoStickers(item.promoStickers || []);
-    setImage(item.image);
-    setGalleryImages(item.galleryImages ? item.galleryImages.join(", ") : "");
+    setId(item.id || "");
+    setName(item.name || "");
+    setDescription(item.description || "");
+    setPrice(item.price || 0);
+    setCategory(item.category || "");
+    setSelectedCategories(Array.isArray(item.categories) ? item.categories : (item.category ? [item.category] : []));
+    setSelectedPromoStickers(Array.isArray(item.promoStickers) ? item.promoStickers : []);
+    setImage(item.image || "");
+    setGalleryImages(Array.isArray(item.galleryImages) ? item.galleryImages.join(", ") : "");
     setPopular(!!item.popular);
     setPrepTime(item.prepTime || "15 mins");
-    setIngredients(item.ingredients ? item.ingredients.join(", ") : "");
+    setIngredients(Array.isArray(item.ingredients) ? item.ingredients.join(", ") : "");
     setProtein(item.nutrition?.protein || "");
     setCarbs(item.nutrition?.carbs || "");
     setFat(item.nutrition?.fat || "");
-    setBasePrice(item.basePrice !== undefined ? item.basePrice : item.price);
+    setBasePrice(item.basePrice !== undefined ? item.basePrice : item.price || 0);
     setTaxRate(item.taxRate || "Food Tax (15%)");
     setTaxRatePercent(item.taxRatePercent !== undefined ? item.taxRatePercent : 15);
     setIsActive(item.isActive !== false);
@@ -190,10 +191,12 @@ export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManag
     }
   };
 
-  const filteredMenu = menu.filter(item => 
-    item.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-    (item.description && item.description.toLowerCase().includes(searchQuery.toLowerCase())) ||
-    item.category.toLowerCase().includes(searchQuery.toLowerCase())
+  const filteredMenu = (menu || []).filter(item => 
+    !item ? false : (
+      (item.name || '').toLowerCase().includes(searchQuery.toLowerCase()) || 
+      (item.description && item.description.toLowerCase().includes(searchQuery.toLowerCase())) ||
+      (item.category || '').toLowerCase().includes(searchQuery.toLowerCase())
+    )
   );
 
   return (
@@ -230,7 +233,7 @@ export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManag
         <div className={`${isEditing ? 'lg:col-span-6' : 'lg:col-span-12'} space-y-3 max-h-[600px] overflow-y-auto pr-2`}>
           <div className="bg-stone-50 p-3 border border-stone-200 rounded-xl space-y-2">
             <div className="text-xs font-bold text-stone-400 uppercase tracking-widest flex items-center justify-between">
-              <span>Database Records ({filteredMenu.length} of {menu.length})</span>
+              <span>Database Records ({filteredMenu.length} of {(menu || []).length})</span>
               <span className="text-[10px] bg-stone-100 text-stone-600 px-2 py-0.5 rounded-full font-mono font-bold">LIVE SYNC</span>
             </div>
             <input
@@ -241,7 +244,7 @@ export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManag
               className="w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500 focus:border-amber-500 font-medium"
             />
           </div>
-          {filteredMenu.map(item => (
+          {(filteredMenu || []).map(item => (
             <div key={item.id} className="flex items-center justify-between p-3 border border-stone-150 rounded-xl hover:bg-stone-50 transition-colors">
               <div className="flex items-center space-x-3 truncate">
                 <img src={item.image} alt={item.name} className="w-11 h-11 rounded-lg object-cover bg-stone-100 border border-stone-200 flex-shrink-0" />
@@ -249,7 +252,7 @@ export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManag
                   <h4 className="font-serif font-semibold text-stone-900 text-sm">{item.name}</h4>
                   <p className="text-xs text-stone-500 font-medium flex items-center mt-0.5 capitalize">
                     <Tag className="w-3 h-3 mr-1 text-amber-600" />
-                    {categories.find(c => c.id === item.category)?.name || item.category} • <span className="text-emerald-700 font-bold ml-1">{item.price.toFixed(2)} ETB</span>
+                    {(categories || []).find(c => c.id === item.category)?.name || item.category} • <span className="text-emerald-700 font-bold ml-1">{(item.price || 0).toFixed(2)} ETB</span>
                   </p>
                 </div>
               </div>
@@ -321,16 +324,16 @@ export default function MenuManager({ menu, onMenuUpdated, userRole }: MenuManag
               <div className="col-span-2">
                 <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-2">Categories * (Select at least one)</label>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {categories.map(c => (
+                  {(categories || []).map(c => (
                     <label key={c.id} className="flex items-center space-x-2 bg-stone-50 border border-stone-200 p-2 rounded-lg cursor-pointer hover:bg-stone-100 transition-colors">
                       <input
                         type="checkbox"
-                        checked={selectedCategories.includes(c.id)}
+                        checked={(selectedCategories || []).includes(c.id)}
                         onChange={(e) => {
                           if (e.target.checked) {
-                            setSelectedCategories([...selectedCategories, c.id]);
+                            setSelectedCategories([...(selectedCategories || []), c.id]);
                           } else {
-                            setSelectedCategories(selectedCategories.filter(cat => cat !== c.id));
+                            setSelectedCategories((selectedCategories || []).filter(cat => cat !== c.id));
                           }
                         }}
                         className="rounded text-amber-600 focus:ring-amber-500"

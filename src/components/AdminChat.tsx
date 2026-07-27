@@ -38,11 +38,11 @@ export default function AdminChat() {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (selectedId && messages.length > 0) {
-      const customerMessages = messages.filter(m => m.role === 'user').length;
+    if (selectedId && (messages || []).length > 0) {
+      const customerMessages = (messages || []).filter(m => m?.role === 'user').length;
       setReadCounts(prev => ({ ...prev, [selectedId]: customerMessages }));
     }
-  }, [selectedId, messages.length]);
+  }, [selectedId, messages]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -63,9 +63,11 @@ export default function AdminChat() {
       const convMap = new Map<string, Conversation>();
       const countsMap = new Map<string, number>();
       
-      snapshot.docs.forEach(doc => {
+      (snapshot?.docs || []).forEach(doc => {
         const data = doc.data();
+        if (!data) return;
         const id = data.conversationId;
+        if (!id) return;
         
         // Count customer messages per conversation
         if (data.role === 'user') {
@@ -76,7 +78,7 @@ export default function AdminChat() {
           convMap.set(id, {
             id,
             customerName: data.customerName || "Anonymous",
-            lastMessage: data.text,
+            lastMessage: data.text || "",
             lastTimestamp: data.createdAt,
             unreadCount: 0
           });
@@ -116,7 +118,8 @@ export default function AdminChat() {
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setMessages(snapshot.docs.map(doc => doc.data() as ChatMessage));
+      const msgList = (snapshot?.docs || []).map(doc => doc.data() as ChatMessage);
+      setMessages(msgList);
     });
 
     return () => unsubscribe();
@@ -144,7 +147,7 @@ export default function AdminChat() {
     }
   };
 
-  const selectedConversation = conversations.find(c => c.id === selectedId);
+  const selectedConversation = (conversations || []).find(c => c.id === selectedId);
 
   return (
     <div className="flex h-[600px] bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
@@ -162,7 +165,7 @@ export default function AdminChat() {
         </div>
         
         <div className="flex-grow overflow-y-auto">
-          {conversations.length === 0 ? (
+          {(!conversations || conversations.length === 0) ? (
             <div className="p-10 text-center">
               <div className="bg-stone-100 w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-3">
                 <MessageSquare className="w-6 h-6 text-stone-300" />
@@ -170,7 +173,7 @@ export default function AdminChat() {
               <p className="text-stone-400 text-xs">No active conversations</p>
             </div>
           ) : (
-            conversations.map((conv) => (
+            (conversations || []).map((conv) => (
               <button
                 key={conv.id}
                 onClick={() => setSelectedId(conv.id)}
@@ -236,7 +239,7 @@ export default function AdminChat() {
               ref={scrollRef}
               className="flex-grow overflow-y-auto p-6 space-y-4 bg-stone-50/30"
             >
-              {messages.map((msg, idx) => (
+              {(messages || []).map((msg, idx) => (
                 <div key={idx} className={`flex ${msg.role === 'model' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[70%] group`}>
                     <div className={`text-[9px] mb-1 font-bold uppercase tracking-wider text-stone-400 ${msg.role === 'model' ? 'text-right' : 'text-left'}`}>

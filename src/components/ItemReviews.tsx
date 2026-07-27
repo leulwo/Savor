@@ -22,7 +22,7 @@ export default function ItemReviews({ menuItemId, user }: ItemReviewsProps) {
       orderBy('createdAt', 'desc')
     );
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const revData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Review));
+      const revData = (snapshot?.docs || []).map(doc => ({ id: doc.id, ...doc.data() } as Review));
       setReviews(revData);
     });
 
@@ -54,8 +54,8 @@ export default function ItemReviews({ menuItemId, user }: ItemReviewsProps) {
     }
   };
 
-  const averageRating = reviews.length > 0 
-    ? (reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length).toFixed(1)
+  const averageRating = (reviews && reviews.length > 0) 
+    ? ((reviews || []).reduce((acc, r) => acc + (r?.rating || 0), 0) / reviews.length).toFixed(1)
     : '0.0';
 
   return (
@@ -65,7 +65,7 @@ export default function ItemReviews({ menuItemId, user }: ItemReviewsProps) {
         <div className="flex items-center space-x-1 text-sm font-bold text-stone-800">
           <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
           <span>{averageRating}</span>
-          <span className="text-xs text-stone-400 font-normal">({reviews.length})</span>
+          <span className="text-xs text-stone-400 font-normal">({(reviews || []).length})</span>
         </div>
       </div>
 
@@ -114,10 +114,10 @@ export default function ItemReviews({ menuItemId, user }: ItemReviewsProps) {
       )}
 
       <div className="space-y-3 max-h-64 overflow-y-auto pr-2">
-        {reviews.length === 0 ? (
+        {(!reviews || reviews.length === 0) ? (
           <p className="text-[11px] text-stone-500 text-center py-4">No reviews yet. Be the first to review!</p>
         ) : (
-          reviews.map(review => (
+          (reviews || []).map(review => (
             <div key={review.id} className="bg-white p-3 rounded-xl border border-stone-100 shadow-xs">
               <div className="flex justify-between items-start mb-1">
                 <span className="text-[11px] font-bold text-stone-900">{review.customerName}</span>

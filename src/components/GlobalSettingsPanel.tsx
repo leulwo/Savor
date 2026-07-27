@@ -8,7 +8,20 @@ import React, { useState, useEffect } from "react";
 import { Settings, Save, AlertCircle, CheckCircle, RotateCcw, Truck, CreditCard, ChevronDown, ChevronUp, Image as ImageIcon, Heart, MessageSquare, CalendarDays, Mail } from "lucide-react";
 import { db } from "../firebase";
 import { doc, getDoc, setDoc } from "firebase/firestore";
-import { GlobalSettings } from "../types";
+
+export interface GlobalSettings {
+  restaurantName?: string;
+  logoUrl?: string;
+  serviceTaxPercent?: number;
+  flatFeeETB?: number;
+  enableCOD?: boolean;
+  isOpen?: boolean;
+  enableMarketing?: boolean;
+  enableLoyalty?: boolean;
+  enableReservations?: boolean;
+  enableChatbot?: boolean;
+  [key: string]: any;
+}
 
 export default function GlobalSettingsPanel() {
   const [settings, setSettings] = useState<GlobalSettings>({

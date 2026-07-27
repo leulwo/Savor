@@ -42,8 +42,8 @@ export default function KitchenDisplaySystem() {
     }
   };
 
-  const pendingOrders = orders.filter(o => o.status === 'pending');
-  const preparingOrders = orders.filter(o => o.status === 'preparing');
+  const pendingOrders = (orders || []).filter(o => o?.status === 'pending');
+  const preparingOrders = (orders || []).filter(o => o?.status === 'preparing');
 
   if (loading) {
     return <div className="p-8 text-center text-stone-500">Loading KDS...</div>;
@@ -65,22 +65,22 @@ export default function KitchenDisplaySystem() {
         <div className="p-4 bg-stone-900/50">
           <div className="flex justify-between items-center mb-4">
             <h3 className="font-bold text-amber-500 uppercase tracking-widest text-sm">New Orders (Received)</h3>
-            <span className="bg-stone-800 text-stone-400 font-mono text-xs px-2 py-0.5 rounded">{pendingOrders.length}</span>
+            <span className="bg-stone-800 text-stone-400 font-mono text-xs px-2 py-0.5 rounded">{(pendingOrders || []).length}</span>
           </div>
           <div className="space-y-4">
-            {pendingOrders.map(order => (
+            {(pendingOrders || []).map(order => (
               <div key={order.id} className="bg-stone-800 border-l-4 border-amber-500 rounded-lg p-4 shadow-sm animate-fade-in">
                 <div className="flex justify-between items-start mb-2">
                   <div>
                     <span className="text-xs text-stone-400 font-mono">#{order.id}</span>
-                    <h4 className="font-bold text-sm">{order.customerName}</h4>
+                    <h4 className="font-bold text-sm">{order.customerName || 'Guest'}</h4>
                   </div>
                   <div className="text-right">
                     <span className="text-xs text-stone-400 flex items-center">
                       <Clock className="w-3 h-3 mr-1" />
                       {(() => {
                         try {
-                          const d = typeof order.createdAt === 'object' && order.createdAt?.toDate ? order.createdAt.toDate() : new Date(order.createdAt);
+                          const d = typeof order.createdAt === 'object' && (order.createdAt as any)?.toDate ? (order.createdAt as any).toDate() : new Date(order.createdAt);
                           return isNaN(d.getTime()) ? 'Just now' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                         } catch (e) {
                           return 'Just now';
@@ -92,10 +92,10 @@ export default function KitchenDisplaySystem() {
                 
                 <div className="bg-stone-900 p-3 rounded-lg mb-3">
                   <ul className="space-y-2">
-                    {order.items.map((item, idx) => (
+                    {(order.items || []).map((item, idx) => (
                       <li key={idx} className="flex justify-between text-sm">
-                        <span className="font-bold text-amber-400">{item.quantity}x</span>
-                        <span className="flex-1 ml-2 text-stone-200">{item.menuItem.name}</span>
+                        <span className="font-bold text-amber-400">{item.quantity || 1}x</span>
+                        <span className="flex-1 ml-2 text-stone-200">{item.menuItem?.name || 'Dish'}</span>
                       </li>
                     ))}
                   </ul>
@@ -124,24 +124,24 @@ export default function KitchenDisplaySystem() {
         <div className="p-4 bg-stone-900/20">
           <div className="flex justify-between items-center mb-4">
             <h3 className="font-bold text-blue-400 uppercase tracking-widest text-sm">Currently Preparing</h3>
-            <span className="bg-stone-800 text-stone-400 font-mono text-xs px-2 py-0.5 rounded">{preparingOrders.length}</span>
+            <span className="bg-stone-800 text-stone-400 font-mono text-xs px-2 py-0.5 rounded">{(preparingOrders || []).length}</span>
           </div>
           <div className="space-y-4">
-            {preparingOrders.map(order => (
+            {(preparingOrders || []).map(order => (
               <div key={order.id} className="bg-stone-800 border-l-4 border-blue-500 rounded-lg p-4 shadow-sm animate-fade-in">
                 <div className="flex justify-between items-start mb-2">
                   <div>
                     <span className="text-xs text-stone-400 font-mono">#{order.id}</span>
-                    <h4 className="font-bold text-sm">{order.customerName}</h4>
+                    <h4 className="font-bold text-sm">{order.customerName || 'Guest'}</h4>
                   </div>
                 </div>
                 
                 <div className="bg-stone-900 p-3 rounded-lg mb-3 opacity-80">
                   <ul className="space-y-2">
-                    {order.items.map((item, idx) => (
+                    {(order.items || []).map((item, idx) => (
                       <li key={idx} className="flex justify-between text-sm">
-                        <span className="font-bold text-blue-400">{item.quantity}x</span>
-                        <span className="flex-1 ml-2 text-stone-300">{item.menuItem.name}</span>
+                        <span className="font-bold text-blue-400">{item.quantity || 1}x</span>
+                        <span className="flex-1 ml-2 text-stone-300">{item.menuItem?.name || 'Dish'}</span>
                       </li>
                     ))}
                   </ul>

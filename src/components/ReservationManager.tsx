@@ -9,12 +9,37 @@ export default function ReservationManager() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const q = query(collection(db, 'reservations'), orderBy('date', 'desc'), orderBy('time', 'asc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const resData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Reservation));
-      setReservations(resData);
-      setLoading(false);
-    });
+    // Single-field or unsorted query to avoid needing a Firestore composite index for (date desc, time asc)
+    const q = query(collection(db, 'reservations'));
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        try {
+          const resData = (snapshot?.docs || []).map(doc => ({ id: doc.id, ...doc.data() } as Reservation));
+          // Sort in memory by date descending, then time ascending with type safety checking
+          resData.sort((a, b) => {
+            const dateA = typeof a.date === 'string' ? a.date : '';
+            const dateB = typeof b.date === 'string' ? b.date : '';
+            const dateCompare = dateB.localeCompare(dateA);
+            if (dateCompare !== 0) return dateCompare;
+
+            const timeA = typeof a.time === 'string' ? a.time : '';
+            const timeB = typeof b.time === 'string' ? b.time : '';
+            return timeA.localeCompare(timeB);
+          });
+          setReservations(resData);
+          setLoading(false);
+        } catch (e) {
+          console.error("Error processing reservations data:", e);
+          setLoading(false);
+        }
+      },
+      (error) => {
+        console.error("Error fetching reservations:", error);
+        setLoading(false);
+      }
+    );
 
     return () => unsubscribe();
   }, []);
@@ -44,28 +69,27 @@ export default function ReservationManager() {
           <h2 className="font-serif text-xl font-bold text-stone-900">Table Reservations</h2>
         </div>
       </div>
-      
+
       <div className="divide-y divide-stone-100">
-        {reservations.length === 0 ? (
+        {(!reservations || reservations.length === 0) ? (
           <div className="p-12 text-center text-stone-500">
             <CalendarDays className="w-12 h-12 mx-auto mb-3 text-stone-300 stroke-1" />
             <p>No reservations found.</p>
           </div>
         ) : (
-          reservations.map(res => (
+          (reservations || []).map(res => (
             <div key={res.id} className="p-6 hover:bg-stone-50 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div className="space-y-2">
                 <div className="flex items-center space-x-3">
                   <h3 className="font-bold text-stone-900">{res.customerName}</h3>
-                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                    res.status === 'confirmed' ? 'bg-green-100 text-green-700' :
-                    res.status === 'cancelled' ? 'bg-red-100 text-red-700' :
-                    'bg-amber-100 text-amber-700'
-                  }`}>
+                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${res.status === 'confirmed' ? 'bg-green-100 text-green-700' :
+                      res.status === 'cancelled' ? 'bg-red-100 text-red-700' :
+                        'bg-amber-100 text-amber-700'
+                    }`}>
                     {res.status}
                   </span>
                 </div>
-                
+
                 <div className="flex flex-wrap gap-y-2 gap-x-4 text-xs text-stone-600">
                   <div className="flex items-center space-x-1.5">
                     <CalendarDays className="w-3.5 h-3.5 text-stone-400" />
@@ -80,13 +104,13 @@ export default function ReservationManager() {
                     <span>{res.partySize} {res.partySize === 1 ? 'Person' : 'People'}</span>
                   </div>
                 </div>
-                
+
                 {res.notes && (
                   <div className="mt-2 text-xs text-stone-600 bg-stone-100 p-2 rounded border border-stone-200">
                     <span className="font-semibold text-stone-800">Notes:</span> {res.notes}
                   </div>
                 )}
-                
+
                 <div className="flex flex-wrap gap-y-2 gap-x-4 text-xs text-stone-500 mt-2">
                   <div className="flex items-center space-x-1.5">
                     <Mail className="w-3.5 h-3.5 text-stone-400" />
@@ -106,7 +130,7 @@ export default function ReservationManager() {
                   )}
                 </div>
               </div>
-              
+
               <div className="flex items-center gap-2 mt-2 md:mt-0">
                 {res.status === 'pending' && (
                   <>

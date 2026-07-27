@@ -19,7 +19,7 @@ export default function PromoManager() {
   useEffect(() => {
     const q = query(collection(db, 'promoCodes'), orderBy('createdAt', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setPromos(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as PromoCode)));
+      setPromos((snapshot?.docs || []).map(doc => ({ id: doc.id, ...doc.data() } as PromoCode)));
       setLoading(false);
     });
     return unsubscribe;
@@ -194,13 +194,13 @@ export default function PromoManager() {
             </tr>
           </thead>
           <tbody className="divide-y divide-stone-100">
-            {promos.length === 0 ? (
+            {(!promos || promos.length === 0) ? (
               <tr>
                 <td colSpan={6} className="px-6 py-8 text-center text-stone-500">
                   No promo codes created yet.
                 </td>
               </tr>
-            ) : promos.map(promo => (
+            ) : (promos || []).map(promo => (
               <tr key={promo.id}>
                 <td className="px-6 py-4 font-medium text-stone-900 flex items-center">
                   <TicketPercent className="w-4 h-4 mr-2 text-amber-600" />

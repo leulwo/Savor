@@ -29,10 +29,13 @@ export default function AnalyticsDashboard() {
 
   const allCategories = useMemo(() => {
     const categories = new Set<string>();
-    orders.forEach(order => {
-      order.items.forEach(item => {
-        if (item.menuItem.categories) {
-          item.menuItem.categories.forEach(c => categories.add(c));
+    (orders || []).forEach(order => {
+      (order?.items || []).forEach(item => {
+        if (!item?.menuItem) return;
+        if (Array.isArray(item.menuItem.categories)) {
+          item.menuItem.categories.forEach(c => {
+            if (c) categories.add(c);
+          });
         } else if (item.menuItem.category) {
           categories.add(item.menuItem.category);
         }
@@ -42,13 +45,14 @@ export default function AnalyticsDashboard() {
   }, [orders]);
 
   const filteredOrders = useMemo(() => {
-    let filtered = orders;
+    let filtered = orders || [];
     const now = new Date();
 
     if (selectedCategory !== 'all') {
       filtered = filtered.filter(order => 
-        order.items.some(item => 
-          item.menuItem.categories?.includes(selectedCategory) || item.menuItem.category === selectedCategory
+        (order?.items || []).some(item => 
+          (Array.isArray(item?.menuItem?.categories) && item.menuItem.categories.includes(selectedCategory)) || 
+          item?.menuItem?.category === selectedCategory
         )
       );
     }
@@ -69,8 +73,19 @@ export default function AnalyticsDashboard() {
 
     const now = new Date();
 
-    filteredOrders.forEach(order => {
-      const orderDate = parseISO(order.createdAt);
+    (filteredOrders || []).forEach(order => {
+      if (!order || !order.createdAt) return;
+      let orderDate: Date;
+      try {
+        orderDate = parseISO(order.createdAt);
+        if (isNaN(orderDate.getTime())) {
+          orderDate = new Date(order.createdAt);
+        }
+      } catch (e) {
+        orderDate = new Date();
+      }
+      if (isNaN(orderDate.getTime())) return;
+
       let dateKey = '';
       
       if (timeRange === 'daily') {
@@ -98,34 +113,40 @@ export default function AnalyticsDashboard() {
         ordersCount++;
         data.Orders++;
 
+        const totalAmount = typeof order.total === 'number' ? order.total : 0;
+
         if (order.status === 'cancelled' || order.paymentStatus === 'refunded' || order.paymentStatus === 'failed') {
           refunds++;
-          refundAmount += order.total;
+          refundAmount += totalAmount;
           data.Refunds++;
-          data.RefundAmount += order.total;
+          data.RefundAmount += totalAmount;
           refundsList.push({
-            id: order.id,
+            id: order.id || 'N/A',
             date: format(orderDate, 'MMM dd, yyyy HH:mm'),
-            amount: order.total,
+            amount: totalAmount,
             reason: order.status === 'cancelled' ? 'Cancelled' : 'Refunded/Failed',
             customer: order.customerName || 'Guest'
           });
         } else {
-          revenue += order.total;
+          revenue += totalAmount;
           successful++;
-          data.Revenue += order.total;
+          data.Revenue += totalAmount;
           
-          order.items.forEach(item => {
-            const cat = item.menuItem.category || 'uncategorized';
-            categoryMap.set(cat, (categoryMap.get(cat) || 0) + (item.quantity * item.menuItem.price));
+          (order.items || []).forEach(item => {
+            if (!item) return;
+            const itemPrice = item.menuItem?.price || 0;
+            const itemQty = item.quantity || 1;
+            const cat = item.menuItem?.category || 'uncategorized';
+            categoryMap.set(cat, (categoryMap.get(cat) || 0) + (itemQty * itemPrice));
             
-            const itemId = item.menuItem.id;
+            const itemId = item.menuItem?.id || item.menuItemId || 'unknown';
+            const itemName = item.menuItem?.name || 'Dish';
             if (!itemsMap.has(itemId)) {
-              itemsMap.set(itemId, { name: item.menuItem.name, quantity: 0, revenue: 0 });
+              itemsMap.set(itemId, { name: itemName, quantity: 0, revenue: 0 });
             }
             const itemData = itemsMap.get(itemId)!;
-            itemData.quantity += item.quantity;
-            itemData.revenue += (item.quantity * item.menuItem.price);
+            itemData.quantity += itemQty;
+            itemData.revenue += (itemQty * itemPrice);
           });
         }
       }
@@ -176,7 +197,7 @@ export default function AnalyticsDashboard() {
             className="text-xs border border-stone-300 rounded-lg px-3 py-2 bg-white focus:ring-2 focus:ring-amber-500 outline-none"
           >
             <option value="all">All Categories</option>
-            {allCategories.map(c => <option key={c} value={c}>{c}</option>)}
+            {(allCategories || []).map(c => <option key={c} value={c}>{c}</option>)}
           </select>
           <select 
             value={timeRange}

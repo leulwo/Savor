@@ -59,13 +59,13 @@ export default function Chatbot() {
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const msgs = snapshot.docs.map(doc => doc.data());
+      const msgs = (snapshot?.docs || []).map(doc => doc.data() || {});
       
       if (isOpen) {
         setUnreadCount(0);
       } else {
         const unread = msgs.filter(m => {
-          if (m.role !== 'model') return false;
+          if (m?.role !== 'model') return false;
           const time = m.createdAt?.toMillis ? m.createdAt.toMillis() : 0;
           return time > lastSeenTimestamp;
         }).length;
@@ -73,8 +73,8 @@ export default function Chatbot() {
       }
       
       setMessages(msgs.map(m => ({
-        role: m.role,
-        text: m.text,
+        role: m.role || 'user',
+        text: m.text || '',
         createdAt: m.createdAt
       })));
     });
@@ -191,7 +191,7 @@ export default function Chatbot() {
                     </span>
                   </div>
 
-                  {messages.length === 0 && (
+                  {(!messages || messages.length === 0) && (
                     <div className="text-center py-10 px-6">
                       <p className="text-stone-500 text-xs leading-relaxed">
                         Hello {customerName}! Welcome back to Savory Restaurant. Send us a message and our staff will get back to you shortly.
@@ -199,7 +199,7 @@ export default function Chatbot() {
                     </div>
                   )}
 
-                  {messages.map((msg, idx) => (
+                  {(messages || []).map((msg, idx) => (
                     <motion.div
                       key={idx}
                       initial={{ opacity: 0, y: 10 }}

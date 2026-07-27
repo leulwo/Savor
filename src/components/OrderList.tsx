@@ -15,11 +15,13 @@ interface OrderListProps {
   userRole?: string | null;
 }
 
-export default function OrderList({ orders, onOrderUpdated, userRole }: OrderListProps) {
+export default function OrderList({ orders = [], onOrderUpdated, userRole }: OrderListProps) {
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<Order | null>(null);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   const [defaultDeliveryMinutes, setDefaultDeliveryMinutes] = useState<number>(20);
+
+  const safeOrders = Array.isArray(orders) ? orders : [];
 
   useEffect(() => {
     const fetchSettings = async () => {
@@ -140,23 +142,23 @@ export default function OrderList({ orders, onOrderUpdated, userRole }: OrderLis
       </div>
 
       <div className="space-y-6 max-h-[600px] overflow-y-auto pr-2">
-        {orders.length === 0 ? (
+        {safeOrders.length === 0 ? (
           <div className="text-center py-12 text-stone-400">
             <ClipboardList className="w-12 h-12 mx-auto mb-3 text-stone-300 stroke-1" />
             <p className="text-sm font-medium">No orders recorded yet.</p>
             <p className="text-xs mt-1">Place an order from the front-end menu to generate records!</p>
           </div>
         ) : (
-          Object.entries(groupOrdersByDate(orders)).map(([dateGroup, groupOrders]) => (
+          Object.entries(groupOrdersByDate(safeOrders)).map(([dateGroup, groupOrders]) => (
             <div key={dateGroup} className="space-y-4">
               <div className="sticky top-0 z-10 bg-white/95 backdrop-blur-md py-2 px-3 rounded-xl text-[11px] font-bold text-stone-600 tracking-wider uppercase flex justify-between items-center border border-stone-200/50 shadow-xs">
                 <span>{dateGroup}</span>
                 <span className="bg-stone-200 text-stone-700 px-2.5 py-0.5 rounded-full font-mono text-[10px]">
-                  {groupOrders.length} {groupOrders.length === 1 ? 'order' : 'orders'}
+                  {(groupOrders || []).length} {(groupOrders || []).length === 1 ? 'order' : 'orders'}
                 </span>
               </div>
               <div className="space-y-4">
-                {groupOrders.map((order) => (
+                {(groupOrders || []).map((order) => (
                   <div key={order.id} className="border border-stone-150 rounded-xl p-4 hover:shadow-sm transition-all bg-stone-50/20">
                     {/* Order Meta Info */}
                     <div className="flex flex-wrap justify-between items-start gap-y-2 border-b border-stone-100 pb-3 mb-3">
@@ -166,15 +168,15 @@ export default function OrderList({ orders, onOrderUpdated, userRole }: OrderLis
                             ID: {order.id}
                           </span>
                           <span className="text-[11px] text-stone-500 font-mono">
-                            {new Date(order.createdAt).toLocaleString()}
+                            {order.createdAt ? new Date(order.createdAt).toLocaleString() : 'N/A'}
                           </span>
                         </div>
                         <div className="mt-1.5 flex items-center space-x-1.5 text-xs text-stone-600">
-                          <span className="font-semibold text-stone-800">{order.customerName}</span>
+                          <span className="font-semibold text-stone-800">{order.customerName || 'Guest'}</span>
                           <span>•</span>
-                          <span>{order.customerPhone}</span>
+                          <span>{order.customerPhone || 'N/A'}</span>
                           <span>•</span>
-                          <span className="truncate max-w-[150px]">{order.customerEmail}</span>
+                          <span className="truncate max-w-[150px]">{order.customerEmail || 'N/A'}</span>
                         </div>
                       </div>
 
@@ -199,19 +201,19 @@ export default function OrderList({ orders, onOrderUpdated, userRole }: OrderLis
 
                     {/* Items Breakdown */}
                     <div className="space-y-1 bg-stone-100/40 p-2.5 rounded-lg border border-stone-100/60 text-xs">
-                      {order.items.map((item, idx) => (
+                      {(order.items || []).map((item, idx) => (
                         <div key={idx} className="flex justify-between text-stone-700">
                           <span>
-                            <strong className="text-stone-900">{item.quantity}x</strong> {item.menuItem?.name || "Dish"}
+                            <strong className="text-stone-900">{item.quantity || 1}x</strong> {item.menuItem?.name || "Dish"}
                           </span>
                           <span className="font-mono text-stone-500">
-                            {((item.menuItem?.price || 0) * item.quantity).toFixed(2)} ETB
+                            {(((item.menuItem?.price || 0)) * (item.quantity || 1)).toFixed(2)} ETB
                           </span>
                         </div>
                       ))}
                       <div className="border-t border-stone-200 mt-2 pt-1.5 flex justify-between font-bold text-stone-900">
                         <span>Order Total:</span>
-                        <span className="font-mono text-amber-700 text-sm">{order.total.toFixed(2)} ETB</span>
+                        <span className="font-mono text-amber-700 text-sm">{(order.total || 0).toFixed(2)} ETB</span>
                       </div>
                     </div>
 

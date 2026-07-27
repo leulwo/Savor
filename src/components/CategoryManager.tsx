@@ -12,7 +12,7 @@ export default function CategoryManager() {
   const fetchCategories = async () => {
     try {
       const snapshot = await getDocs(collection(db, "categories"));
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Category[];
+      const data = (snapshot?.docs || []).map(doc => ({ id: doc.id, ...doc.data() })) as Category[];
       setCategories(data);
     } catch (e) {
       console.error(e);
@@ -82,7 +82,7 @@ export default function CategoryManager() {
         </form>
 
         <div className="space-y-2 max-h-60 overflow-y-auto">
-          {categories.map(cat => (
+          {(categories || []).map(cat => (
             <div key={cat.id} className="flex justify-between items-center bg-stone-50 border border-stone-100 p-2.5 rounded-lg">
               <span className="text-xs font-semibold text-stone-700 capitalize">{cat.name}</span>
               <button
@@ -94,7 +94,7 @@ export default function CategoryManager() {
               </button>
             </div>
           ))}
-          {categories.length === 0 && (
+          {(!categories || categories.length === 0) && (
             <p className="text-xs text-stone-500 text-center py-4">No categories added yet.</p>
           )}
         </div>
