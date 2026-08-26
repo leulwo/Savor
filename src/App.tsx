@@ -1218,7 +1218,7 @@ export function MainApp() {
                         </div>
 
                         <div className="bg-amber-50 border border-amber-200/60 rounded-xl p-3 text-[11px] text-amber-800 leading-relaxed space-y-0.5">
-                          <span className="font-bold block text-[12px] text-amber-900">📍 Exact Address Required *</span>
+                          <span className="font-bold block text-[12px] text-amber-900"> Exact Address Required </span>
                           Please provide your <strong className="text-amber-950">Delivery Address</strong>. Block and Room numbers are secondary.
                         </div>
 
@@ -1321,7 +1321,7 @@ export function MainApp() {
                                 </div>
                                 <span className="text-[10px]">Chapa Pay</span>
                               </div>
-                              <span className="text-[8px] opacity-75">Telebirr / CBE / Cards</span>
+                              <span className="text-[8px] opacity-75">KO CBE / Cards</span>
                             </button>
                             <button
                               type="button"
