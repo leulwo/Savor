@@ -32,7 +32,7 @@ import {
 import { db, auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged } from "./firebase";
 import { collection, onSnapshot, doc, query, where, setDoc, getDoc, deleteDoc } from "firebase/firestore";
 import { APIProvider } from "@vis.gl/react-google-maps";
-import GoogleMapsAddressInput from "./components/GoogleMapsAddressInput";
+import GoogleMapsAddressInput from "./GoogleMapsAddressInput";
 import Chatbot from "./components/Chatbot";
 import ItemReviews from "./components/ItemReviews";
 // @ts-ignore
@@ -985,33 +985,6 @@ export function MainApp() {
 
           {/* GOURMET MENU */}
           <div className="space-y-10">
-
-            {/* Elegant Landing Hero */}
-            <div className="bg-gradient-to-br from-stone-900 to-stone-950 rounded-3xl p-8 md:p-12 text-white relative overflow-hidden shadow-xl border border-stone-800">
-              <div className="absolute top-0 right-0 w-96 h-96 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
-
-              <div className="max-w-2xl relative z-10 space-y-4">
-
-                <h1 className="font-serif text-3xl md:text-5xl font-bold tracking-tight text-white leading-tight">
-                  Offering High Quality Experiences
-                </h1>
-                <p className="text-stone-300 text-sm md:text-base leading-relaxed">
-                  Welcome to Savory
-                </p>
-                <div className="pt-2">
-                  <button
-                    onClick={() => {
-                      const menuSection = document.getElementById("gourmet-menu-section");
-                      menuSection?.scrollIntoView({ behavior: "smooth" });
-                    }}
-                    className="bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold tracking-wide uppercase px-6 py-3.5 rounded-xl transition-all cursor-pointer flex items-center space-x-2"
-                  >
-                    <span>Explore Gourmet Selection</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            </div>
 
             {/* Menu Filters and Search */}
             <div id="gourmet-menu-section" className="space-y-6 scroll-mt-24">
