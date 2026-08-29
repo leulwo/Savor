@@ -1,0 +1,17 @@
+{
+  // filepath: F:\SAVORY\.vscode\mcp.json
+  "servers": {
+    "firebase": {
+      "command": "npx",
+      "args": ["-y", "firebase-tools@latest", "experimental:mcp"]
+    },
+    "gcloud-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@google-cloud/gcloud-mcp"],
+      "env": {
+        "GOOGLE_CLOUD_PROJECT": "project-609a1e43-d22e-44ae-a08"
+      }
+    }
+  }
+}

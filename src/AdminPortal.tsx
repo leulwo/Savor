@@ -13,7 +13,7 @@ import TeamManager from "./components/TeamManager";
 import PromoManager from "./components/PromoManager";
 import { Utensils, Settings, LogOut, LayoutDashboard, MessageSquare, CalendarDays, ChefHat, ShoppingBag, Percent } from "lucide-react";
 import { db, auth } from "./firebase";
-import { collection, query, where, orderBy, onSnapshot, doc, getDoc, setDoc, getDocs } from "firebase/firestore";
+import { collection, query, where, orderBy, onSnapshot, doc, getDoc } from "firebase/firestore";
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "firebase/auth";
 
 interface ErrorBoundaryProps {
@@ -153,46 +153,31 @@ export default function AdminPortal() {
             return;
           }
 
-          // Check if admins collection is empty
-          const adminsSnapshot = await getDocs(collection(db, "admins"));
-          if (adminsSnapshot.empty) {
-            // First time bootstrap: Automatically make the logging-in user the first admin!
-            const adminRef = doc(db, "admins", emailLower);
-            await setDoc(adminRef, {
-              email: emailLower,
-              role: "admin",
-              createdAt: new Date().toISOString()
-            });
-            setAdminUser(user);
-            setAdminRole("admin");
-          } else {
-            // Check if user is in the admins collection
-            const adminDocRef = doc(db, "admins", emailLower);
-            const adminDocSnap = await getDoc(adminDocRef);
-            if (adminDocSnap.exists()) {
-              const role = adminDocSnap.data()?.role;
-              if (role === "admin" || role === "manager" || role === "kitchen" || role === "cashier") {
-                setAdminUser(user);
-                setAdminRole(role);
-                if (role === "kitchen") {
-                  setActiveTab("kds");
-                } else if (role === "cashier") {
-                  setActiveTab("orders");
-                } else {
-                  setActiveTab("overview");
-                }
+          const adminDocRef = doc(db, "admins", emailLower);
+          const adminDocSnap = await getDoc(adminDocRef);
+          if (adminDocSnap.exists()) {
+            const role = adminDocSnap.data()?.role;
+            if (role === "admin" || role === "kitchen" || role === "cashier") {
+              setAdminUser(user);
+              setAdminRole(role);
+              if (role === "kitchen") {
+                setActiveTab("kds");
+              } else if (role === "cashier") {
+                setActiveTab("orders");
               } else {
-                setLoginError(`Access Denied: The account ${emailLower} does not have authorized access.`);
-                await signOut(auth);
-                setAdminUser(null);
-                setAdminRole(null);
+                setActiveTab("overview");
               }
             } else {
-              setLoginError(`Access Denied: The account ${emailLower} is not authorized.`);
+              setLoginError(`Access Denied: The account ${emailLower} does not have authorized access.`);
               await signOut(auth);
               setAdminUser(null);
               setAdminRole(null);
             }
+          } else {
+            setLoginError(`Access Denied: The account ${emailLower} is not authorized.`);
+            await signOut(auth);
+            setAdminUser(null);
+            setAdminRole(null);
           }
         } catch (err: any) {
           console.error("Error verifying admin role:", err);
@@ -213,19 +198,6 @@ export default function AdminPortal() {
     setLoginError("");
     try {
       if (isFirstTimeSetup) {
-        // First check if email is in admins collection to give better error message before auth creation
-        const emailLower = email.toLowerCase();
-        const adminDocRef = doc(db, "admins", emailLower);
-        const adminDocSnap = await getDoc(adminDocRef);
-        
-        if (!adminDocSnap.exists() && emailLower !== "admin@savory.com") { // Keep admin@savory.com as fallback if empty
-          const adminsSnapshot = await getDocs(collection(db, "admins"));
-          if (!adminsSnapshot.empty) {
-            setLoginError(`Access Denied: The account ${emailLower} has not been invited by an admin.`);
-            return;
-          }
-        }
-        
         await createUserWithEmailAndPassword(auth, email, password);
       } else {
         await signInWithEmailAndPassword(auth, email, password);
@@ -325,14 +297,14 @@ export default function AdminPortal() {
 
   return (
     <div className="min-h-screen bg-stone-50 text-stone-900 font-sans flex flex-col md:flex-row">
-      <aside className="w-full md:w-64 bg-white border-r border-stone-200 flex-shrink-0 flex flex-col min-h-screen sticky top-0">
+      <aside className="w-full md:w-64 bg-white border-r border-stone-200 flex-shrink-0 flex flex-col min-h-0 md:min-h-screen static md:sticky md:top-0">
         <div className="p-6 pb-8">
           <span className="font-serif text-2xl font-bold tracking-tight block leading-none">Admin</span>
           <span className="text-[10px] font-mono tracking-widest text-stone-500 uppercase">Savory Restaurant</span>
         </div>
         
         <nav className="flex-1 px-4 space-y-1">
-          {(adminRole === 'admin' || adminRole === 'manager') && (
+          {adminRole === 'admin' && (
             <button
               onClick={() => setActiveTab('overview')}
               className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
@@ -344,7 +316,7 @@ export default function AdminPortal() {
             </button>
           )}
           
-          {(adminRole === 'admin' || adminRole === 'manager' || adminRole === 'kitchen') && (
+          {(adminRole === 'admin' || adminRole === 'kitchen') && (
             <button
               onClick={() => setActiveTab('menu')}
               className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
@@ -356,7 +328,7 @@ export default function AdminPortal() {
             </button>
           )}
 
-          {(adminRole === 'admin' || adminRole === 'manager' || adminRole === 'cashier') && (
+          {(adminRole === 'admin' || adminRole === 'cashier') && (
             <>
               <button
                 onClick={() => setActiveTab('orders')}
@@ -397,7 +369,7 @@ export default function AdminPortal() {
             </>
           )}
 
-          {(adminRole === 'admin' || adminRole === 'manager' || adminRole === 'kitchen') && (
+          {(adminRole === 'admin' || adminRole === 'kitchen') && (
             <button
               onClick={() => setActiveTab('kds')}
               className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
@@ -409,7 +381,7 @@ export default function AdminPortal() {
             </button>
           )}
 
-          {(adminRole === 'admin' || adminRole === 'manager') && (
+          {adminRole === 'admin' && (
             <button
               onClick={() => setActiveTab('settings')}
               className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
@@ -421,7 +393,7 @@ export default function AdminPortal() {
             </button>
           )}
           
-          {(adminRole === 'admin' || adminRole === 'manager') && (
+          {adminRole === 'admin' && (
             <button
               onClick={() => setActiveTab('marketing')}
               className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${

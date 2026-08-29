@@ -220,21 +220,23 @@ export function MainApp() {
   };
 
   useEffect(() => {
-    const unsubscribe = onSnapshot(doc(db, "settings", "checkout"), (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        setCheckoutSettings({
-          serviceTaxPercent: data.serviceTaxPercent !== undefined ? data.serviceTaxPercent : 15,
-          flatFeeETB: data.flatFeeETB !== undefined ? data.flatFeeETB : 0,
-          isOpen: data.isOpen !== undefined ? data.isOpen : true,
-          enableCOD: data.enableCOD !== undefined ? data.enableCOD : true
-        });
-      } else {
-        setCheckoutSettings({ serviceTaxPercent: 15, flatFeeETB: 0, isOpen: true, enableCOD: true });
-      }
-    }, (error) => {
-      console.error("Failed to subscribe to checkout settings", error);
-    });
+    let cancelled = false;
+    fetch("/api/settings")
+      .then(res => {
+        if (!res.ok) throw new Error(`Settings request failed (${res.status})`);
+        return res.json();
+      })
+      .then(data => {
+        if (!cancelled) {
+          setCheckoutSettings({
+            serviceTaxPercent: data.serviceTaxPercent ?? 15,
+            flatFeeETB: data.flatFeeETB ?? 0,
+            isOpen: data.isOpen ?? true,
+            enableCOD: data.enableCOD ?? true
+          });
+        }
+      })
+      .catch(error => console.error("Failed to fetch checkout settings", error));
 
     const unsubscribeGlobal = onSnapshot(doc(db, "settings", "global"), (docSnap) => {
       if (docSnap.exists()) {
@@ -245,7 +247,7 @@ export function MainApp() {
     });
 
     return () => {
-      unsubscribe();
+      cancelled = true;
       unsubscribeGlobal();
     };
   }, []);
@@ -790,8 +792,9 @@ export function MainApp() {
     const matchesCategory = selectedCategory === 'all' ||
       item.category === selectedCategory ||
       (item.categories && item.categories.includes(selectedCategory));
-    const matchesSearch = item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.description.toLowerCase().includes(searchQuery.toLowerCase());
+    const normalizedSearchQuery = searchQuery.toLowerCase();
+    const matchesSearch = (item.name || '').toLowerCase().includes(normalizedSearchQuery) ||
+      (item.description || '').toLowerCase().includes(normalizedSearchQuery);
     const isCurrentlyActive = item.isActive !== false;
     return matchesCategory && matchesSearch && isCurrentlyActive;
   });
@@ -1047,7 +1050,13 @@ export function MainApp() {
                         to={`/food/${dish.id}`}
                         className="group flex flex-col sm:flex-row justify-between items-baseline cursor-pointer hover:bg-stone-100/50 p-3 -mx-3 rounded transition-colors"
                       >
-                        <div className="flex-1 pr-4 w-full">
+                        <div className="flex flex-1 min-w-0 items-start pr-4 w-full">
+                          <img
+                            src={dish.image}
+                            alt={dish.name}
+                            className="w-24 h-24 mr-4 rounded-lg object-cover bg-stone-200 border border-stone-200 flex-shrink-0"
+                          />
+                          <div className="flex-1 min-w-0">
                           <div className="flex items-baseline w-full">
                             <h3 className="font-serif font-bold text-base md:text-lg text-stone-900 group-hover:text-amber-700 whitespace-nowrap">{dish.name}</h3>
                             <div className="flex-grow border-b-2 border-dotted border-stone-300 mx-3 opacity-50 relative top-[-6px]"></div>
@@ -1059,6 +1068,7 @@ export function MainApp() {
                             {dish.menuTiming && dish.menuTiming !== "All Day" && (
                               <span className="text-[10px] text-emerald-700 uppercase tracking-widest">• {dish.menuTiming}</span>
                             )}
+                          </div>
                           </div>
                         </div>
                         <div className="pl-0 sm:pl-4 mt-3 sm:mt-0 shrink-0 flex flex-row sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto">
@@ -1483,8 +1493,8 @@ export function MainApp() {
 
         {/* Chapa Transaction Receipt Modal Overlay */}
         {selectedReceiptOrder && (
-          <div id="receipt-modal" className="fixed inset-0 bg-black/70 z-[100] flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
-            <div className="bg-amber-50/5 text-stone-900 rounded-2xl max-w-md w-full relative flex flex-col shadow-2xl border border-stone-200 overflow-hidden animate-scale-up max-h-[90vh]">
+          <div id="receipt-modal" className="fixed inset-0 bg-black/70 z-[100] flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in" onClick={() => setSelectedReceiptOrder(null)}>
+            <div className="bg-amber-50/5 text-stone-900 rounded-2xl max-w-md w-full relative flex flex-col shadow-2xl border border-stone-200 overflow-hidden animate-scale-up max-h-[90vh]" onClick={e => e.stopPropagation()}>
               {/* Paper receipt design */}
               <div className="bg-[#FAF9F6] p-6 flex-grow overflow-y-auto font-mono text-xs text-stone-800 space-y-6 select-none relative">
                 {/* Paper perforation top style */}
@@ -1646,8 +1656,8 @@ export function MainApp() {
 
         {/* Success Modal overlay */}
         {placedOrder && (
-          <div id="order-success-modal" className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-xs">
-            <div className="bg-white rounded-3xl max-w-md w-full p-6 text-center shadow-2xl border border-stone-100 animate-scale-up space-y-5 font-sans">
+          <div id="order-success-modal" className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-xs" onClick={() => setPlacedOrder(null)}>
+            <div className="bg-white rounded-3xl max-w-md w-full p-6 text-center shadow-2xl border border-stone-100 animate-scale-up space-y-5 font-sans" onClick={e => e.stopPropagation()}>
               <div className="w-14 h-14 bg-emerald-50 rounded-full flex items-center justify-center mx-auto text-emerald-500">
                 <CheckCircle className="w-8 h-8" />
               </div>
@@ -1827,8 +1837,8 @@ export function MainApp() {
 
         {/* My Orders Modal overlay */}
         {isMyOrdersOpen && (
-          <div id="my-orders-modal" className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-xs">
-            <div className="bg-white rounded-3xl max-w-lg w-full max-h-[80vh] flex flex-col shadow-2xl border border-stone-100 animate-scale-up font-sans">
+          <div id="my-orders-modal" className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-xs" onClick={() => setIsMyOrdersOpen(false)}>
+            <div className="bg-white rounded-3xl max-w-lg w-full max-h-[80vh] flex flex-col shadow-2xl border border-stone-100 animate-scale-up font-sans" onClick={e => e.stopPropagation()}>
               <div className="p-6 border-b border-stone-100 flex items-center justify-between bg-stone-50 rounded-t-3xl">
                 <div className="flex items-center space-x-2.5">
                   <ClipboardList className="w-5 h-5 text-stone-800" />
@@ -1982,8 +1992,8 @@ export function MainApp() {
 
         {/* Order Action Modal for Pay/Cancel */}
         {orderActionModal && (
-          <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4 backdrop-blur-md">
-            <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-stone-150 animate-scale-up font-sans text-center space-y-4">
+          <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4 backdrop-blur-md" onClick={() => setOrderActionModal(null)}>
+            <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-stone-150 animate-scale-up font-sans text-center space-y-4" onClick={e => e.stopPropagation()}>
               <div className="mx-auto w-12 h-12 bg-amber-50 rounded-full flex items-center justify-center text-amber-600">
                 <ClipboardList className="w-6 h-6" />
               </div>
@@ -2232,12 +2242,12 @@ export function MainApp() {
             © {new Date().getFullYear()} {globalSettings?.restaurantName || "Savory"} • All rights reserved.
           </div>
         </footer>
-        {globalSettings?.enableChatbot !== false && <Chatbot />}
+        {globalSettings?.enableChatbot !== false && user && <Chatbot userId={user.uid} />}
 
         {/* Reservation Drawer Overlay */}
         {isReservationOpen && (
-          <div className="fixed inset-0 bg-black/45 z-50 flex justify-center items-center backdrop-blur-xs p-4">
-            <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden animate-scale-up font-sans">
+          <div className="fixed inset-0 bg-black/45 z-50 flex justify-center items-center backdrop-blur-xs p-4" onClick={() => setIsReservationOpen(false)}>
+            <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden animate-scale-up font-sans" onClick={e => e.stopPropagation()}>
               <div className="p-5 border-b border-stone-100 flex items-center justify-between bg-stone-50">
                 <div className="flex items-center space-x-2.5">
                   <CalendarDays className="w-5 h-5 text-stone-800" />

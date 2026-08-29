@@ -6,7 +6,7 @@ import { collection, onSnapshot, doc, setDoc, deleteDoc } from "firebase/firesto
 interface TeamMember {
     id?: string;
     email: string;
-    role: 'admin' | 'manager' | 'kitchen' | 'cashier';
+    role: 'admin' | 'kitchen' | 'cashier';
     createdAt?: string;
 }
 
@@ -19,7 +19,7 @@ export default function TeamManager({ currentUserEmail = '', userRole }: TeamMan
     const [team, setTeam] = useState<TeamMember[]>([]);
     const [loading, setLoading] = useState(true);
     const [email, setEmail] = useState("");
-    const [role, setRole] = useState<'admin' | 'manager' | 'kitchen' | 'cashier'>("manager");
+    const [role, setRole] = useState<'admin' | 'kitchen' | 'cashier'>("admin");
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -135,7 +135,6 @@ export default function TeamManager({ currentUserEmail = '', userRole }: TeamMan
                                 className="w-full text-xs bg-white border border-stone-300 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500"
                             >
                                 <option value="admin">Admin (Full Access)</option>
-                                <option value="manager">Manager</option>
                                 <option value="kitchen">Kitchen Staff (KDS Only)</option>
                                 <option value="cashier">Cashier (Orders Only)</option>
                             </select>

@@ -423,8 +423,8 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole }: Ord
 
       {/* Chapa Transaction Receipt Modal Overlay */}
       {selectedReceiptOrder && (
-        <div id="admin-receipt-modal" className="fixed inset-0 bg-black/70 z-[100] flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
-          <div className="bg-amber-50/5 text-stone-900 rounded-2xl max-w-md w-full relative flex flex-col shadow-2xl border border-stone-200 overflow-hidden animate-scale-up max-h-[90vh]">
+        <div id="admin-receipt-modal" className="fixed inset-0 bg-black/70 z-[100] flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in" onClick={() => setSelectedReceiptOrder(null)}>
+          <div className="bg-amber-50/5 text-stone-900 rounded-2xl max-w-md w-full relative flex flex-col shadow-2xl border border-stone-200 overflow-hidden animate-scale-up max-h-[90vh]" onClick={e => e.stopPropagation()}>
             {/* Paper receipt design */}
             <div className="bg-[#FAF9F6] p-6 flex-grow overflow-y-auto font-mono text-xs text-stone-800 space-y-6 select-none relative text-left">
               {/* Paper perforation top style */}

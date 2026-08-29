@@ -8,8 +8,8 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import axios from "axios";
-import { initializeApp } from "firebase/app";
-import { getFirestore, collection, doc, getDocs, getDoc, setDoc, updateDoc, deleteDoc, query, orderBy } from "firebase/firestore";
+import { applicationDefault, initializeApp } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
 import fs from "fs";
 
 dotenv.config();
@@ -34,7 +34,10 @@ try {
   console.warn("Could not load firebase-applet-config.json", e);
 }
 
-const appFirebase = initializeApp(firebaseConfig);
+const appFirebase = initializeApp({
+  credential: applicationDefault(),
+  projectId: firebaseConfig.projectId
+});
 const db = firebaseConfig.firestoreDatabaseId
   ? getFirestore(appFirebase, firebaseConfig.firestoreDatabaseId)
   : getFirestore(appFirebase);
@@ -56,8 +59,8 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number) {
   try {
     // Fetch settings first to get API Key and Pickup Lead Time
-    const settingsSnap = await getDoc(doc(db, "settings", "checkout"));
-    const settings = settingsSnap.exists() ? settingsSnap.data() : {};
+    const settingsSnap = await db.collection("settings").doc("checkout").get();
+    const settings = settingsSnap.exists ? settingsSnap.data() : {};
 
     const shipdayKey = process.env.SHIPDAY_API_KEY || settings.shipdayApiKey;
     const pickupLeadTime = settings.shipdayPickupMinutes || 10;
@@ -67,9 +70,9 @@ async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number
       return;
     }
 
-    const orderRef = doc(db, "orders", orderId);
-    const docSnap = await getDoc(orderRef);
-    if (!docSnap.exists()) return;
+    const orderRef = db.collection("orders").doc(orderId);
+    const docSnap = await orderRef.get();
+    if (!docSnap.exists) return;
 
     const orderData = docSnap.data();
 
@@ -108,7 +111,7 @@ async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number
 
     const data = shipdayResponse.data;
     if (data && data.orderId) {
-      await updateDoc(orderRef, {
+      await orderRef.update({
         shipdayOrderId: data.orderId,
         shipdayStatus: "created",
         shipdayTrackingLink: data.trackingLink || data.shortTrackingLink || null,
@@ -125,22 +128,22 @@ async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number
 async function applyLoyaltyAndPromo(orderData: any, db: any) {
   try {
     if (orderData.promoCode) {
-      const promoRef = doc(db, "promoCodes", orderData.promoCode);
-      const promoSnap = await getDoc(promoRef);
-      if (promoSnap.exists()) {
+      const promoRef = db.collection("promoCodes").doc(orderData.promoCode);
+      const promoSnap = await promoRef.get();
+      if (promoSnap.exists) {
         const promo = promoSnap.data();
-        await updateDoc(promoRef, { usageCount: (promo.usageCount || 0) + 1 });
+        await promoRef.update({ usageCount: (promo.usageCount || 0) + 1 });
       }
     }
 
     if (orderData.userId && (orderData.pointsUsed > 0 || orderData.pointsEarned > 0)) {
-      const userRef = doc(db, "users", orderData.userId);
-      const userSnap = await getDoc(userRef);
-      if (userSnap.exists()) {
+      const userRef = db.collection("users").doc(orderData.userId);
+      const userSnap = await userRef.get();
+      if (userSnap.exists) {
         const user = userSnap.data();
         const currentPoints = user.points || 0;
         const newPoints = currentPoints - (orderData.pointsUsed || 0) + (orderData.pointsEarned || 0);
-        await updateDoc(userRef, { points: newPoints });
+        await userRef.update({ points: newPoints });
       }
     }
   } catch (error) {
@@ -151,7 +154,7 @@ async function applyLoyaltyAndPromo(orderData: any, db: any) {
 // 0. Category Endpoints
 app.get("/api/categories", async (req, res) => {
   try {
-    const snapshot = await getDocs(collection(db, "categories"));
+    const snapshot = await db.collection("categories").get();
     const categories = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json(categories);
   } catch (error: any) {
@@ -167,9 +170,9 @@ app.post("/api/categories", async (req, res) => {
     }
 
     const id = name.toLowerCase().replace(/\s+/g, '-');
-    await setDoc(doc(db, "categories", id), { name });
+    await db.collection("categories").doc(id).set({ name });
 
-    const snapshot = await getDocs(collection(db, "categories"));
+    const snapshot = await db.collection("categories").get();
     const categories = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, categories });
   } catch (error: any) {
@@ -180,9 +183,9 @@ app.post("/api/categories", async (req, res) => {
 app.delete("/api/categories/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    await deleteDoc(doc(db, "categories", id));
+    await db.collection("categories").doc(id).delete();
 
-    const snapshot = await getDocs(collection(db, "categories"));
+    const snapshot = await db.collection("categories").get();
     const categories = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, categories });
   } catch (error: any) {
@@ -193,7 +196,7 @@ app.delete("/api/categories/:id", async (req, res) => {
 // 1. Menu Endpoints
 app.get("/api/menu", async (req, res) => {
   try {
-    const snapshot = await getDocs(collection(db, "menu"));
+    const snapshot = await db.collection("menu").get();
     const menu = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json(menu);
   } catch (error: any) {
@@ -225,9 +228,9 @@ app.post("/api/menu", async (req, res) => {
       galleryImages: item.galleryImages || []
     };
 
-    await setDoc(doc(db, "menu", itemId), newItem);
+    await db.collection("menu").doc(itemId).set(newItem);
 
-    const snapshot = await getDocs(collection(db, "menu"));
+    const snapshot = await db.collection("menu").get();
     const menu = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, menu });
   } catch (error: any) {
@@ -238,9 +241,9 @@ app.post("/api/menu", async (req, res) => {
 app.delete("/api/menu/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    await deleteDoc(doc(db, "menu", id));
+    await db.collection("menu").doc(id).delete();
 
-    const snapshot = await getDocs(collection(db, "menu"));
+    const snapshot = await db.collection("menu").get();
     const menu = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, menu });
   } catch (error: any) {
@@ -251,7 +254,7 @@ app.delete("/api/menu/:id", async (req, res) => {
 // 2. Order Endpoints
 app.get("/api/orders", async (req, res) => {
   try {
-    const snapshot = await getDocs(query(collection(db, "orders"), orderBy("createdAt", "desc")));
+    const snapshot = await db.collection("orders").orderBy("createdAt", "desc").get();
     const orders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json(orders);
   } catch (error: any) {
@@ -292,7 +295,7 @@ app.post("/api/orders", async (req, res) => {
       pointsEarned: orderData.pointsEarned || 0
     };
 
-    await setDoc(doc(db, "orders", orderId), newOrder);
+    await db.collection("orders").doc(orderId).set(newOrder);
     await applyLoyaltyAndPromo(newOrder, db);
 
     res.json({ success: true, order: newOrder });
@@ -311,7 +314,7 @@ app.patch("/api/orders/:id", async (req, res) => {
     if (paymentStatus) updates.paymentStatus = paymentStatus;
 
     if (Object.keys(updates).length > 0) {
-      await updateDoc(doc(db, "orders", id), updates);
+      await db.collection("orders").doc(id).update(updates);
 
       // Trigger Shipday ONLY when status becomes 'ready'
       if (status === "ready") {
@@ -320,8 +323,8 @@ app.patch("/api/orders/:id", async (req, res) => {
       }
     }
 
-    const orderRef = doc(db, "orders", id);
-    const docSnap = await getDoc(orderRef);
+    const orderRef = db.collection("orders").doc(id);
+    const docSnap = await orderRef.get();
     res.json({ success: true, order: { id: docSnap.id, ...docSnap.data() } });
   } catch (error: any) {
     res.status(500).json({ error: "Failed to update order", details: error.message });
@@ -339,10 +342,10 @@ app.post("/api/chapa/webhook", async (req, res) => {
     const status = event.event || event.status;
 
     if (txRef) {
-      const orderRef = doc(db, "orders", txRef);
-      const docSnap = await getDoc(orderRef);
+      const orderRef = db.collection("orders").doc(txRef);
+      const docSnap = await orderRef.get();
 
-      if (docSnap.exists()) {
+      if (docSnap.exists) {
         const orderData = docSnap.data();
 
         // Handle SUCCESSFUL PAYMENT
@@ -360,7 +363,7 @@ app.post("/api/chapa/webhook", async (req, res) => {
             simulated: false
           };
 
-          await updateDoc(orderRef, {
+          await orderRef.update({
             paymentStatus: "completed",
             status: "pending",
             receipt: receiptInfo,
@@ -382,7 +385,7 @@ app.post("/api/chapa/webhook", async (req, res) => {
             webhookData: event
           };
 
-          await updateDoc(orderRef, {
+          await orderRef.update({
             paymentStatus: "refunded",
             status: "cancelled",
             refund: refundInfo,
@@ -412,7 +415,14 @@ app.post("/api/chapa/initialize", async (req, res) => {
     }
 
     const tx_ref = `tx-savory-${Date.now()}`;
-    const chapaKey = process.env.CHAPA_SECRET_KEY;
+    const chapaKey = process.env.CHAPA_SECRET_KEY?.trim();
+
+    if (chapaKey?.startsWith("CHAPUBK_")) {
+      return res.status(500).json({
+        success: false,
+        error: "CHAPA_SECRET_KEY contains a Chapa public key. Replace it with the secret key that starts with CHAPASECKEY_."
+      });
+    }
 
     // Dynamically detect the base URL of the request (works across development and preview containers)
     const requestHost = req.headers.host || "https://donated-habitat-treo-weapon.trycloudflare.com";
@@ -465,7 +475,7 @@ app.post("/api/chapa/initialize", async (req, res) => {
       pointsEarned: req.body.pointsEarned || 0
     };
 
-    await setDoc(doc(db, "orders", tx_ref), newOrder);
+    await db.collection("orders").doc(tx_ref).set(newOrder);
 
     if (chapaKey && chapaKey !== "MY_CHAPA_SECRET_KEY" && !chapaKey.startsWith("CHAPASECKEY-xxxx")) {
       console.log(`[CHAPA] Attempting real payment initiation for reference ${tx_ref}`);
@@ -473,7 +483,7 @@ app.post("/api/chapa/initialize", async (req, res) => {
         const response = await fetch("https://api.chapa.co/v1/transaction/initialize", {
           method: "POST",
           headers: {
-            "Authorization": `Bearer ${chapaKey.trim()}`,
+            "Authorization": `Bearer ${chapaKey}`,
             "Content-Type": "application/json"
           },
           body: JSON.stringify(chapaPayload)
@@ -492,7 +502,7 @@ app.post("/api/chapa/initialize", async (req, res) => {
 
 
         if (chapaData.status === "success" && chapaData.data?.checkout_url) {
-          await updateDoc(doc(db, "orders", tx_ref), { chapaCheckoutUrl: chapaData.data.checkout_url });
+          await db.collection("orders").doc(tx_ref).update({ chapaCheckoutUrl: chapaData.data.checkout_url });
           return res.json({ success: true, checkoutUrl: chapaData.data.checkout_url, txRef: tx_ref, simulated: false });
         } else {
           return res.status(400).json({ success: false, error: chapaData.message || "Chapa API initialization failed", details: chapaData });
@@ -517,10 +527,10 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
     const { txRef } = req.params;
     const chapaKey = process.env.CHAPA_SECRET_KEY;
 
-    const orderRef = doc(db, "orders", txRef);
-    const docSnap = await getDoc(orderRef);
+    const orderRef = db.collection("orders").doc(txRef);
+    const docSnap = await orderRef.get();
 
-    if (!docSnap.exists()) {
+    if (!docSnap.exists) {
       console.warn(`[CHAPA VERIFY] Order with txRef: ${txRef} not found in Firestore`);
       return res.status(404).json({ error: "Order or transaction reference not found" });
     }
@@ -556,14 +566,14 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
             simulated: false
           };
 
-          await updateDoc(orderRef, {
+          await orderRef.update({
             paymentStatus: "completed",
             status: "pending",
             receipt: receiptInfo
           });
           if (orderData.paymentStatus !== "completed") { await applyLoyaltyAndPromo(orderData, db); }
 
-          const updatedDoc = await getDoc(orderRef);
+          const updatedDoc = await orderRef.get();
           return res.json({ success: true, status: "completed", order: { id: updatedDoc.id, ...updatedDoc.data() } });
         } else {
           console.warn(`[CHAPA VERIFY] Chapa API verification returned non-success structure or status. Data status: ${chapaData.data?.status}`);
@@ -590,13 +600,13 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
         simulated: true
       };
 
-      await updateDoc(orderRef, {
+      await orderRef.update({
         paymentStatus: "completed",
         status: "pending",
         receipt: receiptInfo
       });
       if (orderData.paymentStatus !== "completed") { await applyLoyaltyAndPromo(orderData, db); }
-      const finalDoc = await getDoc(orderRef);
+      const finalDoc = await orderRef.get();
       return res.json({ success: true, status: "completed", order: { id: finalDoc.id, ...finalDoc.data() }, simulated: true });
     }
   } catch (error: any) {
@@ -615,10 +625,10 @@ app.post("/api/chapa/refund", async (req, res) => {
     }
 
     const chapaKey = process.env.CHAPA_SECRET_KEY;
-    const orderRef = doc(db, "orders", txRef);
-    const docSnap = await getDoc(orderRef);
+    const orderRef = db.collection("orders").doc(txRef);
+    const docSnap = await orderRef.get();
 
-    if (!docSnap.exists()) {
+    if (!docSnap.exists) {
       return res.status(404).json({ error: "Order not found" });
     }
 
@@ -689,13 +699,13 @@ app.post("/api/chapa/refund", async (req, res) => {
             chapaResponse: chapaData
           };
 
-          await updateDoc(orderRef, {
+          await orderRef.update({
             paymentStatus: "refunded",
             status: "cancelled",
             refund: refundInfo
           });
 
-          const updatedDoc = await getDoc(orderRef);
+          const updatedDoc = await orderRef.get();
           return res.json({ success: true, message: "Refund processed successfully via Chapa!", order: { id: updatedDoc.id, ...updatedDoc.data() } });
         } else {
           console.warn(`[CHAPA REFUND] Chapa API refund failed. Status: ${response.status}. Data:`, chapaData);
@@ -727,13 +737,13 @@ app.post("/api/chapa/refund", async (req, res) => {
         simulated: true
       };
 
-      await updateDoc(orderRef, {
+      await orderRef.update({
         paymentStatus: "refunded",
         status: "cancelled",
         refund: refundInfo
       });
 
-      const updatedDoc = await getDoc(orderRef);
+      const updatedDoc = await orderRef.get();
       return res.json({ success: true, message: "Refund processed successfully (Simulated)", order: { id: updatedDoc.id, ...updatedDoc.data() }, simulated: true });
     }
   } catch (error: any) {
@@ -745,9 +755,17 @@ app.post("/api/chapa/refund", async (req, res) => {
 // 3. Checkout Settings Endpoints
 app.get("/api/settings", async (req, res) => {
   try {
-    const docSnap = await getDoc(doc(db, "settings", "checkout"));
-    if (docSnap.exists()) {
-      res.json(docSnap.data());
+    const settingsRef = db.collection("settings").doc("checkout");
+    const docSnap = await settingsRef.get();
+    if (docSnap.exists) {
+      const data = docSnap.data();
+      res.json({
+        serviceTaxPercent: data.serviceTaxPercent ?? 15,
+        flatFeeETB: data.flatFeeETB ?? 0,
+        shipdayDeliveryMinutes: data.shipdayDeliveryMinutes ?? 20,
+        isOpen: data.isOpen ?? true,
+        enableCOD: data.enableCOD ?? true
+      });
     } else {
       res.json({ serviceTaxPercent: 15, flatFeeETB: 0, shipdayDeliveryMinutes: 20, isOpen: true });
     }
@@ -768,7 +786,7 @@ app.post("/api/settings", async (req, res) => {
       isOpen: isOpen !== undefined ? isOpen : true,
       updatedAt: new Date().toISOString()
     };
-    await setDoc(doc(db, "settings", "checkout"), settings);
+    await db.collection("settings").doc("checkout").set(settings);
     res.json({ success: true, settings });
   } catch (error: any) {
     res.status(500).json({ error: "Failed to save checkout settings", details: error.message });
@@ -814,8 +832,8 @@ app.get("/api/mailchimp/test", async (req, res) => {
 // 4. Shipday API Integration
 app.post("/api/shipday/order", async (req, res) => {
   try {
-    const settingsSnap = await getDoc(doc(db, "settings", "checkout"));
-    const settings = settingsSnap.exists() ? settingsSnap.data() : {};
+    const settingsSnap = await db.collection("settings").doc("checkout").get();
+    const settings = settingsSnap.exists ? settingsSnap.data() : {};
 
     const shipdayKey = process.env.SHIPDAY_API_KEY || settings.shipdayApiKey;
     if (!shipdayKey) {
@@ -864,7 +882,7 @@ app.post("/api/shipday/order", async (req, res) => {
 
     // Update order in Firestore with Shipday info
     if (data.orderId) {
-      await setDoc(doc(db, "orders", orderData.id), {
+      await db.collection("orders").doc(orderData.id).set({
         shipdayOrderId: data.orderId,
         shipdayStatus: "created",
         shipdayTrackingLink: data.trackingLink || data.shortTrackingLink || null,
@@ -884,8 +902,8 @@ app.post("/api/shipday/order", async (req, res) => {
 
 app.get("/api/shipday/test", async (req, res) => {
   try {
-    const settingsSnap = await getDoc(doc(db, "settings", "checkout"));
-    const settings = settingsSnap.exists() ? settingsSnap.data() : {};
+    const settingsSnap = await db.collection("settings").doc("checkout").get();
+    const settings = settingsSnap.exists ? settingsSnap.data() : {};
 
     const shipdayKey = process.env.SHIPDAY_API_KEY || settings.shipdayApiKey;
 
@@ -971,7 +989,7 @@ app.post("/api/shipday/webhook", async (req, res) => {
       const shipdayStatus = String(shipdayStatusRaw).trim();
 
       console.log(`[SHIPDAY WEBHOOK] Found order ${orderId} and status: ${shipdayStatus}`);
-      const orderRef = doc(db, "orders", orderId);
+      const orderRef = db.collection("orders").doc(orderId);
 
       const updateData: any = {
         shipdayStatus: shipdayStatus,
@@ -1031,8 +1049,8 @@ app.post("/api/shipday/webhook", async (req, res) => {
         // Only update to preparing if it's currently pending
         // We want to avoid downgrading 'ready' or 'delivered'
         try {
-          const currentSnap = await getDoc(orderRef);
-          if (currentSnap.exists()) {
+          const currentSnap = await orderRef.get();
+          if (currentSnap.exists) {
             const currentStatus = currentSnap.data().status;
             if (currentStatus === "pending") {
               updateData.status = "preparing";
@@ -1046,7 +1064,7 @@ app.post("/api/shipday/webhook", async (req, res) => {
         }
       }
 
-      await setDoc(orderRef, updateData, { merge: true });
+      await orderRef.set(updateData, { merge: true });
       console.log(`[SHIPDAY WEBHOOK] Order ${orderId} successfully updated in Firestore with status: ${normalizedStatus}`);
     } else {
       console.warn(`[SHIPDAY WEBHOOK] Webhook received but orderIdRaw (${orderIdRaw}) or shipdayStatusRaw (${shipdayStatusRaw}) is missing.`, payload);

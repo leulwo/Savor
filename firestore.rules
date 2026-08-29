@@ -1,43 +1,86 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    match /menu/{document=**} {
-      allow read, write: if true;
+    function signedIn() {
+      return request.auth != null;
     }
-    match /categories/{document=**} {
-      allow read, write: if true;
+
+    function adminDocument(email) {
+      return /databases/$(database)/documents/admins/$(email);
     }
-    match /promoCodes/{document=**} {
-      allow read, write: if true;
+
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.email != null
+        && exists(adminDocument(request.auth.token.email))
+        && get(adminDocument(request.auth.token.email)).data.role == 'admin';
     }
-    match /admins/{document=**} {
-      allow read, write: if true;
+
+    function ownsUserDocument(userId) {
+      return signedIn() && request.auth.uid == userId;
     }
-    match /orders/{document=**} {
-      allow read, write: if true;
+
+    match /menu/{documentId} {
+      allow read: if true;
+      allow write: if isAdmin();
     }
-    match /carts/{document=**} {
-      allow read, write: if true;
+
+    match /categories/{documentId} {
+      allow read: if true;
+      allow write: if isAdmin();
     }
-    match /reservations/{document=**} {
-      allow read, write: if true;
+
+    match /promoCodes/{documentId} {
+      allow get: if true;
+      allow list: if isAdmin();
+      allow write: if isAdmin();
     }
-    match /reviews/{document=**} {
-      allow read, write: if true;
+
+    match /admins/{email} {
+      allow get: if isAdmin() || (signedIn() && request.auth.token.email == email);
+      allow list: if isAdmin();
+      allow create, update, delete: if isAdmin();
     }
-    match /chat_messages/{document=**} {
-      allow read, write: if true;
+
+    match /users/{userId} {
+      allow read, create, update, delete: if ownsUserDocument(userId) || isAdmin();
     }
-    match /settings/{document=**} {
-      allow read, write: if true;
+
+    match /carts/{userId} {
+      allow read, create, update, delete: if ownsUserDocument(userId);
     }
-    match /users/{document=**} {
-      allow read, write: if true;
+
+    match /orders/{orderId} {
+      allow get, list: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    match /reservations/{reservationId} {
+      allow read: if isAdmin();
+      allow create: if signedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    match /chat_messages/{messageId} {
+      allow read, write: if isAdmin();
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+    }
+
+    match /settings/{settingId} {
+      allow get: if settingId == 'global' || isAdmin();
+      allow list: if isAdmin();
+      allow write: if isAdmin();
     }
 
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

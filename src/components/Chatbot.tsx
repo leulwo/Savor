@@ -10,7 +10,11 @@ interface ChatMessage {
   createdAt?: any;
 }
 
-export default function Chatbot() {
+interface ChatbotProps {
+  userId: string;
+}
+
+export default function Chatbot({ userId }: ChatbotProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -53,6 +57,7 @@ export default function Chatbot() {
     
     const q = query(
       collection(db, "chat_messages"),
+      where("userId", "==", userId),
       where("conversationId", "==", conversationId),
       where("createdAt", ">=", twentyFourHoursAgo),
       orderBy("createdAt", "asc")
@@ -80,7 +85,7 @@ export default function Chatbot() {
     });
 
     return () => unsubscribe();
-  }, [conversationId, isOpen, lastSeenTimestamp]);
+  }, [conversationId, isOpen, lastSeenTimestamp, userId]);
 
   const handleSaveName = (e: React.FormEvent) => {
     e.preventDefault();
@@ -102,6 +107,7 @@ export default function Chatbot() {
       // 1. Save user message to Firestore
       await addDoc(collection(db, "chat_messages"), {
         conversationId,
+        userId,
         role: 'user',
         text: userMessage,
         customerName: customerName,

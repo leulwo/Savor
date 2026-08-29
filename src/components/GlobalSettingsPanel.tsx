@@ -42,7 +42,8 @@ export default function GlobalSettingsPanel() {
   // Tab state for categories
   const [activeTab, setActiveTab] = useState<'general' | 'checkout' | 'features' | 'integrations'>('general');
   
-  const [testLoading, setTestLoading] = useState(false);
+  const [shipdayTestLoading, setShipdayTestLoading] = useState(false);
+  const [mailchimpTestLoading, setMailchimpTestLoading] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; orderCount?: number } | null>(null);
   const [mailchimpTestResult, setMailchimpTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -101,7 +102,7 @@ export default function GlobalSettingsPanel() {
   };
 
   const testMailchimp = async () => {
-    setTestLoading(true);
+    setMailchimpTestLoading(true);
     setMailchimpTestResult(null);
     try {
       const res = await fetch("/api/mailchimp/test");
@@ -110,12 +111,12 @@ export default function GlobalSettingsPanel() {
     } catch (e) {
       setMailchimpTestResult({ success: false, message: "Network error while testing connection." });
     } finally {
-      setTestLoading(false);
+      setMailchimpTestLoading(false);
     }
   };
 
   const testShipday = async () => {
-    setTestLoading(true);
+    setShipdayTestLoading(true);
     setTestResult(null);
     try {
       const res = await fetch("/api/shipday/test");
@@ -128,7 +129,7 @@ export default function GlobalSettingsPanel() {
     } catch (e) {
       setTestResult({ success: false, message: "Connection error" });
     } finally {
-      setTestLoading(false);
+      setShipdayTestLoading(false);
     }
   };
 
@@ -386,11 +387,11 @@ export default function GlobalSettingsPanel() {
                 <button
                   type="button"
                   onClick={testShipday}
-                  disabled={testLoading}
+                  disabled={shipdayTestLoading}
                   className="bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold uppercase tracking-wider px-4 py-2 rounded-xl transition-all disabled:opacity-50 flex items-center space-x-2 shadow-sm"
                 >
-                  {testLoading ? <RotateCcw className="w-3 h-3 animate-spin" /> : <Truck className="w-3 h-3" />}
-                  <span>{testLoading ? "Testing..." : "Verify Status"}</span>
+                  {shipdayTestLoading ? <RotateCcw className="w-3 h-3 animate-spin" /> : <Truck className="w-3 h-3" />}
+                  <span>{shipdayTestLoading ? "Testing..." : "Verify Status"}</span>
                 </button>
               </div>
               {testResult && (
@@ -424,10 +425,10 @@ export default function GlobalSettingsPanel() {
                 <button
                   type="button"
                   onClick={testMailchimp}
-                  disabled={testLoading}
+                  disabled={mailchimpTestLoading}
                   className="bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold uppercase tracking-wider px-4 py-2 rounded-xl transition-all disabled:opacity-50 flex items-center space-x-2 shadow-sm"
                 >
-                  {testLoading ? <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <RotateCcw className="w-3 h-3" />}
+                  {mailchimpTestLoading ? <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <RotateCcw className="w-3 h-3" />}
                   <span>Test Connection</span>
                 </button>
               </div>
