@@ -6,6 +6,7 @@
 import React, { useState, useEffect } from "react";
 import { Routes, Route, useNavigate, useParams, Link, useLocation } from "react-router-dom";
 import { MenuItem, Order, OrderItem } from "./types";
+
 import AdminPortal from "./AdminPortal";
 import {
   Utensils,
@@ -27,18 +28,82 @@ import {
   ChevronDown,
   Truck,
   Heart,
-  CalendarDays
+  CalendarDays,
+  Store,
+  ShoppingBag
 } from "lucide-react";
 import { db, auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged } from "./firebase";
-import { collection, onSnapshot, doc, query, where, setDoc, getDoc, deleteDoc } from "firebase/firestore";
+import { collection, onSnapshot, doc, query, where, setDoc, getDoc, updateDoc } from "firebase/firestore";
 import { APIProvider } from "@vis.gl/react-google-maps";
 import GoogleMapsAddressInput from "./GoogleMapsAddressInput";
 import Chatbot from "./components/Chatbot";
 import ItemReviews from "./components/ItemReviews";
+import { confirmDialog, toastError, toastSuccess, toastInfo, toastWarning } from "./notify";
 // @ts-ignore
 import chapaLogoImg from "./images.png";
 
 const API_KEY = process.env.GOOGLE_MAPS_PLATFORM_KEY || (import.meta as any).env?.VITE_GOOGLE_MAPS_PLATFORM_KEY || "";
+
+// ---- Operating schedule ----
+// Orders are accepted between openTime and (closeTime - prepTimeMinutes) so
+// the kitchen can finish preparing existing orders before closing.
+function parseHHMMToMinutes(value: string | undefined | null): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(value ?? ""));
+  if (!m) return null;
+  const mins = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  return mins >= 0 && mins < 1440 ? mins : null;
+}
+
+function scheduleAccepts(s: { scheduleEnabled?: boolean; openTime?: string; closeTime?: string; prepTimeMinutes?: number; isOpen?: boolean }, now: Date = new Date()):
+  { accepting: boolean; reason?: "notOpen" | "stopOrders" } {
+  if (!s) return { accepting: true };
+  if (!s.scheduleEnabled) return { accepting: !!s.isOpen };
+  const open = parseHHMMToMinutes(s.openTime);
+  const close = parseHHMMToMinutes(s.closeTime);
+  if (open === null || close === null) return { accepting: !!s.isOpen };
+  const prep = Math.max(0, Number(s.prepTimeMinutes) || 30);
+  const cutoff = Math.min(1440, close - prep);
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  if (open < close) {
+    if (nowMin >= open && nowMin < cutoff) return { accepting: true };
+    return { accepting: false, reason: nowMin < open ? "notOpen" : "stopOrders" };
+  }
+  // Overnight schedule (e.g. 18:00 → 02:00).
+  if (nowMin >= open || nowMin < cutoff) return { accepting: true };
+  return { accepting: false, reason: nowMin >= cutoff ? "stopOrders" : "notOpen" };
+}
+
+function formatTimeHHMM(value: string | undefined | null): string {
+  const mins = parseHHMMToMinutes(value);
+  if (mins === null) return "";
+  const hours24 = Math.floor(mins / 60);
+  const minutes = mins % 60;
+  const period = hours24 >= 12 ? "PM" : "AM";
+  const hours12 = hours24 % 12 === 0 ? 12 : hours24 % 12;
+  return minutes === 0 ? `${hours12} ${period}` : `${hours12}:${String(minutes).padStart(2, "0")} ${period}`;
+}
+
+const loadChapaScript = (): Promise<boolean> => {
+  if (typeof window !== "undefined" && (window as any).ChapaCheckout) {
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    const existing = document.querySelector('script[src="https://checkout.chapa.co/v1/inline.js"]');
+    if (existing) {
+      if ((window as any).ChapaCheckout) return resolve(true);
+      existing.addEventListener("load", () => resolve(true));
+      existing.addEventListener("error", () => resolve(false));
+      setTimeout(() => resolve(!!(window as any).ChapaCheckout), 2000);
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://checkout.chapa.co/v1/inline.js";
+    script.async = true;
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.head.appendChild(script);
+  });
+};
 
 // Helper functions for date categorization
 export const getLocalDateString = (dateStr: string) => {
@@ -143,12 +208,14 @@ export function MainApp() {
   const [subscribeNewsletter, setSubscribeNewsletter] = useState(true);
   const [paymentMethod, setPaymentMethod] = useState<'chapa' | 'cash'>('chapa');
   const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [fulfillmentType, setFulfillmentType] = useState<'delivery' | 'pickup' | 'dineIn'>('delivery');
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduledFor, setScheduledFor] = useState<string>("");
 
-  // Promo Code & Loyalty State
+  // Promo Code State
   const [promoCodeInput, setPromoCodeInput] = useState("");
   const [appliedPromo, setAppliedPromo] = useState<any>(null);
   const [promoError, setPromoError] = useState("");
-  const [usePoints, setUsePoints] = useState(false);
 
   const [expandedProduct, setExpandedProduct] = useState<MenuItem | null>(null);
   const [expandedQuantity, setExpandedQuantity] = useState(1);
@@ -160,15 +227,10 @@ export function MainApp() {
   useEffect(() => {
     const match = location.pathname.match(/^\/food\/(.+)/);
     if (match) {
-      const foodId = match[1];
-      const food = menu.find(m => m.id === foodId);
-      if (food) {
-        setExpandedProduct(food);
-      }
-    } else {
-      if (expandedProduct && location.pathname === "/") {
-        setExpandedProduct(null);
-      }
+      const food = menu.find(item => item.id === match[1]);
+      if (food) setExpandedProduct(food);
+    } else if (expandedProduct && location.pathname === "/") {
+      setExpandedProduct(null);
     }
   }, [location.pathname, menu]);
 
@@ -177,7 +239,6 @@ export function MainApp() {
     navigate("/");
   };
 
-  // Success Order Overlay
   const [placedOrder, setPlacedOrder] = useState<Order | null>(null);
   const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<Order | null>(null);
   const [chapaCheckoutUrl, setChapaCheckoutUrl] = useState<string | null>(() => localStorage.getItem('chapaCheckoutUrl'));
@@ -185,11 +246,15 @@ export function MainApp() {
     serviceTaxPercent: 15,
     flatFeeETB: 0,
     isOpen: true,
-    enableCOD: true
+    scheduleEnabled: false,
+    openTime: "09:00",
+    closeTime: "22:00",
+    enableCOD: true,
+    prepTimeMinutes: 30,
+    scheduledStepsMinutes: 15
   });
-
+  const [now, setNow] = useState(() => new Date());
   const [globalSettings, setGlobalSettings] = useState<any>(null);
-
   const [subscribeEmail, setSubscribeEmail] = useState("");
   const [subscribeStatus, setSubscribeStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [subscribeErrorMsg, setSubscribeErrorMsg] = useState("");
@@ -200,27 +265,27 @@ export function MainApp() {
     setSubscribeStatus("loading");
     setSubscribeErrorMsg("");
     try {
-      const res = await fetch("/api/subscribe", {
+      const response = await fetch("/api/subscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: subscribeEmail })
       });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to subscribe");
-
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Failed to subscribe");
       setSubscribeStatus("success");
       setSubscribeEmail("");
       setTimeout(() => setSubscribeStatus("idle"), 3000);
-    } catch (err: any) {
-      console.error("Subscription failed:", err);
+    } catch (error: any) {
+      console.error("Subscription failed:", error);
       setSubscribeStatus("error");
-      setSubscribeErrorMsg(err.message || "Subscription failed. Please try again.");
+      setSubscribeErrorMsg(error.message || "Subscription failed. Please try again.");
     }
   };
 
   useEffect(() => {
+    const match = location.pathname.match(/^\/food\/(.+)/);
     let cancelled = false;
+
     fetch("/api/settings")
       .then(res => {
         if (!res.ok) throw new Error(`Settings request failed (${res.status})`);
@@ -232,7 +297,12 @@ export function MainApp() {
             serviceTaxPercent: data.serviceTaxPercent ?? 15,
             flatFeeETB: data.flatFeeETB ?? 0,
             isOpen: data.isOpen ?? true,
-            enableCOD: data.enableCOD ?? true
+            scheduleEnabled: data.scheduleEnabled ?? false,
+            openTime: data.openTime ?? "09:00",
+            closeTime: data.closeTime ?? "22:00",
+            enableCOD: data.enableCOD ?? true,
+            prepTimeMinutes: data.prepTimeMinutes ?? 30,
+            scheduledStepsMinutes: data.scheduledStepsMinutes ?? 15
           });
         }
       })
@@ -246,11 +316,41 @@ export function MainApp() {
       console.error("Failed to subscribe to global settings", error);
     });
 
+    // Live checkout settings (reflects admin changes immediately, incl. scheduling interval)
+    const unsubscribeCheckout = onSnapshot(doc(db, "settings", "checkout"), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setCheckoutSettings({
+          serviceTaxPercent: data.serviceTaxPercent ?? 15,
+          flatFeeETB: data.flatFeeETB ?? 0,
+          isOpen: data.isOpen ?? true,
+          scheduleEnabled: data.scheduleEnabled ?? false,
+          openTime: data.openTime ?? "09:00",
+          closeTime: data.closeTime ?? "22:00",
+          enableCOD: data.enableCOD ?? true,
+          prepTimeMinutes: data.prepTimeMinutes ?? 30,
+          scheduledStepsMinutes: data.scheduledStepsMinutes ?? 15
+        });
+      }
+    }, (error) => {
+      console.error("Failed to subscribe to checkout settings", error);
+    });
+
     return () => {
       cancelled = true;
       unsubscribeGlobal();
+      unsubscribeCheckout();
     };
   }, []);
+
+  // Keep schedule-based availability fresh; re-check every 30s.
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  const scheduleStatus = scheduleAccepts(checkoutSettings, now);
+  const isOpen = checkoutSettings.scheduleEnabled ? scheduleStatus.accepting : !!checkoutSettings.isOpen;
 
   const [activeOrderId, setActiveOrderId] = useState<string | null>(() => {
     const params = new URLSearchParams(window.location.search);
@@ -382,35 +482,15 @@ export function MainApp() {
     const unsubscribeMyOrders = onSnapshot(q, (snapshot) => {
       const userOrders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Order));
 
-      // Auto-delete user orders older than 30 days on the client website (not the admin)
-      const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
-      const expiredOrders = userOrders.filter(order => {
-        if (!order.createdAt) return false;
-        const orderTime = new Date(order.createdAt).getTime();
-        return !isNaN(orderTime) && orderTime < thirtyDaysAgo;
-      });
-
-      if (expiredOrders.length > 0) {
-        console.log(`[AUTO-CLEANUP] Found ${expiredOrders.length} orders older than 30 days. Deleting automatically...`);
-        expiredOrders.forEach(async (order) => {
-          try {
-            await deleteDoc(doc(db, "orders", order.id));
-          } catch (err) {
-            console.error("Failed to auto-delete expired order:", order.id, err);
-          }
-        });
-      }
-
-      // Filter out expired orders from local state to prevent UI flickering during deletion
-      const validOrders = userOrders.filter(order => {
-        if (!order.createdAt) return true;
-        const orderTime = new Date(order.createdAt).getTime();
-        return isNaN(orderTime) || orderTime >= thirtyDaysAgo;
-      });
+      // NOTE (SEC-009): Client-side auto-cleanup (deleteDoc) of old orders is
+      // intentionally removed. Firestore rules only allow admins to delete order
+      // documents, so the client delete loop always failed. Order retention /
+      // cleanup is handled server-side instead; all orders the user owns stay
+      // visible in "My Orders".
 
       // Sort descending by createdAt
-      validOrders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setMyOrders(validOrders);
+      userOrders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setMyOrders(userOrders);
     });
     return () => unsubscribeMyOrders();
   }, [user]);
@@ -492,7 +572,7 @@ export function MainApp() {
 
   const handleToggleFavorite = async (itemId: string) => {
     if (!user || !userProfile) {
-      alert("Please log in to save your favorite dishes.");
+      toastInfo("Please log in to save your favorite dishes.");
       return;
     }
 
@@ -515,7 +595,7 @@ export function MainApp() {
   const handleReservationSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) {
-      alert("Please sign in to make a reservation.");
+      toastInfo("Please sign in to make a reservation.");
       return;
     }
 
@@ -537,12 +617,12 @@ export function MainApp() {
       const resRef = doc(collection(db, "reservations"));
       await setDoc(resRef, reservation);
 
-      alert("Reservation requested successfully! We will confirm shortly.");
+      toastSuccess("Reservation requested successfully! We will confirm shortly.");
       setIsReservationOpen(false);
       setReservationForm({ date: "", time: "19:00", partySize: 2 });
     } catch (error) {
       console.error("Reservation failed:", error);
-      alert("Failed to submit reservation. Please try again.");
+      toastError("Failed to submit reservation. Please try again.");
     } finally {
       setIsSubmittingReservation(false);
     }
@@ -590,17 +670,8 @@ export function MainApp() {
     }
   }
 
-  let pointsDiscount = 0;
-  let pointsUsed = 0;
-  // 1 point = 1 ETB
-  if (usePoints && userProfile?.points > 0) {
-    pointsDiscount = Math.min(userProfile.points, (cartTotal + taxAmount + checkoutSettings.flatFeeETB - discountAmount));
-    pointsUsed = pointsDiscount;
-  }
-
-  const finalTotal = Math.max(0, cartTotal + taxAmount + checkoutSettings.flatFeeETB - discountAmount - pointsDiscount);
-  // Earn 1 point for every 100 ETB spent (on final total after discounts, before tax/fees preferably, but we'll just use finalTotal)
-  const pointsEarned = Math.floor(finalTotal / 100);
+  const deliveryFee = fulfillmentType === 'delivery' ? checkoutSettings.flatFeeETB : 0;
+  const finalTotal = Math.max(0, cartTotal + taxAmount + deliveryFee - discountAmount);
 
   const handleApplyPromo = async () => {
     if (!promoCodeInput) return;
@@ -642,11 +713,24 @@ export function MainApp() {
     if (cart.length === 0) return;
     setCheckoutLoading(true);
 
-    // Make delivery address strictly required
-    if (!googleMapsAddress.trim()) {
-      alert("Please provide a Delivery Address so our courier can locate you.");
+    // Make delivery address strictly required ONLY for delivery fulfillment
+    if (fulfillmentType === 'delivery' && !googleMapsAddress.trim()) {
+      toastWarning("Please provide a Delivery Address so our courier can locate you.");
       setCheckoutLoading(false);
       return;
+    }
+
+    // Validate scheduled time if scheduling is enabled
+    let finalScheduledFor: string | null = null;
+    if (scheduleEnabled && scheduledFor) {
+      const prepTimeMinutes = checkoutSettings.prepTimeMinutes || 30;
+      const earliest = new Date(Date.now() + prepTimeMinutes * 60 * 1000);
+      if (new Date(scheduledFor).getTime() < earliest.getTime()) {
+        toastWarning(`Scheduled time must be at least ${prepTimeMinutes} minutes from now. Please pick a later slot.`);
+        setCheckoutLoading(false);
+        return;
+      }
+      finalScheduledFor = new Date(scheduledFor).toISOString();
     }
 
     // Save the last checkout info to localStorage for autofill (Google Fill behavior)
@@ -674,68 +758,101 @@ export function MainApp() {
 
     try {
       if (paymentMethod === 'chapa') {
-        // Use Server-side initialization with Secret Key for better security and stability
         const res = await fetch("/api/chapa/initialize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             amount: finalTotal,
-            email: customerEmail,
+            email: customerEmail.trim(),
             first_name: firstName,
             last_name: lastName,
-            phone_number: customerPhone,
-            blockNumber,
-            roomNumber,
-            googleMapsAddress,
-            specialInstructions,
+            phone_number: customerPhone.trim(),
             items: cart,
-            userId: user?.uid,
+            blockNumber: fulfillmentType === 'delivery' ? blockNumber : "",
+            roomNumber: fulfillmentType === 'delivery' ? roomNumber : "",
+            googleMapsAddress: fulfillmentType === 'delivery' ? googleMapsAddress : "",
+            specialInstructions,
+            fulfillmentType,
+            scheduledFor: finalScheduledFor,
+            userId: user?.uid || null,
             serviceTax: taxAmount,
-            flatFee: checkoutSettings.flatFeeETB,
-            promoCode: appliedPromo?.code,
-            discountAmount,
-            pointsUsed,
-            pointsEarned
+            flatFee: deliveryFee,
+            promoCode: appliedPromo?.code || null,
+            discountAmount
           })
         });
 
-        const resText = await res.text();
-        let data: any = {};
-        try {
-          data = resText ? JSON.parse(resText) : {};
-        } catch (e) {
-          console.error("Failed to parse JSON response from /api/chapa/initialize. Raw response:", resText);
-          throw new Error(`Server response error (${res.status}): ${resText.slice(0, 150) || "Empty response from backend server."}`);
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          let errorText = "Failed to initialize Chapa checkout. Please try again.";
+          if (typeof data.error === "string") {
+            errorText = data.error;
+          } else if (data.error && typeof data.error === "object") {
+            errorText = Object.entries(data.error)
+              .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`)
+              .join(" | ");
+          } else if (typeof data.message === "string") {
+            errorText = data.message;
+          }
+          throw new Error(errorText);
         }
 
-        if (data.success) {
-          if (data.simulated) {
-            alert(`Payment initialization failed (falling back to sandbox which was removed). Please check your CHAPA_SECRET_KEY in the environment.\n\nError: ${data.warning}`);
-            setCheckoutLoading(false);
-          } else if (data.checkoutUrl) {
-            if (data.txRef) {
-              localStorage.setItem('activeOrderId', data.txRef);
-              setActiveOrderId(data.txRef);
-            }
+        localStorage.setItem('activeOrderId', data.txRef);
+        setActiveOrderId(data.txRef);
 
-            // Optimistically clear cart
-            setCart([]);
-            setIsCheckingOut(false);
-            setIsCartOpen(false);
-            setSpecialInstructions("");
-            setBlockNumber("");
-            setRoomNumber("");
-            setGoogleMapsAddress("");
-
-            // Redirect user to Chapa
-            setCheckoutLoading(false);
-            window.location.href = data.checkoutUrl;
-          }
-        } else {
-          console.error("Chapa initialization failed details:", data);
-          const errorMsg = typeof data.error === 'object' ? JSON.stringify(data.error) : (data.error || "Unknown error");
-          alert("Failed to initialize Chapa payment: " + errorMsg);
+        if (data.mode === "hosted" && data.checkoutUrl) {
+          localStorage.setItem('chapaCheckoutUrl', data.checkoutUrl);
+          setChapaCheckoutUrl(data.checkoutUrl);
+          setCart([]);
+          setIsCheckingOut(false);
+          setIsCartOpen(false);
           setCheckoutLoading(false);
+          setSpecialInstructions("");
+          setBlockNumber("");
+          setRoomNumber("");
+          setScheduleEnabled(false);
+          setScheduledFor("");
+          window.location.href = data.checkoutUrl;
+          return;
+        }
+
+        if (data.mode === "inline" || data.publicKey) {
+          const loaded = await loadChapaScript();
+          if (!loaded || !(window as any).ChapaCheckout) {
+            throw new Error("Unable to load Chapa checkout script. Please check your internet connection and try again.");
+          }
+
+          (window as any).ChapaCheckout.init({
+            publicKey: data.publicKey,
+            amount: finalTotal.toString(),
+            currency: "ETB",
+            email: customerEmail.trim(),
+            first_name: firstName,
+            last_name: lastName,
+            phone_number: customerPhone.trim(),
+            tx_ref: data.txRef,
+            callback_url: data.callbackUrl,
+            return_url: data.returnUrl,
+            customization: {
+              title: "Savory Order",
+              description: `Payment for ${cart.length || 1} items`
+            },
+            onSuccess: () => {
+              setCart([]);
+              setIsCheckingOut(false);
+              setIsCartOpen(false);
+              setCheckoutLoading(false);
+              setSpecialInstructions("");
+              setBlockNumber("");
+              setRoomNumber("");
+              setScheduleEnabled(false);
+              setScheduledFor("");
+            },
+            onClose: () => {
+              setCheckoutLoading(false);
+            }
+          });
+          return;
         }
       } else {
         // Save order as pending in DB directly for Cash
@@ -748,20 +865,20 @@ export function MainApp() {
             customerName: customerName,
             customerEmail: customerEmail,
             customerPhone: customerPhone,
-            blockNumber,
-            roomNumber,
-            googleMapsAddress,
+            blockNumber: fulfillmentType === 'delivery' ? blockNumber : "",
+            roomNumber: fulfillmentType === 'delivery' ? roomNumber : "",
+            googleMapsAddress: fulfillmentType === 'delivery' ? googleMapsAddress : "",
             specialInstructions,
+            fulfillmentType,
+            scheduledFor: finalScheduledFor,
             paymentMethod: "cash",
             paymentStatus: "pending",
             status: "pending",
             userId: user?.uid,
             serviceTax: taxAmount,
-            flatFee: checkoutSettings.flatFeeETB,
+            flatFee: deliveryFee,
             promoCode: appliedPromo?.code,
-            discountAmount,
-            pointsUsed,
-            pointsEarned
+            discountAmount
           })
         });
         const data = await res.json();
@@ -776,18 +893,39 @@ export function MainApp() {
           setBlockNumber("");
           setRoomNumber("");
           setGoogleMapsAddress("");
+          setScheduleEnabled(false);
+          setScheduledFor("");
         } else {
-          alert("Failed to create cash order");
+          toastError("Failed to create cash order");
           setCheckoutLoading(false);
         }
       }
     } catch (err: any) {
-      alert(`Checkout failed: ${err.message}`);
+      const msg = typeof err?.message === "string" ? err.message : (typeof err === "string" ? err : JSON.stringify(err));
+      toastError(`Checkout failed: ${msg}`);
       setCheckoutLoading(false);
     }
   };
 
   // Filtered menu logic
+  const isItemCurrentlyAvailable = (item: MenuItem): boolean => {
+    if (item.menuTiming === "All Day" || (!item.menuTiming)) return true;
+    if (!item.timingFrom || !item.timingTo) return true;
+    const now = new Date();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const parseTime = (t: string) => {
+      const [h, m] = t.split(":").map(Number);
+      return (h || 0) * 60 + (m || 0);
+    };
+    const from = parseTime(item.timingFrom);
+    const to = parseTime(item.timingTo);
+    // Handle windows that cross midnight (from > to).
+    if (from <= to) {
+      return nowMin >= from && nowMin <= to;
+    }
+    return nowMin >= from || nowMin <= to;
+  };
+
   const filteredMenu = menu.filter(item => {
     const matchesCategory = selectedCategory === 'all' ||
       item.category === selectedCategory ||
@@ -796,7 +934,18 @@ export function MainApp() {
     const matchesSearch = (item.name || '').toLowerCase().includes(normalizedSearchQuery) ||
       (item.description || '').toLowerCase().includes(normalizedSearchQuery);
     const isCurrentlyActive = item.isActive !== false;
-    return matchesCategory && matchesSearch && isCurrentlyActive;
+    return matchesCategory && matchesSearch && isCurrentlyActive && isItemCurrentlyAvailable(item);
+  });
+
+  // Group the filtered menu by category while preserving the categories order.
+  const itemCategoryIds = (item: MenuItem) =>
+    item.categories && item.categories.length > 0 ? item.categories : (item.category ? [item.category] : []);
+  const categoryGroups = categories
+    .map(cat => ({ ...cat, items: filteredMenu.filter(item => itemCategoryIds(item).includes(cat.id)) }))
+    .filter(group => group.items.length > 0);
+  const uncategorizedItems = filteredMenu.filter(item => {
+    const ids = itemCategoryIds(item);
+    return ids.length === 0 || !ids.some(id => categories.some(c => c.id === id));
   });
 
   if (authLoading) {
@@ -865,7 +1014,7 @@ export function MainApp() {
         <header className="bg-white border-b border-stone-200 sticky top-0 z-40 backdrop-blur-md bg-white/95">
           <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
             {/* Logo / Brand */}
-            <div className="flex items-center space-x-3 cursor-pointer">
+            <Link to="/" className="flex items-center space-x-3 cursor-pointer" aria-label="Go to homepage">
               {globalSettings?.logoUrl ? (
                 <img src={globalSettings.logoUrl} alt="Logo" className="h-10 w-auto object-contain rounded" />
               ) : (
@@ -879,7 +1028,7 @@ export function MainApp() {
                 </span>
                 <span className="text-[10px] font-mono tracking-widest text-stone-500 uppercase">RESTAURANT</span>
               </div>
-            </div>
+            </Link>
 
             {/* Action Header Items */}
             <div className="flex items-center space-x-3 relative">
@@ -975,13 +1124,17 @@ export function MainApp() {
         {/* Main Container */}
         <main className="flex-grow max-w-7xl w-full mx-auto px-6 py-8">
 
-          {!checkoutSettings.isOpen && (
+          {!isOpen && (
             <div className="mb-8 bg-rose-50 border border-rose-200 text-rose-800 p-4 rounded-2xl flex flex-col items-center justify-center text-center shadow-sm">
               <h2 className="font-serif font-bold text-lg mb-1 flex items-center space-x-2">
-                <span>We're Currently Closed</span>
+                <span>We're Currently {checkoutSettings.scheduleEnabled && scheduleStatus.reason === "notOpen" ? "Closed" : "Not Accepting Orders"}</span>
               </h2>
               <p className="text-xs text-rose-600 font-medium">
-                We are not accepting orders at this time. Please check back later!
+                {checkoutSettings.scheduleEnabled && scheduleStatus.reason === "notOpen"
+                  ? `We open at ${formatTimeHHMM(checkoutSettings.openTime)}. Please check back then!`
+                  : checkoutSettings.scheduleEnabled && scheduleStatus.reason === "stopOrders"
+                    ? `We stop accepting orders at ${formatTimeHHMM(checkoutSettings.closeTime)} to finish preparing existing orders. See you tomorrow!`
+                    : "We are not accepting orders at this time. Please check back later!"}
               </p>
             </div>
           )}
@@ -1043,53 +1196,119 @@ export function MainApp() {
                     <p className="text-stone-800 font-semibold text-sm">No dishes found matching your selection.</p>
                   </div>
                 ) : (
-                  <div className="space-y-8 relative z-10">
-                    {filteredMenu.map(dish => (
-                      <Link
-                        key={dish.id}
-                        to={`/food/${dish.id}`}
-                        className="group flex flex-col sm:flex-row justify-between items-baseline cursor-pointer hover:bg-stone-100/50 p-3 -mx-3 rounded transition-colors"
-                      >
-                        <div className="flex flex-1 min-w-0 items-start pr-4 w-full">
-                          <img
-                            src={dish.image}
-                            alt={dish.name}
-                            className="w-24 h-24 mr-4 rounded-lg object-cover bg-stone-200 border border-stone-200 flex-shrink-0"
-                          />
-                          <div className="flex-1 min-w-0">
-                          <div className="flex items-baseline w-full">
-                            <h3 className="font-serif font-bold text-base md:text-lg text-stone-900 group-hover:text-amber-700 whitespace-nowrap">{dish.name}</h3>
-                            <div className="flex-grow border-b-2 border-dotted border-stone-300 mx-3 opacity-50 relative top-[-6px]"></div>
-                          </div>
-                          <p className="text-xs md:text-sm text-stone-600 mt-1 font-serif italic line-clamp-2">{dish.description}</p>
-                          <div className="flex space-x-2 mt-2 font-sans items-center">
-                            {dish.popular && <span className="text-[10px] font-bold text-amber-700 uppercase tracking-widest">★ Popular</span>}
-                            {dish.prepTime && <span className="text-[10px] text-stone-500 uppercase tracking-widest">{dish.popular ? '• ' : ''}{dish.prepTime}</span>}
-                            {dish.menuTiming && dish.menuTiming !== "All Day" && (
-                              <span className="text-[10px] text-emerald-700 uppercase tracking-widest">• {dish.menuTiming}</span>
-                            )}
-                          </div>
-                          </div>
+                  <div className="space-y-10 relative z-10">
+                    {categoryGroups.map(group => (
+                      <div key={group.id}>
+                        <div className="text-center mb-6">
+                          <h3 className="font-serif text-xl md:text-2xl font-bold text-stone-900 tracking-widest uppercase">{group.name}</h3>
+                          <div className="w-12 h-px bg-stone-300 mx-auto mt-2"></div>
                         </div>
-                        <div className="pl-0 sm:pl-4 mt-3 sm:mt-0 shrink-0 flex flex-row sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto">
-                          <span className="font-mono text-base md:text-lg font-bold text-stone-900 group-hover:text-amber-700 transition-colors">{dish.price.toFixed(2)} ETB</span>
-                          <button
-                            disabled={!checkoutSettings.isOpen}
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              addToCart(dish);
-                            }}
-                            className={`mt-0 sm:mt-2 text-[10px] font-bold uppercase tracking-widest px-4 py-1.5 rounded transition-colors ${checkoutSettings.isOpen
-                              ? 'bg-stone-200 text-stone-800 hover:bg-amber-600 hover:text-white'
-                              : 'bg-stone-200 text-stone-400 cursor-not-allowed'
-                              }`}
-                          >
-                            {checkoutSettings.isOpen ? 'Add' : 'Closed'}
-                          </button>
+                        <div className="space-y-6">
+                          {group.items.map(dish => (
+                            <Link
+                              key={dish.id}
+                              to={`/food/${dish.id}`}
+                              className="group flex flex-col sm:flex-row justify-between items-baseline cursor-pointer hover:bg-stone-100/50 p-3 -mx-3 rounded transition-colors"
+                            >
+                              <div className="flex flex-1 min-w-0 items-start pr-4 w-full">
+                                <img
+                                  src={dish.image}
+                                  alt={dish.name}
+                                  className="w-24 h-24 mr-4 rounded-lg object-cover bg-stone-200 border border-stone-200 flex-shrink-0"
+                                />
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-baseline w-full">
+                                    <h3 className="font-serif font-bold text-base md:text-lg text-stone-900 group-hover:text-amber-700 whitespace-nowrap">{dish.name}</h3>
+                                    <div className="flex-grow border-b-2 border-dotted border-stone-300 mx-3 opacity-50 relative top-[-6px]"></div>
+                                  </div>
+                                  <p className="text-xs md:text-sm text-stone-600 mt-1 font-serif italic line-clamp-2">{dish.description}</p>
+                                  <div className="flex space-x-2 mt-2 font-sans items-center">
+                                    {dish.popular && <span className="text-[10px] font-bold text-amber-700 uppercase tracking-widest">★ Popular</span>}
+                                    {dish.prepTime && <span className="text-[10px] text-stone-500 uppercase tracking-widest">{dish.popular ? '• ' : ''}{dish.prepTime}</span>}
+                                    {dish.menuTiming && dish.menuTiming !== "All Day" && (
+                                      <span className="text-[10px] text-emerald-700 uppercase tracking-widest">• {dish.menuTiming}{dish.timingFrom && dish.timingTo ? ` (Available ${dish.timingFrom}–${dish.timingTo})` : ''}</span>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="pl-0 sm:pl-4 mt-3 sm:mt-0 shrink-0 flex flex-row sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto">
+                                <span className="font-mono text-base md:text-lg font-bold text-stone-900 group-hover:text-amber-700 transition-colors">{dish.price.toFixed(2)} ETB</span>
+                                <button
+                                  disabled={!isOpen}
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    addToCart(dish);
+                                  }}
+                                  className={`mt-0 sm:mt-2 text-[10px] font-bold uppercase tracking-widest px-4 py-1.5 rounded transition-colors ${isOpen
+                                    ? 'bg-stone-200 text-stone-800 hover:bg-amber-600 hover:text-white'
+                                    : 'bg-stone-200 text-stone-400 cursor-not-allowed'
+                                    }`}
+                                >
+                                  {isOpen ? 'Add' : 'Closed'}
+                                </button>
+                              </div>
+                            </Link>
+                          ))}
                         </div>
-                      </Link>
+                      </div>
                     ))}
+                    {uncategorizedItems.length > 0 && (
+                      <div>
+                        <div className="text-center mb-6">
+                          <h3 className="font-serif text-xl md:text-2xl font-bold text-stone-900 tracking-widest uppercase">Other</h3>
+                          <div className="w-12 h-px bg-stone-300 mx-auto mt-2"></div>
+                        </div>
+                        <div className="space-y-6">
+                          {uncategorizedItems.map(dish => (
+                            <Link
+                              key={dish.id}
+                              to={`/food/${dish.id}`}
+                              className="group flex flex-col sm:flex-row justify-between items-baseline cursor-pointer hover:bg-stone-100/50 p-3 -mx-3 rounded transition-colors"
+                            >
+                              <div className="flex flex-1 min-w-0 items-start pr-4 w-full">
+                                <img
+                                  src={dish.image}
+                                  alt={dish.name}
+                                  className="w-24 h-24 mr-4 rounded-lg object-cover bg-stone-200 border border-stone-200 flex-shrink-0"
+                                />
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-baseline w-full">
+                                    <h3 className="font-serif font-bold text-base md:text-lg text-stone-900 group-hover:text-amber-700 whitespace-nowrap">{dish.name}</h3>
+                                    <div className="flex-grow border-b-2 border-dotted border-stone-300 mx-3 opacity-50 relative top-[-6px]"></div>
+                                  </div>
+                                  <p className="text-xs md:text-sm text-stone-600 mt-1 font-serif italic line-clamp-2">{dish.description}</p>
+                                  <div className="flex space-x-2 mt-2 font-sans items-center">
+                                    {dish.popular && <span className="text-[10px] font-bold text-amber-700 uppercase tracking-widest">★ Popular</span>}
+                                    {dish.prepTime && <span className="text-[10px] text-stone-500 uppercase tracking-widest">{dish.popular ? '• ' : ''}{dish.prepTime}</span>}
+                                    {dish.menuTiming && dish.menuTiming !== "All Day" && (
+                                      <span className="text-[10px] text-emerald-700 uppercase tracking-widest">• {dish.menuTiming}{dish.timingFrom && dish.timingTo ? ` (Available ${dish.timingFrom}–${dish.timingTo})` : ''}</span>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="pl-0 sm:pl-4 mt-3 sm:mt-0 shrink-0 flex flex-row sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto">
+                                <span className="font-mono text-base md:text-lg font-bold text-stone-900 group-hover:text-amber-700 transition-colors">{dish.price.toFixed(2)} ETB</span>
+                                <button
+                                  disabled={!isOpen}
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    addToCart(dish);
+                                  }}
+                                  className={`mt-0 sm:mt-2 text-[10px] font-bold uppercase tracking-widest px-4 py-1.5 rounded transition-colors ${isOpen
+                                    ? 'bg-stone-200 text-stone-800 hover:bg-amber-600 hover:text-white'
+                                    : 'bg-stone-200 text-stone-400 cursor-not-allowed'
+                                    }`}
+                                >
+                                  {isOpen ? 'Add' : 'Closed'}
+                                </button>
+                              </div>
+                            </Link>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1099,8 +1318,15 @@ export function MainApp() {
 
         {/* Cart lateral Drawer Overlay */}
         {isCartOpen && (
-          <div id="cart-drawer-overlay" className="fixed inset-0 bg-black/45 z-50 flex justify-end backdrop-blur-xs">
-            <div className="w-full max-w-md bg-white h-full shadow-2xl flex flex-col justify-between animate-slide-left font-sans">
+          <div
+            id="cart-drawer-overlay"
+            className="fixed inset-0 bg-black/45 z-50 flex justify-end backdrop-blur-xs"
+            onClick={() => { setIsCartOpen(false); setIsCheckingOut(false); }}
+          >
+            <div
+              className="w-full max-w-md bg-white h-full shadow-2xl flex flex-col justify-between animate-slide-left font-sans"
+              onClick={(e) => { e.stopPropagation(); }}
+            >
               {/* Header */}
               <div className="p-6 border-b border-stone-100 flex items-center justify-between bg-stone-50">
                 <div className="flex items-center space-x-2.5">
@@ -1161,6 +1387,154 @@ export function MainApp() {
 
                       <div className="space-y-3">
                         <div>
+                          <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1">How would you like to receive your order?</label>
+                          <div className="grid grid-cols-3 gap-2">
+                            {([
+                              { id: 'delivery', label: 'Delivery', icon: <Truck className="w-5 h-5" /> },
+                              { id: 'pickup', label: "I'll take it myself", icon: <ShoppingBag className="w-5 h-5" /> },
+                              { id: 'dineIn', label: 'I can eat there', icon: <Store className="w-5 h-5" /> }
+                            ] as { id: 'delivery' | 'pickup' | 'dineIn'; label: string; icon: React.ReactNode }[]).map(opt => (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                onClick={() => setFulfillmentType(opt.id)}
+                                className={`p-2.5 rounded-xl border flex flex-col items-center justify-center space-y-1 text-center transition-all cursor-pointer ${fulfillmentType === opt.id
+                                  ? 'border-amber-500 bg-amber-50 text-amber-900 ring-1 ring-amber-500/30'
+                                  : 'border-stone-300 text-stone-500 hover:border-stone-400 bg-white'
+                                  }`}
+                              >
+                                {opt.icon}
+                                <span className="text-[10px] font-bold leading-tight">{opt.label}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {fulfillmentType === 'delivery' && (
+                          <div className="bg-amber-50 border border-amber-200/60 rounded-xl p-3 text-[11px] text-amber-800 leading-relaxed space-y-0.5">
+                            <span className="font-bold block text-[12px] text-amber-900"> Exact Address Required </span>
+                            Please provide your <strong className="text-amber-950">Delivery Address</strong>. Block and Room numbers are secondary.
+                          </div>
+                        )}
+                        {fulfillmentType !== 'delivery' && (
+                          <div className="bg-emerald-50 border border-emerald-200/60 rounded-xl p-3 text-[11px] text-emerald-800 leading-relaxed">
+                            {fulfillmentType === 'dineIn'
+                              ? "You'll be served at the restaurant. No delivery fee applies and your order will be ready for you on site."
+                              : "You'll pick this up yourself. No delivery fee applies and your order will be ready for pickup."}
+                          </div>
+                        )}
+
+                        {fulfillmentType === 'delivery' && (
+                          <>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1">Block Number</label>
+                                <input
+                                  type="text"
+                                  name="address-line2"
+                                  autoComplete="address-line2"
+                                  value={blockNumber}
+                                  onChange={e => setBlockNumber(e.target.value)}
+                                  placeholder="e.g., Block 4"
+                                  className="w-full text-xs border border-stone-355 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 bg-stone-50/50"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1">Room Number</label>
+                                <input
+                                  type="text"
+                                  name="room"
+                                  value={roomNumber}
+                                  onChange={e => setRoomNumber(e.target.value)}
+                                  placeholder="e.g., Room 12B"
+                                  className="w-full text-xs border border-stone-355 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 bg-stone-50/50"
+                                />
+                              </div>
+                            </div>
+
+                            <div>
+                              <div className="flex items-center justify-between mb-1">
+                                <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide">Delivery Address *</label>
+                                <button
+                                  type="button"
+                                  onClick={() => setUseGoogleMaps(!useGoogleMaps)}
+                                  className="text-[10px] text-amber-600 hover:text-amber-800 underline font-semibold cursor-pointer"
+                                >
+                                  {useGoogleMaps ? "Use text input instead" : "Use Google Maps"}
+                                </button>
+                              </div>
+                              {useGoogleMaps ? (
+                                <GoogleMapsAddressInput
+                                  value={googleMapsAddress}
+                                  onChange={setGoogleMapsAddress}
+                                />
+                              ) : (
+                                <input
+                                  type="text"
+                                  name="street-address"
+                                  autoComplete="street-address"
+                                  value={googleMapsAddress}
+                                  onChange={e => setGoogleMapsAddress(e.target.value)}
+                                  placeholder="e.g., Bole, near Edna Mall"
+                                  className="w-full text-xs border border-stone-355 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 bg-stone-50/50"
+                                />
+                              )}
+                            </div>
+                          </>
+                        )}
+
+                        {/* Schedule for later */}
+                        <div className="border border-stone-200 rounded-xl p-3 space-y-2">
+                          <label className="flex items-center justify-between cursor-pointer">
+                            <span className="text-[10px] font-bold text-stone-500 uppercase tracking-wide flex items-center space-x-1.5">
+                              <Clock className="w-3.5 h-3.5" />
+                              <span>Schedule for later</span>
+                            </span>
+                            <span className="relative inline-flex items-center cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={scheduleEnabled}
+                                onChange={e => setScheduleEnabled(e.target.checked)}
+                                className="sr-only peer"
+                              />
+                              <div className="w-9 h-5 bg-stone-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2.5px] after:start-[2.5px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
+                            </span>
+                          </label>
+
+                          {scheduleEnabled && (
+                            <div>
+                              <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1">Pick a time slot</label>
+                              <select
+                                value={scheduledFor}
+                                onChange={e => setScheduledFor(e.target.value)}
+                                className="w-full text-xs border border-stone-355 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 bg-stone-50/50"
+                              >
+                                <option value="">Select a time...</option>
+                                {(() => {
+                                  const prepTimeMinutes = checkoutSettings.prepTimeMinutes || 30;
+                                  const stepMinutes = checkoutSettings.scheduledStepsMinutes || 15;
+                                  const slots: { value: string; label: string }[] = [];
+                                  const start = new Date(Date.now() + prepTimeMinutes * 60 * 1000);
+                                  start.setSeconds(0, 0);
+                                  const roundedMin = Math.ceil(start.getMinutes() / stepMinutes) * stepMinutes;
+                                  start.setMinutes(roundedMin, 0, 0);
+                                  for (let i = 0; i < 12; i++) {
+                                    const slot = new Date(start.getTime() + i * stepMinutes * 60 * 1000);
+                                    slots.push({
+                                      value: slot.toISOString(),
+                                      label: `${slot.toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${slot.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                                    });
+                                  }
+                                  return slots.map(s => (
+                                    <option key={s.value} value={s.value}>{s.label}</option>
+                                  ));
+                                })()}
+                              </select>
+                              <p className="text-[9px] text-stone-400 mt-1.5">Earliest slot is {checkoutSettings.prepTimeMinutes || 30} minutes from now. Your order will appear in the kitchen when it's time to prepare it.</p>
+                            </div>
+                          )}
+                        </div>
+                        <div>
                           <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1">Customer Full Name *</label>
                           <input
                             type="text"
@@ -1200,68 +1574,8 @@ export function MainApp() {
                           />
                         </div>
 
-                        <div className="bg-amber-50 border border-amber-200/60 rounded-xl p-3 text-[11px] text-amber-800 leading-relaxed space-y-0.5">
-                          <span className="font-bold block text-[12px] text-amber-900"> Exact Address Required </span>
-                          Please provide your <strong className="text-amber-950">Delivery Address</strong>. Block and Room numbers are secondary.
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1">Block Number</label>
-                            <input
-                              type="text"
-                              name="address-line2"
-                              autoComplete="address-line2"
-                              value={blockNumber}
-                              onChange={e => setBlockNumber(e.target.value)}
-                              placeholder="e.g., Block 4"
-                              className="w-full text-xs border border-stone-355 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 bg-stone-50/50"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1">Room Number</label>
-                            <input
-                              type="text"
-                              name="room"
-                              value={roomNumber}
-                              onChange={e => setRoomNumber(e.target.value)}
-                              placeholder="e.g., Room 12B"
-                              className="w-full text-xs border border-stone-355 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 bg-stone-50/50"
-                            />
-                          </div>
-                        </div>
-
                         <div>
-                          <div className="flex items-center justify-between mb-1">
-                            <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide">Delivery Address *</label>
-                            <button
-                              type="button"
-                              onClick={() => setUseGoogleMaps(!useGoogleMaps)}
-                              className="text-[10px] text-amber-600 hover:text-amber-800 underline font-semibold cursor-pointer"
-                            >
-                              {useGoogleMaps ? "Use text input instead" : "Use Google Maps"}
-                            </button>
-                          </div>
-                          {useGoogleMaps ? (
-                            <GoogleMapsAddressInput
-                              value={googleMapsAddress}
-                              onChange={setGoogleMapsAddress}
-                            />
-                          ) : (
-                            <input
-                              type="text"
-                              name="street-address"
-                              autoComplete="street-address"
-                              value={googleMapsAddress}
-                              onChange={e => setGoogleMapsAddress(e.target.value)}
-                              placeholder="e.g., Bole, near Edna Mall"
-                              className="w-full text-xs border border-stone-355 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 bg-stone-50/50"
-                            />
-                          )}
-                        </div>
-
-                        <div>
-                          <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1">Special Instructions (Optional)</label>
+                          <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1">Extra Information</label>
                           <textarea
                             value={specialInstructions}
                             onChange={e => setSpecialInstructions(e.target.value)}
@@ -1304,7 +1618,7 @@ export function MainApp() {
                                 </div>
                                 <span className="text-[10px]">Chapa Pay</span>
                               </div>
-                              <span className="text-[8px] opacity-75">KO CBE / Cards</span>
+                              <span className="text-[8px] opacity-75">Telebirr / Cards</span>
                             </button>
                             <button
                               type="button"
@@ -1319,7 +1633,7 @@ export function MainApp() {
                             >
                               <ClipboardList className={`w-4 h-4 ${checkoutSettings.enableCOD ? 'text-stone-700' : 'text-stone-300'}`} />
                               <span className="text-[10px]">Cash on Delivery</span>
-                              {!checkoutSettings.enableCOD && <span className="text-[7px] uppercase font-bold text-rose-500">Disabled</span>}
+                              {!checkoutSettings.enableCOD && <span className="text-[7px] uppercase font-bold text-rose-500"></span>}
                             </button>
                           </div>
                         </div>
@@ -1369,21 +1683,6 @@ export function MainApp() {
                         {promoError && <p className="text-rose-500 text-[10px] mt-1">{promoError}</p>}
                       </div>
 
-                      {userProfile?.points > 0 && (
-                        <div className="flex items-center justify-between bg-white p-3 rounded-xl border border-stone-200 shadow-sm">
-                          <div className="flex items-center space-x-2">
-                            <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
-                            <div>
-                              <p className="text-xs font-bold text-stone-900">Use Loyalty Points</p>
-                              <p className="text-[10px] text-stone-500">You have {userProfile.points} points ({userProfile.points} ETB)</p>
-                            </div>
-                          </div>
-                          <label className="relative inline-flex items-center cursor-pointer">
-                            <input type="checkbox" className="sr-only peer" checked={usePoints} onChange={() => setUsePoints(!usePoints)} />
-                            <div className="w-9 h-5 bg-stone-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-stone-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-600"></div>
-                          </label>
-                        </div>
-                      )}
                     </div>
                   )}
 
@@ -1399,11 +1698,15 @@ export function MainApp() {
                       </div>
                     )}
                     <div className="flex justify-between">
-                      <span>Delivery Fee</span>
-                      {checkoutSettings.flatFeeETB > 0 ? (
-                        <span className="font-mono">+{checkoutSettings.flatFeeETB.toFixed(2)} ETB</span>
+                      <span>{fulfillmentType === 'delivery' ? 'Delivery Fee' : 'Fulfillment'}</span>
+                      {fulfillmentType === 'delivery' ? (
+                        deliveryFee > 0 ? (
+                          <span className="font-mono">+{deliveryFee.toFixed(2)} ETB</span>
+                        ) : (
+                          <span className="text-emerald-700 font-bold">FREE</span>
+                        )
                       ) : (
-                        <span className="text-emerald-700 font-bold">FREE</span>
+                        <span className="text-emerald-700 font-bold">No delivery fee</span>
                       )}
                     </div>
                     {appliedPromo && (
@@ -1412,28 +1715,15 @@ export function MainApp() {
                         <span className="font-mono">-{discountAmount.toFixed(2)} ETB</span>
                       </div>
                     )}
-                    {usePoints && pointsUsed > 0 && (
-                      <div className="flex justify-between text-amber-600 font-semibold">
-                        <span>Points Used</span>
-                        <span className="font-mono">-{pointsUsed.toFixed(2)} ETB</span>
-                      </div>
-                    )}
                     <div className="flex justify-between text-stone-900 font-bold text-sm pt-2 border-t border-stone-200">
                       <span>Total Bill:</span>
                       <span className="font-mono text-amber-700">{finalTotal.toFixed(2)} ETB</span>
                     </div>
-                    {isCheckingOut && finalTotal > 0 && (
-                      <div className="text-right mt-1">
-                        <span className="text-[10px] text-stone-500 font-semibold">
-                          Earns <strong className="text-amber-600">{pointsEarned}</strong> points
-                        </span>
-                      </div>
-                    )}
                   </div>
 
                   {!isCheckingOut ? (
                     <button
-                      disabled={!checkoutSettings.isOpen}
+                      disabled={!isOpen}
                       onClick={() => {
                         setIsCheckingOut(true);
                         if (!customerName) setCustomerName(localStorage.getItem("lastCheckoutName") || "");
@@ -1447,11 +1737,11 @@ export function MainApp() {
                           setUseGoogleMaps(savedUseGoogleMaps === "true");
                         }
                       }}
-                      className={`w-full font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-all flex items-center justify-center ${checkoutSettings.isOpen ? 'bg-stone-900 hover:bg-amber-600 text-white cursor-pointer' : 'bg-stone-300 text-stone-500 cursor-not-allowed'
+                      className={`w-full font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-all flex items-center justify-center ${isOpen ? 'bg-stone-900 hover:bg-amber-600 text-white cursor-pointer' : 'bg-stone-300 text-stone-500 cursor-not-allowed'
                         }`}
                     >
-                      <span>{checkoutSettings.isOpen ? 'Proceed to Delivery details' : 'Currently Closed'}</span>
-                      {checkoutSettings.isOpen && <ChevronRight className="w-4 h-4 ml-1" />}
+                      <span>{isOpen ? (fulfillmentType === 'delivery' ? 'Proceed to Delivery details' : 'Proceed to Checkout') : 'Currently Closed'}</span>
+                      {isOpen && <ChevronRight className="w-4 h-4 ml-1" />}
                     </button>
                   ) : (
                     <div className="flex space-x-2">
@@ -1503,11 +1793,9 @@ export function MainApp() {
                 {/* Receipt Header */}
                 <div className="text-center space-y-2 mt-2">
                   <h2 className="text-lg font-serif font-black tracking-tight text-stone-950 uppercase">Savory Restaurant</h2>
-                  <p className="text-[10px] text-stone-500 font-sans">100 Gourmet Way, Addis Ababa, Ethiopia</p>
-                  <p className="text-[10px] text-stone-500 font-sans">Tel: +251 911 234567</p>
                   <div className="border-b border-dashed border-stone-300 my-4" />
-                  <h3 className="text-[11px] font-bold text-stone-950 tracking-wider">OFFICIAL TRANSACTION RECEIPT</h3>
-                  <p className="text-[10px] text-stone-400">STATUS: SECURELY PAID</p>
+                  <h3 className="text-[11px] font-bold text-stone-950 tracking-wider">TRANSACTION RECEIPT</h3>
+                  <p className="text-[10px] text-stone-400">STATUS:PAID</p>
                 </div>
 
                 {/* Transaction Metadata */}
@@ -1698,8 +1986,8 @@ export function MainApp() {
                         <span className="flex items-center space-x-1.5">
                           <span>{placedOrder.paymentStatus || "PENDING"}</span>
                           <span className="flex space-x-1 items-center inline-flex h-3">
-                            <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                            <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                            <span className="w-1.5 h-1.5 bg-amber-500 rounded-full"></span>
+                            <span className="w-1.5 h-1.5 bg-amber-500 rounded-full"></span>
                             <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                           </span>
                         </span>
@@ -1716,11 +2004,11 @@ export function MainApp() {
                             if (data.success && data.status === "completed") {
                               console.log("[CHAPA MANUAL VERIFY] Success!");
                             } else {
-                              alert("Status is still processing on Chapa's side. If you have already completed the payment, it will update shortly. Current state: " + (data.status || "pending"));
+                              toastInfo("Status is still processing on Chapa's side. If you have already completed the payment, it will update shortly. Current state: " + (data.status || "pending"));
                             }
                           } catch (e) {
                             console.error("[CHAPA MANUAL VERIFY] Error:", e);
-                            alert("Failed to connect to the verification server. Please try again.");
+                            toastError("Failed to connect to the verification server. Please try again.");
                           } finally {
                             setIsVerifying(false);
                           }
@@ -1742,41 +2030,31 @@ export function MainApp() {
                   </div>
                 </div>
                 <div className="border-t border-stone-200 mt-2.5 pt-2 flex justify-between font-bold text-stone-950">
-                  <span>Amount Paid:</span>
+                  <span>Amount:</span>
                   <span className="font-mono text-amber-700">{placedOrder.total.toFixed(2)} ETB</span>
                 </div>
               </div>
 
               {placedOrder.paymentStatus !== "completed" && (
                 <div className="bg-amber-50 border border-amber-200 p-4 rounded-xl text-center space-y-4 shadow-sm">
-                  <div>
-                    <h4 className="text-sm font-bold text-amber-800 flex items-center justify-center space-x-1">
-                      <span>ℹ️ Waiting for payment</span>
-                    </h4>
-                    <p className="text-xs text-amber-700 leading-relaxed mt-1">
-                      To complete your order, please process the payment via Chapa in a new tab. Once done, come back here and click the refresh button above.
-                    </p>
-                  </div>
                   {placedOrder.chapaCheckoutUrl && (
-                    <div>
-                      <a
-                        href={placedOrder.chapaCheckoutUrl}
-                        className="inline-block bg-[#00A859] hover:bg-[#008f4c] text-white font-bold py-3 px-6 rounded-xl text-xs uppercase tracking-wider transition-colors shadow-md cursor-pointer"
-                      >
-                        Pay Now via Chapa
-                      </a>
-                    </div>
+                    <a
+                      href={placedOrder.chapaCheckoutUrl}
+                      className="inline-block bg-[#00A859] hover:bg-[#008f4c] text-white font-bold py-3 px-6 rounded-xl text-xs uppercase tracking-wider transition-colors shadow-md cursor-pointer"
+                    >
+                      Go Back
+                    </a>
                   )}
                 </div>
               )}
 
               <div className="text-center">
                 <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-100 py-1.5 px-3 rounded-lg inline-block">
-                  🍜 {
+                  {
                     placedOrder.status === "delivered" ? "Your order is ready / delivered!" :
                       placedOrder.status === "preparing" ? "The kitchen is now preparing your delicious meal!" :
-                        placedOrder.paymentStatus === "completed" ? "Payment received! The kitchen will review and start cooking soon." :
-                          "Your order is securely registered!"
+                        placedOrder.paymentStatus === "completed" ? "Payment received!" :
+                          ""
                   }
                 </p>
               </div>
@@ -1811,19 +2089,20 @@ export function MainApp() {
                 {placedOrder.paymentStatus !== "completed" && (
                   <button
                     onClick={async () => {
-                      if (window.confirm("Are you sure you want to cancel this order?")) {
+                      confirmDialog("Are you sure you want to cancel this order?", async () => {
                         try {
-                          const { deleteDoc, doc } = await import("firebase/firestore");
-                          await deleteDoc(doc(db, "orders", placedOrder.id));
+                          // SEC-009: cancel = pending -> cancelled transition (allowed by rules),
+                          // never deleteDoc (delete is admin-only).
+                          await updateDoc(doc(db, "orders", placedOrder.id), { status: "cancelled" });
                           setPlacedOrder(null);
                           localStorage.removeItem('activeOrderId');
                           localStorage.removeItem('chapaCheckoutUrl');
                           setActiveOrderId(null);
                           setChapaCheckoutUrl(null);
                         } catch (err) {
-                          alert("Failed to cancel order.");
+                          toastError("Failed to cancel order.");
                         }
-                      }
+                      }, null, "Cancel Order");
                     }}
                     className="bg-stone-200 hover:bg-stone-300 text-stone-700 font-bold px-4 py-3 rounded-xl text-xs uppercase tracking-wider cursor-pointer transition-colors"
                   >
@@ -2027,10 +2306,11 @@ export function MainApp() {
 
                 <button
                   onClick={async () => {
-                    if (window.confirm("Are you sure you want to cancel this order?")) {
+                    confirmDialog("Are you sure you want to cancel this order?", async () => {
                       try {
-                        const { deleteDoc, doc } = await import("firebase/firestore");
-                        await deleteDoc(doc(db, "orders", orderActionModal.id));
+                        // SEC-009: cancel = pending -> cancelled transition (allowed by rules),
+                        // never deleteDoc (delete is admin-only).
+                        await updateDoc(doc(db, "orders", orderActionModal.id), { status: "cancelled" });
                         if (activeOrderId === orderActionModal.id) {
                           setPlacedOrder(null);
                           localStorage.removeItem('activeOrderId');
@@ -2038,9 +2318,9 @@ export function MainApp() {
                         }
                         setOrderActionModal(null);
                       } catch (err) {
-                        alert("Failed to cancel order.");
+                        toastError("Failed to cancel order.");
                       }
-                    }
+                    }, null, "Cancel Order");
                   }}
                   className="w-full bg-rose-50 hover:bg-rose-100 text-rose-750 font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
                 >
@@ -2051,7 +2331,7 @@ export function MainApp() {
                   onClick={() => setOrderActionModal(null)}
                   className="w-full bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium py-3 rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
                 >
-                  Keep Order (Close)
+                  Keep Order
                 </button>
               </div>
             </div>
@@ -2163,7 +2443,7 @@ export function MainApp() {
                   </div>
 
                   <button
-                    disabled={!checkoutSettings.isOpen}
+                    disabled={!isOpen}
                     onClick={() => {
                       addToCart(expandedProduct);
                       if (expandedQuantity > 1) {
@@ -2173,11 +2453,11 @@ export function MainApp() {
                       }
                       handleCloseProductModal();
                     }}
-                    className={`flex-grow font-bold py-3.5 px-6 rounded-xl transition-colors w-full flex justify-between items-center text-sm tracking-wide shadow-md ${checkoutSettings.isOpen ? 'bg-stone-900 hover:bg-amber-600 text-white cursor-pointer' : 'bg-stone-300 text-stone-500 cursor-not-allowed'
+                    className={`flex-grow font-bold py-3.5 px-6 rounded-xl transition-colors w-full flex justify-between items-center text-sm tracking-wide shadow-md ${isOpen ? 'bg-stone-900 hover:bg-amber-600 text-white cursor-pointer' : 'bg-stone-300 text-stone-500 cursor-not-allowed'
                       }`}
                   >
-                    <span className="uppercase">{checkoutSettings.isOpen ? 'Add to Order' : 'Closed'}</span>
-                    {checkoutSettings.isOpen && <span className="font-mono bg-white/20 px-2 py-1 rounded">{(expandedProduct.price * expandedQuantity).toFixed(2)} ETB</span>}
+                    <span className="uppercase">{isOpen ? 'Add to Order' : 'Closed'}</span>
+                    {isOpen && <span className="font-mono bg-white/20 px-2 py-1 rounded">{(expandedProduct.price * expandedQuantity).toFixed(2)} ETB</span>}
                   </button>
                 </div>
 

@@ -5,10 +5,12 @@
 
 import express from "express";
 import path from "path";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import axios from "axios";
 import { applicationDefault, initializeApp } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import fs from "fs";
 
@@ -52,8 +54,69 @@ const db = firebaseConfig.firestoreDatabaseId
 const app = express();
 const PORT = 3000;
 
+// Capture the exact raw request body for the Chapa webhook so we can verify
+// the HMAC SHA256 payload signature (must run before express.json parses it).
+app.use((req: any, _res, next) => {
+  if (req.path === "/api/chapa/webhook") {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      req.rawBody = Buffer.concat(chunks).toString("utf8");
+      next();
+    });
+    req.on("error", next);
+  } else {
+    next();
+  }
+});
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Middleware: require a valid Firebase ID token for admin/staff-only routes.
+// Token is read from the `Authorization: Bearer <idToken>` header, with a
+// fallback to `x-firebase-token` header / `token` query param for non-browser callers.
+async function requireStaffAuth(req: any, res: any, next: any) {
+  try {
+    const header = (req.headers?.authorization as string) || "";
+    let token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    if (!token && req.headers?.["x-firebase-token"]) {
+      token = String(req.headers["x-firebase-token"]).trim();
+    }
+    if (!token && req.query?.token) {
+      token = String(req.query.token).trim();
+    }
+
+    if (!token) {
+      return res.status(401).json({ error: "Unauthorized: Missing Firebase ID token." });
+    }
+
+    const decodedToken = await getAuth(appFirebase).verifyIdToken(token);
+    res.locals.uid = decodedToken.uid;
+    res.locals.token = decodedToken;
+    next();
+  } catch (error: any) {
+    console.warn("[AUTH] Firebase ID token verification failed:", error?.code || error?.message);
+    return res.status(401).json({ error: "Unauthorized: Invalid or expired Firebase ID token." });
+  }
+}
+
+// True when an env secret is unset or still a known dev placeholder. Webhook /
+// callback routes use this to FAIL CLOSED instead of silently skipping verification.
+function isMissingOrPlaceholderSecret(value?: string): boolean {
+  const secret = (value || "").trim();
+  if (!secret) return true;
+  const placeholders = [
+    "MY_CHAPA_WEBHOOK_SECRET",
+    "YOUR_CHAPA_WEBHOOK_SECRET",
+    "MY_SHIPDAY_WEBHOOK_TOKEN",
+    "YOUR_SHIPDAY_WEBHOOK_TOKEN",
+    "CHAPASECKEY-xxxx",
+    "SHIPDAY_WEBHOOK_TOKEN_XXXX"
+  ];
+  const upper = secret.toUpperCase();
+  return placeholders.some((p) => upper.includes(p)) || /xxxx/i.test(secret);
+}
 
 // Helper to trigger Shipday order creation
 async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number) {
@@ -125,7 +188,55 @@ async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number
 }
 
 
-async function applyLoyaltyAndPromo(orderData: any, db: any) {
+async function getCheckoutSettings(db: any) {
+  try {
+    const snap = await db.collection("settings").doc("checkout").get();
+    return snap.exists ? snap.data() : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+// ---- Operating schedule ----
+// Orders are accepted between openTime and (closeTime - prepTimeMinutes) so
+// the kitchen can finish preparing existing orders before closing.
+function parseHHMM(value: any): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(value ?? ""));
+  if (!m) return null;
+  const mins = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  return mins >= 0 && mins < 1440 ? mins : null;
+}
+
+function scheduleAcceptsOrders(cfg: any, now: Date = new Date()): { accepting: boolean; reason?: "notOpen" | "stopOrders" } {
+  // Schedule computes availability only; the caller applies the manual isOpen toggle when no schedule is set.
+  if (!cfg || !cfg.scheduleEnabled) return { accepting: true };
+  const open = parseHHMM(cfg.openTime);
+  const close = parseHHMM(cfg.closeTime);
+  if (open === null || close === null) return { accepting: true };
+  const prep = Math.max(0, parseInt(cfg.prepTimeMinutes, 10) || 30);
+  const cutoff = Math.min(1440, close - prep);
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  if (open < close) {
+    if (nowMin >= open && nowMin < cutoff) return { accepting: true };
+    return { accepting: false, reason: nowMin < open ? "notOpen" : "stopOrders" };
+  }
+  // Overnight schedule (e.g. 18:00 → 02:00).
+  if (nowMin >= open || nowMin < cutoff) return { accepting: true };
+  return { accepting: false, reason: nowMin >= cutoff ? "stopOrders" : "notOpen" };
+}
+
+function normalizeScheduledFor(scheduledFor: any, prepTimeMinutes: number): string | null {
+  if (!scheduledFor) return null;
+  const date = new Date(scheduledFor as string);
+  if (isNaN(date.getTime())) return null;
+  const now = new Date();
+  const min = new Date(now.getTime() + prepTimeMinutes * 60 * 1000);
+  if (date.getTime() < min.getTime()) return null;
+  return date.toISOString();
+}
+
+
+async function applyPromo(orderData: any, db: any) {
   try {
     if (orderData.promoCode) {
       const promoRef = db.collection("promoCodes").doc(orderData.promoCode);
@@ -135,19 +246,8 @@ async function applyLoyaltyAndPromo(orderData: any, db: any) {
         await promoRef.update({ usageCount: (promo.usageCount || 0) + 1 });
       }
     }
-
-    if (orderData.userId && (orderData.pointsUsed > 0 || orderData.pointsEarned > 0)) {
-      const userRef = db.collection("users").doc(orderData.userId);
-      const userSnap = await userRef.get();
-      if (userSnap.exists) {
-        const user = userSnap.data();
-        const currentPoints = user.points || 0;
-        const newPoints = currentPoints - (orderData.pointsUsed || 0) + (orderData.pointsEarned || 0);
-        await userRef.update({ points: newPoints });
-      }
-    }
   } catch (error) {
-    console.error("[LOYALTY] Error applying loyalty/promo:", error);
+    console.error("[PROMO] Error applying promo:", error);
   }
 }
 
@@ -162,7 +262,7 @@ app.get("/api/categories", async (req, res) => {
   }
 });
 
-app.post("/api/categories", async (req, res) => {
+app.post("/api/categories", requireStaffAuth, async (req, res) => {
   try {
     const { name } = req.body;
     if (!name) {
@@ -180,7 +280,7 @@ app.post("/api/categories", async (req, res) => {
   }
 });
 
-app.delete("/api/categories/:id", async (req, res) => {
+app.delete("/api/categories/:id", requireStaffAuth, async (req, res) => {
   try {
     const { id } = req.params;
     await db.collection("categories").doc(id).delete();
@@ -204,7 +304,7 @@ app.get("/api/menu", async (req, res) => {
   }
 });
 
-app.post("/api/menu", async (req, res) => {
+app.post("/api/menu", requireStaffAuth, async (req, res) => {
   try {
     const item = req.body;
     if (!item.name || !item.price || !item.category) {
@@ -238,7 +338,7 @@ app.post("/api/menu", async (req, res) => {
   }
 });
 
-app.delete("/api/menu/:id", async (req, res) => {
+app.delete("/api/menu/:id", requireStaffAuth, async (req, res) => {
   try {
     const { id } = req.params;
     await db.collection("menu").doc(id).delete();
@@ -252,7 +352,7 @@ app.delete("/api/menu/:id", async (req, res) => {
 });
 
 // 2. Order Endpoints
-app.get("/api/orders", async (req, res) => {
+app.get("/api/orders", requireStaffAuth, async (req, res) => {
   try {
     const snapshot = await db.collection("orders").orderBy("createdAt", "desc").get();
     const orders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -270,11 +370,80 @@ app.post("/api/orders", async (req, res) => {
     }
 
     const orderId = orderData.id || `TX-${Math.floor(1000 + Math.random() * 9000)}`;
+    const nowISO = new Date().toISOString();
+    const status = orderData.status || "pending";
+    const fulfillmentType = ['delivery', 'pickup', 'dineIn'].includes(orderData.fulfillmentType) ? orderData.fulfillmentType : 'delivery';
+    const checkoutCfg = await getCheckoutSettings(db);
+    const prepTimeMinutes = checkoutCfg.prepTimeMinutes || 30;
+    const scheduledFor = normalizeScheduledFor(orderData.scheduledFor, prepTimeMinutes);
+
+    // Stop accepting orders `prepTimeMinutes` before closing time.
+    // Manual toggle (isOpen) still gates when no schedule is configured.
+    const schedule = scheduleAcceptsOrders(checkoutCfg);
+    const accepting = checkoutCfg.scheduleEnabled ? schedule.accepting : checkoutCfg.isOpen !== false;
+    if (!accepting) {
+      return res.status(400).json({ error: "We're currently not accepting orders." });
+    }
+
+    // ---- P0 financial integrity: never trust client-supplied prices/totals. ----
+    // Recompute each line using the authoritative menu doc; reject unknown items.
+    const recomputedItems: any[] = [];
+    let subtotal = 0;
+    for (const line of (orderData.items || [])) {
+      const raw = line?.menuItem ? line.menuItem : line;
+      const quantity = Number(line?.quantity) > 0 ? Number(line.quantity) : 1;
+      const menuItemId = raw?.id || raw?.menuItemId;
+      if (!menuItemId) {
+        return res.status(400).json({ error: "Each order item must reference a menu item id." });
+      }
+      const menuDoc = await db.collection("menu").doc(String(menuItemId)).get();
+      if (!menuDoc.exists) {
+        return res.status(400).json({ error: `Menu item '${menuItemId}' is no longer available and cannot be ordered.` });
+      }
+      const menuData = menuDoc.data();
+      const unitPrice = Number(menuData.price) || 0;
+      subtotal += unitPrice * quantity;
+      recomputedItems.push({ menuItem: { ...menuData, id: menuData.id || String(menuItemId) }, quantity });
+    }
+
+    // Service tax and delivery fee come from the authoritative checkout settings.
+    const taxPercent = Number(checkoutCfg.serviceTaxPercent) || 0;
+    const deliveryFlatFee = Number(checkoutCfg.flatFeeETB) || 0;
+    const serviceTax = Math.round(subtotal * taxPercent) / 100;
+    const flatFee = fulfillmentType === 'delivery' ? deliveryFlatFee : 0;
+
+    // Validate the promo against the authoritative promo doc before discounting.
+    let discountAmount = 0;
+    if (orderData.promoCode) {
+      const promoCode = String(orderData.promoCode).trim().toUpperCase();
+      const promoSnap = await db.collection("promoCodes").doc(promoCode).get();
+      if (promoSnap.exists) {
+        const promo = promoSnap.data();
+        const promoActive = promo.active !== false;
+        const promoExpired = promo.expiresAt && new Date(promo.expiresAt).getTime() < Date.now();
+        const aboveMinOrder = !promo.minOrderAmount || subtotal >= Number(promo.minOrderAmount);
+        if (promoActive && !promoExpired && aboveMinOrder) {
+          if (promo.type === 'percentage') {
+            discountAmount = subtotal * ((Number(promo.value) || 0) / 100);
+            if (promo.maxDiscount) discountAmount = Math.min(discountAmount, Number(promo.maxDiscount));
+          } else {
+            discountAmount = Number(promo.value) || 0;
+          }
+          discountAmount = Math.max(0, discountAmount);
+        }
+      }
+    }
+
+    const total = Math.max(0, Math.round((subtotal + serviceTax + flatFee - discountAmount) * 100) / 100);
+    // P0: paymentStatus is FORCED to 'pending' on creation regardless of client input;
+    // it can only become 'completed' after the Chapa webhook/verification flow.
+    const paymentStatus = "pending";
+
     const newOrder = {
       id: orderId,
-      items: orderData.items,
-      status: orderData.status || "pending",
-      total: orderData.total,
+      items: recomputedItems,
+      status: status,
+      total: total,
       customerName: orderData.customerName,
       customerEmail: orderData.customerEmail,
       customerPhone: orderData.customerPhone,
@@ -283,20 +452,23 @@ app.post("/api/orders", async (req, res) => {
       googleMapsAddress: orderData.googleMapsAddress || "",
       specialInstructions: orderData.specialInstructions || "",
       paymentMethod: orderData.paymentMethod || "cash",
-      paymentStatus: orderData.paymentStatus || "pending",
+      paymentStatus: paymentStatus,
+      fulfillmentType,
+      scheduledFor,
       transactionRef: orderData.transactionRef || orderId,
-      createdAt: new Date().toISOString(),
+      createdAt: nowISO,
+      updatedAt: nowISO,
+      statusHistory: [{ status, at: nowISO }],
+      paymentHistory: [{ paymentStatus, at: nowISO }],
       userId: orderData.userId || null,
-      serviceTax: orderData.serviceTax || 0,
-      flatFee: orderData.flatFee || 0,
-      promoCode: orderData.promoCode || null,
-      discountAmount: orderData.discountAmount || 0,
-      pointsUsed: orderData.pointsUsed || 0,
-      pointsEarned: orderData.pointsEarned || 0
+      serviceTax: serviceTax,
+      flatFee: flatFee,
+      promoCode: orderData.promoCode ? String(orderData.promoCode).trim().toUpperCase() : null,
+      discountAmount: discountAmount
     };
 
     await db.collection("orders").doc(orderId).set(newOrder);
-    await applyLoyaltyAndPromo(newOrder, db);
+    await applyPromo(newOrder, db);
 
     res.json({ success: true, order: newOrder });
   } catch (error: any) {
@@ -304,27 +476,45 @@ app.post("/api/orders", async (req, res) => {
   }
 });
 
-app.patch("/api/orders/:id", async (req, res) => {
+app.patch("/api/orders/:id", requireStaffAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, paymentStatus, deliveryMinutes } = req.body;
 
-    const updates: any = {};
-    if (status) updates.status = status;
-    if (paymentStatus) updates.paymentStatus = paymentStatus;
+    const nowISO = new Date().toISOString();
+    const existingRef = db.collection("orders").doc(id);
+    const existingSnap = await existingRef.get();
+    const existingData = existingSnap.exists ? existingSnap.data() : {};
+
+    const updates: any = {
+      updatedAt: nowISO,
+      statusHistory: Array.isArray(existingData.statusHistory) ? existingData.statusHistory : [],
+      paymentHistory: Array.isArray(existingData.paymentHistory) ? existingData.paymentHistory : []
+    };
+
+    if (status && status !== existingData.status) {
+      updates.status = status;
+      updates.statusHistory.push({ status, at: nowISO });
+    }
+    if (paymentStatus && paymentStatus !== existingData.paymentStatus) {
+      updates.paymentStatus = paymentStatus;
+      updates.paymentHistory.push({ paymentStatus, at: nowISO });
+    }
+    if (deliveryMinutes) updates.deliveryMinutes = deliveryMinutes;
 
     if (Object.keys(updates).length > 0) {
-      await db.collection("orders").doc(id).update(updates);
+      await existingRef.update(updates);
 
-      // Trigger Shipday ONLY when status becomes 'ready'
-      if (status === "ready") {
+      // Trigger Shipday ONLY when status becomes 'ready' AND order is delivery fulfillment
+      if (status === "ready" && existingData.fulfillmentType !== 'pickup' && existingData.fulfillmentType !== 'dineIn') {
         console.log(`[SHIPDAY] Status for ${id} changed to ready. Syncing...`);
         triggerShipday(id, db, deliveryMinutes);
+      } else if (status === "ready") {
+        console.log(`[SHIPDAY] Order ${id} is ${existingData.fulfillmentType || 'delivery'} fulfillment; holding at ready (no Shipday dispatch).`);
       }
     }
 
-    const orderRef = db.collection("orders").doc(id);
-    const docSnap = await orderRef.get();
+    const docSnap = await existingRef.get();
     res.json({ success: true, order: { id: docSnap.id, ...docSnap.data() } });
   } catch (error: any) {
     res.status(500).json({ error: "Failed to update order", details: error.message });
@@ -332,70 +522,155 @@ app.patch("/api/orders/:id", async (req, res) => {
 });
 
 // Chapa Webhook Endpoint
-app.post("/api/chapa/webhook", async (req, res) => {
+app.post("/api/chapa/webhook", async (req: any, res) => {
   try {
+    // ---- Fail closed: never process webhooks without a real shared secret configured. ----
+    if (isMissingOrPlaceholderSecret(process.env.CHAPA_WEBHOOK_SECRET)) {
+      console.warn("[CHAPA WEBHOOK] CHAPA_WEBHOOK_SECRET not configured; rejecting (fail closed).");
+      return res.status(503).send("Webhook disabled: CHAPA_WEBHOOK_SECRET not configured.");
+    }
+
+    // ---- Verify webhook origin with HMAC SHA256 secret-hash signature ----
+    const webhookSecret = (process.env.CHAPA_WEBHOOK_SECRET || "").trim();
+    const signatureHeader = (req.headers["x-chapa-signature"] || req.headers["chapa-signature"] || "") as string;
+
+    if (webhookSecret) {
+      const rawBody = (req.rawBody || JSON.stringify(req.body || {})).toString();
+      const expected = crypto.createHmac("sha256", webhookSecret).update(rawBody).digest("hex");
+      const supplied = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+      const signatureMatches = supplied && typeof supplied === "string" && expected.length === supplied.length
+        ? crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(supplied, "hex"))
+        : expected.toLowerCase() === String(supplied || "").toLowerCase();
+
+      if (!signatureMatches) {
+        console.warn(`[CHAPA WEBHOOK] Signature verification FAILED. Expected ${expected}, got ${signatureHeader}.`);
+        return res.status(401).send("Invalid signature");
+      }
+      console.log(`[CHAPA WEBHOOK] Signature verified with secret hash.`);
+    } else {
+      console.warn(`[CHAPA WEBHOOK] No CHAPA_WEBHOOK_SECRET configured; skipping signature verification.`);
+    }
+
     const event = req.body;
-    const txRef = event.tx_ref || req.body.tx_ref;
+    const txRef = event.tx_ref || event.txRef;
+    const eventName = String(event.event || "").toLowerCase();
+    const eventStatus = String(event.status || "").toLowerCase();
 
-    console.log(`[CHAPA WEBHOOK] Received event:`, JSON.stringify(event));
+    console.log(`[CHAPA WEBHOOK] Received event '${eventName}' (status: ${eventStatus}) for ${txRef}`);
 
-    const status = event.event || event.status;
+    // Always ack 200 so Chapa stops retrying, even for unknown/duplicate events.
+    if (!txRef) {
+      return res.status(200).send("Webhook received");
+    }
 
-    if (txRef) {
-      const orderRef = db.collection("orders").doc(txRef);
-      const docSnap = await orderRef.get();
+    const orderRef = db.collection("orders").doc(txRef);
+    const docSnap = await orderRef.get();
+    if (!docSnap.exists) {
+      console.warn(`[CHAPA WEBHOOK] Order ${txRef} not found in Firestore`);
+      return res.status(200).send("Webhook received");
+    }
+    const orderData = docSnap.data();
 
-      if (docSnap.exists) {
-        const orderData = docSnap.data();
+    // ---- SUCCESSFUL PAYMENT ----
+    if (eventName === "charge.success" || eventStatus === "success") {
+      // Idempotency: if already completed, ack without side effects.
+      if (orderData.paymentStatus === "completed") {
+        console.log(`[CHAPA WEBHOOK] Order ${txRef} already completed; skipping duplicate event.`);
+        return res.status(200).send("Webhook received");
+      }
 
-        // Handle SUCCESSFUL PAYMENT
-        if (status === 'charge.success' || status === 'success') {
-          const receiptInfo = {
-            transactionId: event.reference || txRef,
-            reference: event.reference || txRef,
-            amount: event.amount ? parseFloat(event.amount) : (orderData?.total || 0),
-            currency: event.currency || "ETB",
-            paymentMethod: event.payment_method || event.method || "Chapa",
-            fullName: `${event.first_name || ""} ${event.last_name || ""}`.trim() || (orderData?.customerName || ""),
-            email: event.email || (orderData?.customerEmail || ""),
-            date: event.created_at || new Date().toISOString(),
-            status: "success",
-            simulated: false
-          };
+      // Docs best practice: re-verify critical transaction data via the REST verify API
+      // before granting value, to confirm status/amount/tx_ref/mode are consistent.
+      const rawKey = (process.env.CHAPA_SECRET_KEY || "").trim();
+      const chapaKey = (rawKey.startsWith("CHASECK_") || rawKey.startsWith("CHAPASECKEY-")) ? rawKey : "";
+      let verified = false;
+      let verifiedData: any = null;
 
-          await orderRef.update({
-            paymentStatus: "completed",
-            status: "pending",
-            receipt: receiptInfo,
-            updatedAt: new Date().toISOString()
+      if (chapaKey && chapaKey !== "MY_CHAPA_SECRET_KEY" && !chapaKey.startsWith("CHAPASECKEY-xxxx")) {
+        try {
+          const vres = await fetch(`https://api.chapa.co/v1/transaction/verify/${txRef}`, {
+            method: "GET",
+            headers: { "Authorization": `Bearer ${chapaKey}` }
           });
-
-          console.log(`[CHAPA WEBHOOK] Successfully verified payment for order ${txRef}`);
-          if (orderData.paymentStatus !== "completed") { await applyLoyaltyAndPromo(orderData, db); }
-        }
-
-        // Handle REFUND
-        else if (status === 'refund.success' || status === 'refunded') {
-          console.log(`[CHAPA WEBHOOK] Handling refund event for order ${txRef}`);
-          const refundInfo = {
-            refundedAt: new Date().toISOString(),
-            refundedAmount: event.amount ? parseFloat(event.amount) : (orderData?.total || 0),
-            refundReason: event.reason || "Processed via Chapa Dashboard",
-            simulated: false,
-            webhookData: event
-          };
-
-          await orderRef.update({
-            paymentStatus: "refunded",
-            status: "cancelled",
-            refund: refundInfo,
-            updatedAt: new Date().toISOString()
-          });
-          console.log(`[CHAPA WEBHOOK] Order ${txRef} marked as refunded via webhook`);
+          const vdata = await vres.json();
+          console.log(`[CHAPA WEBHOOK] Re-verification response (${vres.status}):`, JSON.stringify(vdata).slice(0, 400));
+          if (vdata.status === "success" && vdata.data?.status === "success") {
+            verified = true;
+            verifiedData = vdata.data;
+          } else {
+            console.warn(`[CHAPA WEBHOOK] Webhook said success but verify API returned: ${vdata.data?.status}. Not granting value.`);
+          }
+        } catch (verr: any) {
+          console.error("[CHAPA WEBHOOK] Verification API error:", verr.message);
         }
       } else {
-        console.warn(`[CHAPA WEBHOOK] Order ${txRef} not found in Firestore`);
+        // Fail closed: never grant value without a real secret key to re-verify against Chapa.
+        verified = false;
+        console.warn(`[CHAPA WEBHOOK] No real CHAPA_SECRET_KEY configured; refusing to grant value (fail closed).`);
       }
+
+      if (verified) {
+        const raw = verifiedData || event;
+        const receiptInfo = {
+          transactionId: raw.reference || raw.ref_id || txRef,
+          reference: raw.reference || raw.ref_id || txRef,
+          amount: raw.amount ? parseFloat(raw.amount) : (orderData?.total || 0),
+          currency: raw.currency || "ETB",
+          paymentMethod: raw.payment_method || raw.method || "Chapa",
+          fullName: `${raw.first_name || ""} ${raw.last_name || ""}`.trim() || (orderData?.customerName || ""),
+          email: raw.email || (orderData?.customerEmail || ""),
+          date: raw.created_at || new Date().toISOString(),
+          status: "success",
+          simulated: !verifiedData
+        };
+
+        await orderRef.update({
+          paymentStatus: "completed",
+          status: "pending",
+          receipt: receiptInfo,
+          updatedAt: new Date().toISOString(),
+          statusHistory: Array.isArray(orderData.statusHistory) ? [...orderData.statusHistory, { status: "pending", at: new Date().toISOString() }] : undefined,
+          paymentHistory: Array.isArray(orderData.paymentHistory) ? [...orderData.paymentHistory, { paymentStatus: "completed", at: new Date().toISOString() }] : undefined
+        });
+
+        console.log(`[CHAPA WEBHOOK] Order ${txRef} marked completed (via ${verifiedData ? "re-verified API" : "signed webhook"}).`);
+        await applyPromo(orderData, db);
+      }
+    }
+    // ---- FAILED / CANCELLED ----
+    else if (eventName === "charge.failed/cancelled" || eventName.startsWith("charge.failed") || eventName.startsWith("charge.cancelled") || eventStatus === "failed/cancelled" || eventStatus === "failed" || eventStatus === "cancelled") {
+      if (orderData.paymentStatus !== "failed") {
+        await orderRef.update({
+          paymentStatus: "failed",
+          updatedAt: new Date().toISOString(),
+          paymentHistory: Array.isArray(orderData.paymentHistory) ? [...orderData.paymentHistory, { paymentStatus: "failed", at: new Date().toISOString() }] : undefined
+        });
+        console.log(`[CHAPA WEBHOOK] Order ${txRef} marked failed (reason: ${event.failure_reason || "N/A"}).`);
+      } else {
+        console.log(`[CHAPA WEBHOOK] Order ${txRef} already failed; skipping duplicate event.`);
+      }
+    }
+    // ---- REVERSED ----
+    else if (eventName === "charge.reversed" || eventStatus === "reversed") {
+      if (orderData.paymentStatus !== "reversed") {
+        await orderRef.update({
+          paymentStatus: "reversed",
+          status: "cancelled",
+          updatedAt: new Date().toISOString(),
+          statusHistory: Array.isArray(orderData.statusHistory) ? [...orderData.statusHistory, { status: "cancelled", at: new Date().toISOString() }] : undefined,
+          paymentHistory: Array.isArray(orderData.paymentHistory) ? [...orderData.paymentHistory, { paymentStatus: "reversed", at: new Date().toISOString() }] : undefined
+        });
+        console.log(`[CHAPA WEBHOOK] Order ${txRef} marked reversed.`);
+      } else {
+        console.log(`[CHAPA WEBHOOK] Order ${txRef} already reversed; skipping duplicate event.`);
+      }
+    }
+    // ---- REFUNDED (feature removed; log only) ----
+    else if (eventName === "charge.refunded" || eventStatus === "refunded") {
+      console.log(`[CHAPA WEBHOOK] Refund event for order ${txRef} ignored (refund feature removed).`);
+    }
+    else {
+      console.warn(`[CHAPA WEBHOOK] Unhandled event '${eventName}' (status: ${eventStatus}) for order ${txRef}.`);
     }
 
     res.status(200).send("Webhook received");
@@ -405,9 +680,96 @@ app.post("/api/chapa/webhook", async (req, res) => {
   }
 });
 
+// Chapa Callback URL (docs: receives a GET with {trx_ref, ref_id, status} after payment)
+app.get("/api/chapa/callback", async (req, res) => {
+  try {
+    // ---- Fail closed: do not trust callbacks when no real webhook secret is configured. ----
+    if (isMissingOrPlaceholderSecret(process.env.CHAPA_WEBHOOK_SECRET)) {
+      console.warn("[CHAPA CALLBACK] CHAPA_WEBHOOK_SECRET not configured; refusing callback (fail closed).");
+      return res.status(503).json({ error: "Callback disabled: CHAPA_WEBHOOK_SECRET not configured." });
+    }
+
+    const txRef = req.query.trx_ref || req.query.tx_ref || req.query["tx_ref"];
+    const refId = req.query.ref_id;
+    const status = String(req.query.status || "").toLowerCase();
+
+    console.log(`[CHAPA CALLBACK] Received callback for txRef: ${txRef}, refId: ${refId}, status: ${status}`);
+
+    if (!txRef) {
+      return res.status(400).json({ error: "Missing transaction reference" });
+    }
+
+    // Forward to the verification flow so status is re-checked against Chapa's API.
+    const orderRef = db.collection("orders").doc(String(txRef));
+    const docSnap = await orderRef.get();
+    if (!docSnap.exists) {
+      console.warn(`[CHAPA CALLBACK] Order ${txRef} not found`);
+      return res.status(404).json({ error: "Transaction reference not found" });
+    }
+
+    if (status === "success") {
+      const rawKey = (process.env.CHAPA_SECRET_KEY || "").trim();
+      const chapaKey = (rawKey.startsWith("CHASECK_") || rawKey.startsWith("CHAPASECKEY-")) ? rawKey : "";
+      const orderData = docSnap.data();
+
+      if (orderData.paymentStatus === "completed") {
+        console.log(`[CHAPA CALLBACK] Order ${txRef} already completed; skipping.`);
+        return res.redirect(`/?status=success&tx_ref=${txRef}`);
+      }
+
+      if (chapaKey && chapaKey !== "MY_CHAPA_SECRET_KEY" && !chapaKey.startsWith("CHAPASECKEY-xxxx")) {
+        const response = await fetch(`https://api.chapa.co/v1/transaction/verify/${txRef}`, {
+          method: "GET",
+          headers: { "Authorization": `Bearer ${chapaKey}` }
+        });
+        const chapaData = await response.json();
+
+        if (chapaData.status === "success" && chapaData.data?.status === "success") {
+          const rawData = chapaData.data;
+          const receiptInfo = {
+            transactionId: rawData.reference || String(txRef),
+            reference: rawData.reference || String(txRef),
+            amount: rawData.amount ? parseFloat(rawData.amount) : (orderData?.total || 0),
+            currency: rawData.currency || "ETB",
+            paymentMethod: rawData.payment_method || rawData.method || "Chapa",
+            fullName: `${rawData.first_name || ""} ${rawData.last_name || ""}`.trim() || (orderData?.customerName || ""),
+            email: rawData.email || (orderData?.customerEmail || ""),
+            date: rawData.created_at || new Date().toISOString(),
+            status: "success",
+            simulated: false
+          };
+          await orderRef.update({
+            paymentStatus: "completed",
+            status: "pending",
+            receipt: receiptInfo,
+            updatedAt: new Date().toISOString(),
+            statusHistory: Array.isArray(orderData.statusHistory) ? [...orderData.statusHistory, { status: "pending", at: new Date().toISOString() }] : undefined,
+            paymentHistory: Array.isArray(orderData.paymentHistory) ? [...orderData.paymentHistory, { paymentStatus: "completed", at: new Date().toISOString() }] : undefined
+          });
+          if (orderData.paymentStatus !== "completed") { await applyPromo(orderData, db); }
+          console.log(`[CHAPA CALLBACK] Order ${txRef} completed via callback verification.`);
+        } else {
+          console.warn(`[CHAPA CALLBACK] Verification returned non-success (${chapaData.data?.status}).`);
+        }
+      } else {
+        console.warn(`[CHAPA CALLBACK] No real CHAPA_SECRET_KEY configured; refusing to complete order ${txRef} (fail closed).`);
+        return res.redirect(`/?status=pending&tx_ref=${txRef}&error=verification_disabled`);
+      }
+    } else {
+      console.warn(`[CHAPA CALLBACK] Non-success callback status: ${status}`);
+    }
+
+    return res.redirect(`/?status=${status || "pending"}&tx_ref=${txRef}`);
+  } catch (error: any) {
+    console.error("Chapa callback error:", error.message);
+    res.status(500).json({ error: "Callback processing failed" });
+  }
+});
+
 // Chapa Initialize
 app.post("/api/chapa/initialize", async (req, res) => {
   try {
+    dotenv.config({ override: true });
     const { amount, email, first_name, last_name, phone_number, items } = req.body;
 
     if (!amount || !email || !first_name || !last_name) {
@@ -415,40 +777,23 @@ app.post("/api/chapa/initialize", async (req, res) => {
     }
 
     const tx_ref = `tx-savory-${Date.now()}`;
-    const chapaKey = process.env.CHAPA_SECRET_KEY?.trim();
+    const rawKey = (process.env.CHAPA_SECRET_KEY || "").trim();
+    const rawPublicKey = (process.env.VITE_CHAPA_PUBLIC_KEY || process.env.CHAPA_PUBLIC_KEY || "").trim();
 
-    if (chapaKey?.startsWith("CHAPUBK_")) {
-      return res.status(500).json({
-        success: false,
-        error: "CHAPA_SECRET_KEY contains a Chapa public key. Replace it with the secret key that starts with CHAPASECKEY_."
-      });
-    }
+    const secretKey = (rawKey.startsWith("CHASECK_") || rawKey.startsWith("CHAPASECKEY-")) ? rawKey : "";
+    const publicKey = rawPublicKey || (rawKey.startsWith("CHAPUBK_") ? rawKey : "");
 
-    // Dynamically detect the base URL of the request (works across development and preview containers)
-    const requestHost = req.headers.host || "https://donated-habitat-treo-weapon.trycloudflare.com";
-    const requestProto = (req.headers['x-forwarded-proto'] as string) || req.protocol || "https";
+    // Dynamically detect the base URL of the request
+    const requestHost = req.headers.host || "localhost:3000";
+    const requestProto = (req.headers['x-forwarded-proto'] as string) || req.protocol || "http";
     const requestOrigin = `${requestProto}://${requestHost}`;
-    const baseUrl = process.env.APP_URL || requestOrigin;
+    let rawBase = (process.env.APP_URL || requestOrigin).trim().replace(/\/+$/, "");
+    if (!rawBase.startsWith("http://") && !rawBase.startsWith("https://")) {
+      rawBase = `https://${rawBase}`;
+    }
+    const baseUrl = rawBase;
 
     console.log(`[CHAPA INITIALIZE] Base URL resolved to: ${baseUrl} (Host: ${requestHost}, Proto: ${requestProto})`);
-
-    const chapaPayload: any = {
-      amount: amount.toString(),
-      currency: "ETB",
-      email: email,
-      first_name: first_name,
-      last_name: last_name,
-      tx_ref: tx_ref,
-      callback_url: `${baseUrl}/api/chapa/webhook`,
-      return_url: `${baseUrl}/?status=success&tx_ref=${tx_ref}`,
-      customization: {
-        title: "Savory Order",
-        description: `Payment for ${items?.length || 1} items`
-      }
-    };
-    if (phone_number) {
-      chapaPayload.phone_number = phone_number;
-    }
 
     const newOrder = {
       id: tx_ref,
@@ -464,26 +809,48 @@ app.post("/api/chapa/initialize", async (req, res) => {
       specialInstructions: req.body.specialInstructions || "",
       paymentMethod: "chapa",
       paymentStatus: "pending",
+      fulfillmentType: ['delivery', 'pickup', 'dineIn'].includes(req.body.fulfillmentType) ? req.body.fulfillmentType : 'delivery',
+      scheduledFor: await (async () => {
+        const cfg = await getCheckoutSettings(db);
+        return normalizeScheduledFor(req.body.scheduledFor, cfg.prepTimeMinutes || 30);
+      })(),
       transactionRef: tx_ref,
       createdAt: new Date().toISOString(),
       userId: req.body.userId || null,
       serviceTax: req.body.serviceTax || 0,
       flatFee: req.body.flatFee || 0,
       promoCode: req.body.promoCode || null,
-      discountAmount: req.body.discountAmount || 0,
-      pointsUsed: req.body.pointsUsed || 0,
-      pointsEarned: req.body.pointsEarned || 0
+      discountAmount: req.body.discountAmount || 0
     };
 
     await db.collection("orders").doc(tx_ref).set(newOrder);
 
-    if (chapaKey && chapaKey !== "MY_CHAPA_SECRET_KEY" && !chapaKey.startsWith("CHAPASECKEY-xxxx")) {
-      console.log(`[CHAPA] Attempting real payment initiation for reference ${tx_ref}`);
+    // 1. If Secret Key is available, initialize via Chapa's official REST API (Hosted Checkout)
+    if (secretKey && secretKey !== "MY_CHAPA_SECRET_KEY") {
+      console.log(`[CHAPA] Attempting server-to-server hosted payment initiation for reference ${tx_ref}`);
       try {
+        const chapaPayload: any = {
+          amount: amount.toString(),
+          currency: "ETB",
+          email: email.trim(),
+          first_name: first_name.trim(),
+          last_name: last_name.trim(),
+          tx_ref: tx_ref,
+          callback_url: `${baseUrl}/api/chapa/callback`,
+          return_url: `${baseUrl}/?status=success&tx_ref=${tx_ref}`,
+          customization: {
+            title: "Savory Order",
+            description: `Payment for ${items?.length || 1} items`
+          }
+        };
+        if (phone_number && phone_number.trim().length > 0) {
+          chapaPayload.phone_number = phone_number.trim();
+        }
+
         const response = await fetch("https://api.chapa.co/v1/transaction/initialize", {
           method: "POST",
           headers: {
-            "Authorization": `Bearer ${chapaKey}`,
+            "Authorization": `Bearer ${secretKey}`,
             "Content-Type": "application/json"
           },
           body: JSON.stringify(chapaPayload)
@@ -500,21 +867,49 @@ app.post("/api/chapa/initialize", async (req, res) => {
 
         console.log(`[CHAPA INITIALIZE] Response status: ${response.status}`, chapaData);
 
-
         if (chapaData.status === "success" && chapaData.data?.checkout_url) {
           await db.collection("orders").doc(tx_ref).update({ chapaCheckoutUrl: chapaData.data.checkout_url });
-          return res.json({ success: true, checkoutUrl: chapaData.data.checkout_url, txRef: tx_ref, simulated: false });
+          return res.json({ success: true, mode: "hosted", checkoutUrl: chapaData.data.checkout_url, txRef: tx_ref });
         } else {
-          return res.status(400).json({ success: false, error: chapaData.message || "Chapa API initialization failed", details: chapaData });
+          let errorMsg = "Chapa API initialization failed";
+          if (typeof chapaData.message === "string") {
+            errorMsg = chapaData.message;
+          } else if (typeof chapaData.message === "object" && chapaData.message !== null) {
+            errorMsg = Object.entries(chapaData.message)
+              .map(([field, errs]) => `${field}: ${Array.isArray(errs) ? errs.join(", ") : errs}`)
+              .join(" | ");
+          } else if (typeof chapaData.error === "string") {
+            errorMsg = chapaData.error;
+          } else if (typeof chapaData.errors === "object" && chapaData.errors !== null) {
+            errorMsg = Object.entries(chapaData.errors)
+              .map(([field, errs]) => `${field}: ${Array.isArray(errs) ? errs.join(", ") : errs}`)
+              .join(" | ");
+          }
+          return res.status(400).json({ success: false, error: errorMsg, details: chapaData });
         }
       } catch (err: any) {
         console.error("[CHAPA INITIALIZE] Fetch error:", err);
         return res.status(500).json({ success: false, error: "Chapa connection failed: " + err.message });
       }
-    } else {
-      console.warn("[CHAPA INITIALIZE] CHAPA_SECRET_KEY missing or placeholder in .env");
-      return res.status(400).json({ success: false, error: "Missing CHAPA_SECRET_KEY in backend environment (.env)." });
     }
+
+    // 2. If Public Key is available, initialize via Chapa Inline Popup
+    if (publicKey) {
+      console.log(`[CHAPA] Returning inline public key checkout mode for reference ${tx_ref}`);
+      return res.json({
+        success: true,
+        mode: "inline",
+        publicKey: publicKey,
+        txRef: tx_ref,
+        callbackUrl: `${baseUrl}/api/chapa/callback`,
+        returnUrl: `${baseUrl}/?status=success&tx_ref=${tx_ref}`
+      });
+    }
+
+    return res.status(400).json({
+      success: false,
+      error: "Missing CHAPA credentials in .env. Please provide either CHAPA_SECRET_KEY (starts with CHASECK_) or public key (starts with CHAPUBK_)."
+    });
   } catch (error: any) {
     res.status(500).json({ error: "Failed to initialize payment", details: error.message });
   }
@@ -524,8 +919,10 @@ app.post("/api/chapa/initialize", async (req, res) => {
 app.get("/api/chapa/verify/:txRef", async (req, res) => {
   console.log(`[CHAPA VERIFY] Verification request received for txRef: ${req.params.txRef}`);
   try {
+    dotenv.config({ override: true });
     const { txRef } = req.params;
-    const chapaKey = process.env.CHAPA_SECRET_KEY;
+    const rawKey = (process.env.CHAPA_SECRET_KEY || "").trim();
+    const chapaKey = (rawKey.startsWith("CHASECK_") || rawKey.startsWith("CHAPASECKEY-")) ? rawKey : "";
 
     const orderRef = db.collection("orders").doc(txRef);
     const docSnap = await orderRef.get();
@@ -571,7 +968,10 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
             status: "pending",
             receipt: receiptInfo
           });
-          if (orderData.paymentStatus !== "completed") { await applyLoyaltyAndPromo(orderData, db); }
+          if (orderData.paymentStatus !== "completed") { await applyPromo(orderData, db); }
+          if (!orderData.paymentHistory || !Array.isArray(orderData.paymentHistory)) {
+            await orderRef.update({ paymentHistory: [{ paymentStatus: "completed", at: new Date().toISOString() }] });
+          }
 
           const updatedDoc = await orderRef.get();
           return res.json({ success: true, status: "completed", order: { id: updatedDoc.id, ...updatedDoc.data() } });
@@ -584,171 +984,16 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
         return res.status(500).json({ success: false, error: "Network error during verification" });
       }
     } else {
-      console.log(`[CHAPA VERIFY] No real Chapa Secret Key detected. Using simulation mode.`);
-      console.log(`[CHAPA VERIFY] Falling back to updating Firestore to completed (simulated/forced).`);
-      const orderData = docSnap.data();
-      const receiptInfo = {
-        transactionId: `sim-ref-${txRef}`,
-        reference: txRef,
-        amount: orderData?.total || 0,
-        currency: "ETB",
-        paymentMethod: "Chapa (Simulated CBE Birr / Telebirr)",
-        fullName: orderData?.customerName || "Simulated Customer",
-        email: orderData?.customerEmail || "simulated@example.com",
-        date: new Date().toISOString(),
-        status: "success",
-        simulated: true
-      };
-
-      await orderRef.update({
-        paymentStatus: "completed",
-        status: "pending",
-        receipt: receiptInfo
+      console.warn(`[CHAPA VERIFY] No real Chapa Secret Key configured; refusing to grant value (fail closed).`);
+      return res.status(503).json({
+        success: false,
+        status: docSnap.data()?.paymentStatus || "pending",
+        error: "Chapa secret key not configured. Verification disabled (fail closed)."
       });
-      if (orderData.paymentStatus !== "completed") { await applyLoyaltyAndPromo(orderData, db); }
-      const finalDoc = await orderRef.get();
-      return res.json({ success: true, status: "completed", order: { id: finalDoc.id, ...finalDoc.data() }, simulated: true });
     }
   } catch (error: any) {
     console.error(`[CHAPA VERIFY] Fatal error during verification:`, error.message);
     res.status(500).json({ error: "Verification failed", details: error.message });
-  }
-});
-
-// Refund endpoint for Chapa
-app.post("/api/chapa/refund", async (req, res) => {
-  console.log(`[CHAPA REFUND] Refund request received:`, req.body);
-  try {
-    const { txRef, amount } = req.body;
-    if (!txRef) {
-      return res.status(400).json({ error: "Transaction reference (txRef) is required" });
-    }
-
-    const chapaKey = process.env.CHAPA_SECRET_KEY;
-    const orderRef = db.collection("orders").doc(txRef);
-    const docSnap = await orderRef.get();
-
-    if (!docSnap.exists) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    const orderData = docSnap.data();
-    if (orderData.paymentStatus === "refunded") {
-      return res.status(400).json({ error: "Order has already been refunded" });
-    }
-
-    if (orderData.paymentStatus !== "completed") {
-      return res.status(400).json({ error: "Only fully completed payments can be refunded" });
-    }
-
-    const refundAmount = amount !== undefined ? parseFloat(amount) : orderData.total;
-    if (isNaN(refundAmount) || refundAmount <= 0) {
-      return res.status(400).json({ error: "Invalid refund amount" });
-    }
-
-    if (chapaKey && chapaKey !== "MY_CHAPA_SECRET_KEY" && !chapaKey.startsWith("CHAPASECKEY-xxxx")) {
-      console.log(`[CHAPA REFUND] Real Chapa Secret Key detected. Requesting refund from Chapa API...`);
-      try {
-        // Primary attempt: v1/transaction/refund (Standard for actions)
-        let response = await fetch("https://api.chapa.co/v1/transaction/refund", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${chapaKey}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            transaction_id: txRef,
-            amount: refundAmount
-          })
-        });
-
-        console.log(`[CHAPA REFUND] Primary API (v1/transaction/refund) status: ${response.status}`);
-
-        // If primary fails with 405 (Method Not Allowed) or 404, try singular v1/refund as fallback
-        if (response.status === 405 || response.status === 404) {
-          console.log(`[CHAPA REFUND] v1/transaction/refund not supported. Trying fallback v1/refund (singular)...`);
-          response = await fetch("https://api.chapa.co/v1/refund", {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${chapaKey}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              transaction_id: txRef,
-              amount: refundAmount
-            })
-          });
-          console.log(`[CHAPA REFUND] Fallback API (v1/refund) status: ${response.status}`);
-        }
-
-        let chapaData: any = {};
-        try {
-          chapaData = await response.json();
-        } catch (e) {
-          chapaData = { message: "Failed to parse API JSON response" };
-        }
-        console.log(`[CHAPA REFUND] Final Chapa API response body:`, JSON.stringify(chapaData));
-
-        if (response.ok && chapaData.status === "success") {
-          console.log(`[CHAPA REFUND] Refund successful! Updating Firestore order payment status.`);
-          const refundInfo = {
-            refundedAt: new Date().toISOString(),
-            refundedAmount: refundAmount,
-            refundReason: req.body.reason || "Customer request",
-            simulated: false,
-            chapaResponse: chapaData
-          };
-
-          await orderRef.update({
-            paymentStatus: "refunded",
-            status: "cancelled",
-            refund: refundInfo
-          });
-
-          const updatedDoc = await orderRef.get();
-          return res.json({ success: true, message: "Refund processed successfully via Chapa!", order: { id: updatedDoc.id, ...updatedDoc.data() } });
-        } else {
-          console.warn(`[CHAPA REFUND] Chapa API refund failed. Status: ${response.status}. Data:`, chapaData);
-
-          const isMethodNotSupported = (response.status === 405) ||
-            (chapaData.message && chapaData.message.toLowerCase().includes("not supported")) ||
-            (chapaData.error && chapaData.error.toLowerCase().includes("not supported"));
-
-          if (isMethodNotSupported || response.status === 404) {
-            return res.status(405).json({
-              success: false,
-              error: "Chapa's API does not support programmatic refunds for this account type or in test mode.",
-              message: "Please complete the refund manually in your Chapa Merchant Dashboard. The order status has NOT been changed."
-            });
-          }
-
-          return res.status(400).json({ success: false, error: chapaData.message || "Chapa Refund API call failed", details: chapaData });
-        }
-      } catch (err: any) {
-        console.error("[CHAPA REFUND] Refund network/JSON error:", err.message);
-        return res.status(500).json({ success: false, error: "Network error during refund request. No changes were made to the order." });
-      }
-    } else {
-      console.log(`[CHAPA REFUND] No real Chapa Secret Key detected. Simulating refund...`);
-      const refundInfo = {
-        refundedAt: new Date().toISOString(),
-        refundedAmount: refundAmount,
-        refundReason: req.body.reason || "Customer request (Simulated)",
-        simulated: true
-      };
-
-      await orderRef.update({
-        paymentStatus: "refunded",
-        status: "cancelled",
-        refund: refundInfo
-      });
-
-      const updatedDoc = await orderRef.get();
-      return res.json({ success: true, message: "Refund processed successfully (Simulated)", order: { id: updatedDoc.id, ...updatedDoc.data() }, simulated: true });
-    }
-  } catch (error: any) {
-    console.error(`[CHAPA REFUND] Fatal error during refund:`, error.message);
-    res.status(500).json({ error: "Refund failed", details: error.message });
   }
 });
 
@@ -764,17 +1009,22 @@ app.get("/api/settings", async (req, res) => {
         flatFeeETB: data.flatFeeETB ?? 0,
         shipdayDeliveryMinutes: data.shipdayDeliveryMinutes ?? 20,
         isOpen: data.isOpen ?? true,
-        enableCOD: data.enableCOD ?? true
+        scheduleEnabled: data.scheduleEnabled ?? false,
+        openTime: data.openTime ?? "09:00",
+        closeTime: data.closeTime ?? "22:00",
+        enableCOD: data.enableCOD ?? true,
+        prepTimeMinutes: data.prepTimeMinutes ?? 30,
+        scheduledStepsMinutes: data.scheduledStepsMinutes ?? 15
       });
     } else {
-      res.json({ serviceTaxPercent: 15, flatFeeETB: 0, shipdayDeliveryMinutes: 20, isOpen: true });
+      res.json({ serviceTaxPercent: 15, flatFeeETB: 0, shipdayDeliveryMinutes: 20, isOpen: true, scheduleEnabled: false, openTime: "09:00", closeTime: "22:00", prepTimeMinutes: 30, scheduledStepsMinutes: 15 });
     }
   } catch (error: any) {
     res.status(500).json({ error: "Failed to fetch checkout settings", details: error.message });
   }
 });
 
-app.post("/api/settings", async (req, res) => {
+app.post("/api/settings", requireStaffAuth, async (req, res) => {
   try {
     const { serviceTaxPercent, flatFeeETB, shipdayDeliveryMinutes, isOpen } = req.body;
     const settings = {
@@ -784,6 +1034,11 @@ app.post("/api/settings", async (req, res) => {
       shipdayPickupMinutes: parseInt(req.body.shipdayPickupMinutes) || 10,
       enableCOD: req.body.enableCOD !== undefined ? req.body.enableCOD : true,
       isOpen: isOpen !== undefined ? isOpen : true,
+      scheduleEnabled: req.body.scheduleEnabled !== undefined ? !!req.body.scheduleEnabled : false,
+      openTime: req.body.openTime || "09:00",
+      closeTime: req.body.closeTime || "22:00",
+      prepTimeMinutes: parseInt(req.body.prepTimeMinutes) || 30,
+      scheduledStepsMinutes: parseInt(req.body.scheduledStepsMinutes) || 15,
       updatedAt: new Date().toISOString()
     };
     await db.collection("settings").doc("checkout").set(settings);
@@ -793,8 +1048,45 @@ app.post("/api/settings", async (req, res) => {
   }
 });
 
+// Customer Management Endpoints
+app.get("/api/customers", requireStaffAuth, async (req, res) => {
+  try {
+    const snapshot = await db.collection("users").get();
+    const customers = snapshot.docs.map(doc => ({ uid: doc.id, id: doc.id, ...doc.data() }));
+    res.json(customers);
+  } catch (error: any) {
+    res.status(500).json({ error: "Failed to fetch customers", details: error.message });
+  }
+});
+
+app.patch("/api/customers/:uid/points", requireStaffAuth, async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const { delta } = req.body;
+
+    if (typeof delta !== "number" || isNaN(delta)) {
+      return res.status(400).json({ error: "A numeric 'delta' is required to adjust loyalty points." });
+    }
+
+    const userRef = db.collection("users").doc(uid);
+    const snap = await userRef.get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Customer account not found." });
+    }
+
+    const current = Number(snap.data()?.points) || 0;
+    const adjusted = Math.max(0, current + delta);
+
+    await userRef.set({ points: adjusted }, { merge: true });
+
+    res.json({ success: true, points: adjusted, delta });
+  } catch (error: any) {
+    res.status(500).json({ error: "Failed to adjust loyalty points", details: error.message });
+  }
+});
+
 // Mailchimp Connection Test Endpoint
-app.get("/api/mailchimp/test", async (req, res) => {
+app.get("/api/mailchimp/test", requireStaffAuth, async (req, res) => {
   try {
     const apiKey = process.env.MAILCHIMP_API_KEY;
     const listId = process.env.MAILCHIMP_LIST_ID;
@@ -830,7 +1122,7 @@ app.get("/api/mailchimp/test", async (req, res) => {
 });
 
 // 4. Shipday API Integration
-app.post("/api/shipday/order", async (req, res) => {
+app.post("/api/shipday/order", requireStaffAuth, async (req, res) => {
   try {
     const settingsSnap = await db.collection("settings").doc("checkout").get();
     const settings = settingsSnap.exists ? settingsSnap.data() : {};
@@ -900,7 +1192,7 @@ app.post("/api/shipday/order", async (req, res) => {
   }
 });
 
-app.get("/api/shipday/test", async (req, res) => {
+app.get("/api/shipday/test", requireStaffAuth, async (req, res) => {
   try {
     const settingsSnap = await db.collection("settings").doc("checkout").get();
     const settings = settingsSnap.exists ? settingsSnap.data() : {};
@@ -951,12 +1243,18 @@ app.get("/api/shipday/test", async (req, res) => {
 // Shipday Webhook Receiver
 app.post("/api/shipday/webhook", async (req, res) => {
   try {
-    const token = req.query.token || req.headers['x-shipday-token'];
-    const expectedToken = process.env.SHIPDAY_WEBHOOK_TOKEN ? String(process.env.SHIPDAY_WEBHOOK_TOKEN).trim() : "";
+    // ---- Fail closed: the webhook must never run without a real shared token configured. ----
+    if (isMissingOrPlaceholderSecret(process.env.SHIPDAY_WEBHOOK_TOKEN)) {
+      console.warn("[SHIPDAY WEBHOOK] SHIPDAY_WEBHOOK_TOKEN not configured; rejecting (fail closed).");
+      return res.status(503).json({ error: "Webhook disabled: SHIPDAY_WEBHOOK_TOKEN not configured." });
+    }
 
-    // Only verify if a token is configured in environment as a non-empty string
-    if (expectedToken && expectedToken !== "" && token !== expectedToken) {
-      console.warn("[SHIPDAY WEBHOOK] Unauthorized access attempt with invalid token.");
+    const token = req.query.token || req.headers['x-shipday-token'];
+    const expectedToken = String(process.env.SHIPDAY_WEBHOOK_TOKEN).trim();
+
+    // Verify the shared token mandatorily (it was previously optional when unset).
+    if (!token || token !== expectedToken) {
+      console.warn("[SHIPDAY WEBHOOK] Unauthorized access attempt with invalid/missing token.");
       return res.status(401).json({ error: "Unauthorized" });
     }
 

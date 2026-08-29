@@ -3,6 +3,12 @@ import { MessageSquare, Send, User, Clock, ChevronRight, History } from "lucide-
 import { db } from "../firebase";
 import { collection, query, where, orderBy, onSnapshot, addDoc, serverTimestamp, limit } from "firebase/firestore";
 import { motion, AnimatePresence } from "motion/react";
+import { hasPermission, PermissionMap } from "../permissions";
+
+interface AdminChatProps {
+  can?: (key: string) => boolean;
+  permissions?: PermissionMap;
+}
 
 interface ChatMessage {
   conversationId: string;
@@ -20,7 +26,7 @@ interface Conversation {
   unreadCount: number;
 }
 
-export default function AdminChat() {
+export default function AdminChat({ can, permissions }: AdminChatProps) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -30,6 +36,8 @@ export default function AdminChat() {
     const saved = localStorage.getItem("admin_chat_read_counts");
     return saved ? JSON.parse(saved) : {};
   });
+
+  const canReply = can ? can("chat.reply") : hasPermission(permissions, "chat.reply");
 
   useEffect(() => {
     localStorage.setItem("admin_chat_read_counts", JSON.stringify(readCounts));
@@ -261,22 +269,28 @@ export default function AdminChat() {
             </div>
 
             {/* Reply Input */}
-            <form onSubmit={handleSendReply} className="p-4 border-t border-stone-100 bg-white flex items-center space-x-3">
-              <input
-                type="text"
-                value={reply}
-                onChange={(e) => setReply(e.target.value)}
-                placeholder="Type your reply to the customer..."
-                className="flex-grow text-xs bg-stone-50 border border-stone-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-1 focus:ring-amber-500"
-              />
-              <button
-                disabled={!reply.trim() || loading}
-                type="submit"
-                className="bg-amber-600 text-white p-3 rounded-xl hover:bg-amber-700 transition-colors disabled:opacity-50 cursor-pointer shadow-lg shadow-amber-600/20"
-              >
-                <Send className="w-4 h-4" />
-              </button>
-            </form>
+            {canReply ? (
+              <form onSubmit={handleSendReply} className="p-4 border-t border-stone-100 bg-white flex items-center space-x-3">
+                <input
+                  type="text"
+                  value={reply}
+                  onChange={(e) => setReply(e.target.value)}
+                  placeholder="Type your reply to the customer..."
+                  className="flex-grow text-xs bg-stone-50 border border-stone-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                />
+                <button
+                  disabled={!reply.trim() || loading}
+                  type="submit"
+                  className="bg-amber-600 text-white p-3 rounded-xl hover:bg-amber-700 transition-colors disabled:opacity-50 cursor-pointer shadow-lg shadow-amber-600/20"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </form>
+            ) : (
+              <div className="p-4 border-t border-stone-100 bg-white text-[11px] text-stone-400 text-center">
+                Read only — you need the "Reply to customers" permission to send messages.
+              </div>
+            )}
           </>
         ) : (
           <div className="flex-grow flex flex-col items-center justify-center p-10 text-center">

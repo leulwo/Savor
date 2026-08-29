@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useState, useEffect, ReactNode } from "react";
-import { MenuItem, Order } from "./types";
+import { MenuItem, Order, UserProfile } from "./types";
 import MenuManager from "./components/MenuManager";
 import OrderList from "./components/OrderList";
 import CategoryManager from "./components/CategoryManager";
@@ -11,10 +11,16 @@ import ReservationManager from "./components/ReservationManager";
 import KitchenDisplaySystem from "./components/KitchenDisplaySystem";
 import TeamManager from "./components/TeamManager";
 import PromoManager from "./components/PromoManager";
-import { Utensils, Settings, LogOut, LayoutDashboard, MessageSquare, CalendarDays, ChefHat, ShoppingBag, Percent } from "lucide-react";
-import { db, auth } from "./firebase";
+import RoleManager from "./components/RoleManager";
+import CustomerManager from "./components/CustomerManager";
+import ReportsManager from "./components/ReportsManager";
+import AuditLog from "./components/AuditLog";
+import CommandPalette from "./components/CommandPalette";
+import { Utensils, Settings, LogOut, LayoutDashboard, MessageSquare, CalendarDays, ChefHat, ShoppingBag, Percent, Users, FileText, History, Search } from "lucide-react";
+import { db, auth, authedFetch, googleProvider } from "./firebase";
 import { collection, query, where, orderBy, onSnapshot, doc, getDoc } from "firebase/firestore";
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "firebase/auth";
+import { PermissionMap, hasPermission, getDefaultRole, seedDefaultRoles } from "./permissions";
+import { onAuthStateChanged, signOut, signInWithPopup } from "firebase/auth";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -74,15 +80,18 @@ export default function AdminPortal() {
   const [isAdminAuthLoading, setIsAdminAuthLoading] = useState(true);
   const [adminUser, setAdminUser] = useState<any>(null);
   const [adminRole, setAdminRole] = useState<string | null>(null);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [permissions, setPermissions] = useState<PermissionMap>({});
   const [loginError, setLoginError] = useState("");
-  const [isFirstTimeSetup, setIsFirstTimeSetup] = useState(false);
 
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
-  const [activeTab, setActiveTab] = useState<'overview' | 'menu' | 'orders' | 'chat' | 'reservations' | 'kds' | 'marketing' | 'settings'>('overview');
+  const [customers, setCustomers] = useState<UserProfile[]>([]);
+  const [activeTab, setActiveTab] = useState<'overview' | 'menu' | 'orders' | 'chat' | 'reservations' | 'kds' | 'marketing' | 'settings' | 'customers' | 'reports' | 'audit'>('overview');
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [totalUnread, setTotalUnread] = useState(0);
+
+  const can = (key: string) => hasPermission(permissions, key);
+  const actor = { email: adminUser?.email || 'system', role: adminRole || 'admin' };
   const [lastSeenTimestamp, setLastSeenTimestamp] = useState<number>(() => {
     const saved = localStorage.getItem("admin_last_seen_chat_time");
     return saved ? parseInt(saved) : Date.now();
@@ -98,6 +107,7 @@ export default function AdminPortal() {
   }, [activeTab]);
 
   useEffect(() => {
+    if (!can('chat.view')) return;
     // Listen for total messages in the last 24h
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const q = query(
@@ -118,25 +128,26 @@ export default function AdminPortal() {
         const time = m.createdAt?.toMillis ? m.createdAt.toMillis() : 0;
         return time > lastSeenTimestamp;
       }).length;
-      
+
       setTotalUnread(unread);
     };
 
     const unsubscribe = onSnapshot(q, handleSnapshot, (err) => {
       console.warn("Chat unread query error, falling back to simple collection listener:", err);
-      onSnapshot(collection(db, "chat_messages"), handleSnapshot, () => {});
+      onSnapshot(collection(db, "chat_messages"), handleSnapshot, () => { });
     });
 
     return () => unsubscribe();
-  }, [activeTab, lastSeenTimestamp]);
+  }, [activeTab, lastSeenTimestamp, permissions]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
-        // Only allow email/password authentication
-        const isEmailPassword = user.providerData.some(p => p.providerId === "password");
-        if (!isEmailPassword) {
-          setLoginError("Access denied. Only email/password accounts can access the Admin Portal.");
+        // Only allow Google sign-in (Google verifies emails on the provider
+        // side, so every user here satisfies the hardened emailVerified rule).
+        const isGoogle = user.providerData.some(p => p.providerId === "google.com");
+        if (!isGoogle) {
+          setLoginError("Access denied. Use the 'Continue with Google' button to access the Admin Portal.");
           await signOut(auth);
           setAdminUser(null);
           setIsAdminAuthLoading(false);
@@ -155,15 +166,53 @@ export default function AdminPortal() {
 
           const adminDocRef = doc(db, "admins", emailLower);
           const adminDocSnap = await getDoc(adminDocRef);
+
+          const loadRolePermissions = async (role: string): Promise<PermissionMap> => {
+            try {
+              const roleDocRef = doc(db, "roles", role);
+              const roleDocSnap = await getDoc(roleDocRef);
+              if (roleDocSnap.exists()) {
+                const data = roleDocSnap.data() as any;
+                if (data?.permissions && typeof data.permissions === 'object') {
+                  return data.permissions as PermissionMap;
+                }
+              }
+            } catch (err) {
+              console.warn("Failed to load role doc, using defaults:", err);
+            }
+            const fallback = getDefaultRole(role);
+            return fallback ? fallback.permissions : {};
+          };
+
           if (adminDocSnap.exists()) {
-            const role = adminDocSnap.data()?.role;
-            if (role === "admin" || role === "kitchen" || role === "cashier") {
+            const role = String(adminDocSnap.data()?.role || "");
+            let roleIsValid = !!role && !!getDefaultRole(role);
+            try {
+              await seedDefaultRoles(db);
+              const roleDocSnap = await getDoc(doc(db, "roles", role));
+              if (roleDocSnap.exists() || !!getDefaultRole(role)) {
+                roleIsValid = true;
+              }
+            } catch (err) {
+              console.warn("Failed to load role doc, falling back to defaults:", err);
+              roleIsValid = !!role && !!getDefaultRole(role);
+            }
+            if (roleIsValid) {
               setAdminUser(user);
               setAdminRole(role);
-              if (role === "kitchen") {
+              const perms = await loadRolePermissions(role);
+              setPermissions(perms);
+              const can = (key: string) => hasPermission(perms, key);
+              if (role === "admin") {
+                setActiveTab("overview");
+              } else if (role === "kitchen" && can("kds.view")) {
                 setActiveTab("kds");
-              } else if (role === "cashier") {
+              } else if (can("orders.view")) {
                 setActiveTab("orders");
+              } else if (can("kds.view")) {
+                setActiveTab("kds");
+              } else if (can("menu.view")) {
+                setActiveTab("menu");
               } else {
                 setActiveTab("overview");
               }
@@ -193,15 +242,12 @@ export default function AdminPortal() {
     return () => unsubscribe();
   }, []);
 
-  const handleAdminLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleAdminLogin = async () => {
     setLoginError("");
     try {
-      if (isFirstTimeSetup) {
-        await createUserWithEmailAndPassword(auth, email, password);
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
-      }
+      // Google-only sign-in. Google already verifies the email, so every
+      // authenticated staff member satisfies the hardened emailVerified() rule.
+      await signInWithPopup(auth, googleProvider);
     } catch (error: any) {
       setLoginError(error.message || "Failed to authenticate");
     }
@@ -217,7 +263,7 @@ export default function AdminPortal() {
 
   const fetchMenu = async () => {
     try {
-      const menuRes = await fetch("/api/menu");
+      const menuRes = await authedFetch("/api/menu");
       const menuData = await menuRes.json();
       setMenu(menuData);
     } catch (e) {
@@ -237,10 +283,28 @@ export default function AdminPortal() {
       onSnapshot(collection(db, "orders"), (snapshot) => {
         const updatedOrders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Order[];
         setOrders(updatedOrders);
-      }, () => {});
+      }, () => { });
     });
 
     return () => unsubscribe();
+  }, []);
+
+  // Listen for customer accounts (used by CustomerManager + Command Palette).
+  useEffect(() => {
+    if (!adminUser) return;
+    const unsubscribe = onSnapshot(collection(db, "users"), (snapshot) => {
+      const usersData = snapshot.docs.map(d => ({ uid: d.id, ...(d.data() as any) })) as UserProfile[];
+      setCustomers(usersData);
+    }, (err) => {
+      console.warn("Users listener unavailable (likely lack of customers.view read access).", err);
+    });
+    return () => unsubscribe();
+  }, [adminUser]);
+
+  // Global Cmd+K / Ctrl+K shortcut to open the command palette.
+  useEffect(() => {
+    (window as any).__openCommandPalette = () => setCommandPaletteOpen(true);
+    return () => { delete (window as any).__openCommandPalette; };
   }, []);
 
   if (isAdminAuthLoading) {
@@ -260,35 +324,29 @@ export default function AdminPortal() {
               <span className="text-[10px] font-mono tracking-widest text-stone-500 uppercase">Savory Restaurant</span>
             </div>
           </div>
-          <form onSubmit={handleAdminLogin} className="space-y-4">
+          <div className="space-y-4">
             {loginError && (
               <div className="bg-red-50 text-red-600 text-xs p-3 rounded-lg border border-red-100">
                 {loginError}
               </div>
             )}
-            <div>
-              <label className="block text-xs font-bold text-stone-600 uppercase tracking-wide mb-1">Email</label>
-              <input type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full text-sm border border-stone-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-500 outline-none" required />
-            </div>
-            <div>
-              <label className="block text-xs font-bold text-stone-600 uppercase tracking-wide mb-1">Password</label>
-              <input type="password" value={password} onChange={e => setPassword(e.target.value)} className="w-full text-sm border border-stone-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-500 outline-none" required />
-            </div>
-            <button type="submit" className="w-full bg-stone-900 text-white font-bold py-3 rounded-lg mt-4 cursor-pointer hover:bg-stone-800 transition-colors">
-              {isFirstTimeSetup ? "Create Password & Access Portal" : "Log In"}
+            <button
+              type="button"
+              onClick={handleAdminLogin}
+              className="w-full flex items-center justify-center gap-3 bg-white text-stone-800 font-bold py-3 rounded-lg mt-4 cursor-pointer hover:bg-stone-50 transition-colors border border-stone-300"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 48 48" aria-hidden="true">
+                <path fill="#FFC107" d="M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z" />
+                <path fill="#FF3D00" d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z" />
+                <path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238C29.211 35.091 26.715 36 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z" />
+                <path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303c-.792 2.237-2.231 4.166-4.087 5.571l6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z" />
+              </svg>
+              Continue with Google
             </button>
-            <div className="text-center pt-2">
-              <button type="button" onClick={() => setIsFirstTimeSetup(!isFirstTimeSetup)} className="text-xs text-amber-600 hover:text-amber-800 font-medium">
-                {isFirstTimeSetup ? "Already have a password? Log In" : "First time setup? Create Password"}
-              </button>
-            </div>
-          </form>
-          <div className="mt-4 p-3 bg-amber-50/50 border border-amber-100 rounded-lg text-[11px] text-stone-600 leading-normal">
-            <p className="font-bold mb-0.5 text-amber-800">Secure Administrator Access</p>
-            <p>Access is restricted. If you were invited by an admin, select "First time setup" to create your password.</p>
           </div>
+
           <div className="mt-6 text-center">
-             <button onClick={() => window.location.href = '/'} className="text-xs text-stone-500 hover:text-stone-800 underline">Back to site</button>
+            <button onClick={() => window.location.href = '/'} className="text-xs text-stone-500 hover:text-stone-800 underline">Back to site</button>
           </div>
         </div>
       </div>
@@ -302,107 +360,151 @@ export default function AdminPortal() {
           <span className="font-serif text-2xl font-bold tracking-tight block leading-none">Admin</span>
           <span className="text-[10px] font-mono tracking-widest text-stone-500 uppercase">Savory Restaurant</span>
         </div>
-        
-        <nav className="flex-1 px-4 space-y-1">
-          {adminRole === 'admin' && (
-            <button
-              onClick={() => setActiveTab('overview')}
-              className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
-                activeTab === 'overview' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-              }`}
-            >
-              <LayoutDashboard className="w-4 h-4" />
-              <span>Overview</span>
-            </button>
-          )}
-          
-          {(adminRole === 'admin' || adminRole === 'kitchen') && (
-            <button
-              onClick={() => setActiveTab('menu')}
-              className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
-                activeTab === 'menu' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-              }`}
-            >
-              <Utensils className="w-4 h-4" />
-              <span>Menu</span>
-            </button>
+
+        <nav className="flex-1 px-4 py-2 space-y-5 overflow-y-auto">
+          {/* OPERATIONS */}
+          {(can('analytics.view') || can('orders.view') || can('kds.view') || can('chat.view')) && (
+            <div className="space-y-1">
+              <p className="px-2 text-[10px] font-bold uppercase tracking-widest text-stone-400">Operations</p>
+              {can('analytics.view') && (
+                <button
+                  onClick={() => setActiveTab('overview')}
+                  className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'overview' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
+                >
+                  <LayoutDashboard className="w-4 h-4" />
+                  <span>Overview</span>
+                </button>
+              )}
+              {can('orders.view') && (
+                <button
+                  onClick={() => setActiveTab('orders')}
+                  className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'orders' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
+                >
+                  <ShoppingBag className="w-4 h-4" />
+                  <span>Orders</span>
+                </button>
+              )}
+              {can('kds.view') && (
+                <button
+                  onClick={() => setActiveTab('kds')}
+                  className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'kds' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
+                >
+                  <ChefHat className="w-4 h-4" />
+                  <span>Kitchen (KDS)</span>
+                </button>
+              )}
+              {can('chat.view') && (
+                <button
+                  onClick={() => setActiveTab('chat')}
+                  className={`w-full flex items-center justify-between px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'chat' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
+                >
+                  <div className="flex items-center space-x-3">
+                    <MessageSquare className="w-4 h-4" />
+                    <span>Inbox</span>
+                  </div>
+                  {totalUnread > 0 && (
+                    <span className="bg-amber-500 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center">
+                      {totalUnread}
+                    </span>
+                  )}
+                </button>
+              )}
+            </div>
           )}
 
-          {(adminRole === 'admin' || adminRole === 'cashier') && (
-            <>
-              <button
-                onClick={() => setActiveTab('orders')}
-                className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
-                  activeTab === 'orders' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-                }`}
-              >
-                <ShoppingBag className="w-4 h-4" />
-                <span>Orders</span>
-              </button>
-              
-              <button
-                onClick={() => setActiveTab('chat')}
-                className={`w-full flex items-center justify-between px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
-                  activeTab === 'chat' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-                }`}
-              >
-                <div className="flex items-center space-x-3">
-                  <MessageSquare className="w-4 h-4" />
-                  <span>Inbox</span>
-                </div>
-                {totalUnread > 0 && (
-                  <span className="bg-amber-500 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center">
-                    {totalUnread}
-                  </span>
-                )}
-              </button>
-              
-              <button
-                onClick={() => setActiveTab('reservations')}
-                className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
-                  activeTab === 'reservations' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-                }`}
-              >
-                <CalendarDays className="w-4 h-4" />
-                <span>Reservations</span>
-              </button>
-            </>
+          {/* RESTAURANT */}
+          {(can('menu.view') || can('reservations.view') || can('promos.view')) && (
+            <div className="space-y-1">
+              <p className="px-2 text-[10px] font-bold uppercase tracking-widest text-stone-400">Restaurant</p>
+              {can('menu.view') && (
+                <button
+                  onClick={() => setActiveTab('menu')}
+                  className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'menu' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
+                >
+                  <Utensils className="w-4 h-4" />
+                  <span>Menu</span>
+                </button>
+              )}
+              {can('reservations.view') && (
+                <button
+                  onClick={() => setActiveTab('reservations')}
+                  className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'reservations' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
+                >
+                  <CalendarDays className="w-4 h-4" />
+                  <span>Reservations</span>
+                </button>
+              )}
+              {can('promos.view') && (
+                <button
+                  onClick={() => setActiveTab('marketing')}
+                  className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'marketing' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
+                >
+                  <Percent className="w-4 h-4" />
+                  <span>Marketing & Promos</span>
+                </button>
+              )}
+            </div>
           )}
 
-          {(adminRole === 'admin' || adminRole === 'kitchen') && (
-            <button
-              onClick={() => setActiveTab('kds')}
-              className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
-                activeTab === 'kds' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-              }`}
-            >
-              <ChefHat className="w-4 h-4" />
-              <span>Kitchen (KDS)</span>
-            </button>
+          {/* CUSTOMERS & DATA */}
+          {(can('customers.view') || can('reports.view')) && (
+            <div className="space-y-1">
+              <p className="px-2 text-[10px] font-bold uppercase tracking-widest text-stone-400">Customers & Data</p>
+              {can('customers.view') && (
+                <button
+                  onClick={() => setActiveTab('customers')}
+                  className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'customers' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
+                >
+                  <Users className="w-4 h-4" />
+                  <span>Customers</span>
+                </button>
+              )}
+              {can('reports.view') && (
+                <button
+                  onClick={() => setActiveTab('reports')}
+                  className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'reports' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
+                >
+                  <FileText className="w-4 h-4" />
+                  <span>Reports</span>
+                </button>
+              )}
+            </div>
           )}
 
-          {adminRole === 'admin' && (
-            <button
-              onClick={() => setActiveTab('settings')}
-              className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
-                activeTab === 'settings' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-              }`}
-            >
-              <Settings className="w-4 h-4" />
-              <span>Settings</span>
-            </button>
-          )}
-          
-          {adminRole === 'admin' && (
-            <button
-              onClick={() => setActiveTab('marketing')}
-              className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
-                activeTab === 'marketing' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-              }`}
-            >
-              <Percent className="w-4 h-4" />
-              <span>Marketing & Loyalty</span>
-            </button>
+          {/* PLATFORM */}
+          {(can('audit.view') || can('team.view') || can('settings.view')) && (
+            <div className="space-y-1">
+              <p className="px-2 text-[10px] font-bold uppercase tracking-widest text-stone-400">Platform</p>
+              {can('audit.view') && (
+                <button
+                  onClick={() => setActiveTab('audit')}
+                  className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'audit' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
+                >
+                  <History className="w-4 h-4" />
+                  <span>Audit Log</span>
+                </button>
+              )}
+              {(can('team.view') || can('settings.view')) && (
+                <button
+                  onClick={() => setActiveTab('settings')}
+                  className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'settings' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
+                    }`}
+                >
+                  <Settings className="w-4 h-4" />
+                  <span>Team & Settings</span>
+                </button>
+              )}
+            </div>
           )}
         </nav>
 
@@ -412,7 +514,7 @@ export default function AdminPortal() {
             <p className="text-sm font-bold text-stone-900 truncate">{adminUser?.email}</p>
             <p className="text-[10px] font-mono text-stone-400 uppercase mt-0.5">{adminRole}</p>
           </div>
-          <button 
+          <button
             onClick={handleAdminLogout}
             className="w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm font-medium text-stone-600 hover:bg-stone-50 transition-colors cursor-pointer"
           >
@@ -421,82 +523,148 @@ export default function AdminPortal() {
           </button>
         </div>
       </aside>
-      
+
       <main className="flex-1 min-w-0 flex flex-col">
         <header className="bg-white border-b border-stone-200 px-8 py-5 flex justify-between items-center sticky top-0 z-10">
           <h1 className="text-2xl font-serif font-bold text-stone-900 capitalize">
-            {activeTab === 'kds' ? 'Kitchen Display System' : activeTab}
+            {({ overview: 'Overview', menu: 'Menu', orders: 'Orders', chat: 'Inbox', reservations: 'Reservations', kds: 'Kitchen Display System', marketing: 'Marketing & Promos', settings: 'Team & Settings', customers: 'Customers', reports: 'Reports', audit: 'Audit Log' } as Record<string, string>)[activeTab] || activeTab}
           </h1>
-          <button 
-            onClick={() => window.location.href = '/'}
-            className="flex items-center space-x-2 text-stone-500 hover:text-stone-900 transition-colors text-sm font-medium cursor-pointer"
-          >
-            <span>View Live Site</span>
-          </button>
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={() => setCommandPaletteOpen(true)}
+              className="hidden sm:flex items-center space-x-2 text-xs text-stone-500 border border-stone-200 rounded-lg px-3 py-1.5 hover:bg-stone-50 transition-colors font-medium cursor-pointer"
+            >
+              <Search className="w-3.5 h-3.5" />
+              <span>Search</span>
+              <kbd className="font-mono text-[10px] bg-stone-100 border border-stone-200 px-1 rounded">Ctrl K</kbd>
+            </button>
+            <button
+              onClick={() => window.location.href = '/'}
+              className="flex items-center space-x-2 text-stone-500 hover:text-stone-900 transition-colors text-sm font-medium cursor-pointer"
+            >
+              <span>View Live Site</span>
+            </button>
+          </div>
         </header>
 
         <div className="p-8 flex-1 overflow-y-auto">
           <ErrorBoundary fallbackTitle="Admin Panel Module Error">
-            {activeTab === 'overview' && (
+            {activeTab === 'overview' && can('analytics.view') && (
               <div className="animate-fade-in max-w-5xl mx-auto space-y-8">
-                <AnalyticsDashboard />
+                <AnalyticsDashboard can={can} />
               </div>
             )}
 
-            {activeTab === 'settings' && (
+            {activeTab === 'settings' && (can('team.view') || can('settings.view')) && (
               <div className="space-y-8 animate-fade-in max-w-4xl mx-auto">
-                <GlobalSettingsPanel />
-                <TeamManager currentUserEmail={adminUser?.email || ''} userRole={adminRole} />
+                {can('team.view') && (
+                  <>
+                    <TeamManager
+                      currentUserEmail={adminUser?.email || ''}
+                      userRole={adminRole}
+                      can={can}
+                      actor={actor}
+                    />
+                    <RoleManager can={can} />
+                  </>
+                )}
+                {can('settings.view') && (
+                  <GlobalSettingsPanel can={can} actor={actor} />
+                )}
               </div>
             )}
 
-            {activeTab === 'marketing' && (
+            {activeTab === 'customers' && can('customers.view') && (
+              <div className="animate-fade-in max-w-5xl mx-auto">
+                <CustomerManager
+                  orders={orders}
+                  can={can}
+                  actor={actor}
+                />
+              </div>
+            )}
+
+            {activeTab === 'reports' && can('reports.view') && (
+              <div className="animate-fade-in max-w-5xl mx-auto">
+                <ReportsManager
+                  orders={orders}
+                  menu={menu}
+                  can={can}
+                />
+              </div>
+            )}
+
+            {activeTab === 'audit' && can('audit.view') && (
+              <div className="animate-fade-in max-w-5xl mx-auto">
+                <AuditLog can={can} />
+              </div>
+            )}
+
+            {activeTab === 'marketing' && can('promos.view') && (
               <div className="animate-fade-in max-w-5xl mx-auto space-y-8">
-                <PromoManager />
+                <PromoManager can={can} />
               </div>
             )}
 
-            {activeTab === 'menu' && (
+            {activeTab === 'menu' && can('menu.view') && (
               <div className="space-y-8 animate-fade-in max-w-5xl mx-auto">
-                <CategoryManager />
-                <MenuManager 
-                  menu={menu} 
-                  onMenuUpdated={fetchMenu} 
+                <CategoryManager can={can} />
+                <MenuManager
+                  menu={menu}
+                  onMenuUpdated={fetchMenu}
                   userRole={adminRole}
+                  can={can}
+                  actor={actor}
                 />
               </div>
             )}
 
-            {activeTab === 'orders' && (
+            {activeTab === 'orders' && can('orders.view') && (
               <div className="animate-fade-in max-w-5xl mx-auto">
-                <OrderList 
-                  orders={orders} 
-                  onOrderUpdated={() => {}} 
+                <OrderList
+                  orders={orders}
+                  onOrderUpdated={() => { }}
                   userRole={adminRole}
+                  can={can}
+                  actor={actor}
                 />
               </div>
             )}
 
-            {activeTab === 'reservations' && (
+            {activeTab === 'reservations' && can('reservations.view') && (
               <div className="animate-fade-in max-w-5xl mx-auto">
-                <ReservationManager />
+                <ReservationManager can={can} />
               </div>
             )}
 
-            {activeTab === 'chat' && (
+            {activeTab === 'chat' && can('chat.view') && (
               <div className="animate-fade-in max-w-5xl mx-auto h-[70vh]">
-                <AdminChat />
+                <AdminChat can={can} />
               </div>
             )}
 
-            {activeTab === 'kds' && (
+            {activeTab === 'kds' && can('kds.view') && (
               <div className="animate-fade-in h-[80vh]">
-                <KitchenDisplaySystem />
+                <KitchenDisplaySystem can={can} />
               </div>
             )}
           </ErrorBoundary>
         </div>
       </main>
+
+      {/* Command Palette - Cmd+K / Ctrl+K */}
+      <CommandPalette
+        isOpen={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+        onNavigate={(tab) => {
+          if (['overview', 'menu', 'orders', 'chat', 'reservations', 'kds', 'marketing', 'settings', 'customers', 'reports', 'audit'].includes(tab)) {
+            setActiveTab(tab as any);
+          }
+        }}
+        orders={orders}
+        menu={menu}
+        customers={customers}
+      />
     </div>
   );
 }

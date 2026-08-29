@@ -25,3 +25,40 @@
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(156, 163, 175, 0.5);
 }
+
+@keyframes fadeInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Print / PDF export styles for admin reports */
+@media print {
+  body {
+    background: #fff !important;
+  }
+  aside,
+  header,
+  button,
+  .animate-fade-in > *:not(.print-report) {
+    display: none !important;
+  }
+  main {
+    overflow: visible !important;
+  }
+  .print-report {
+    display: block !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+  .print-report .no-print {
+    display: none !important;
+  }
+}

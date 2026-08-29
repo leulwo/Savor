@@ -3,10 +3,19 @@ import { db } from '../firebase';
 import { collection, query, orderBy, onSnapshot, doc, updateDoc } from 'firebase/firestore';
 import { Reservation } from '../types';
 import { CalendarDays, CheckCircle, XCircle, Clock, Users, Mail, Phone, User } from 'lucide-react';
+import { toastError } from '../notify';
+import { hasPermission, PermissionMap } from '../permissions';
 
-export default function ReservationManager() {
+interface ReservationManagerProps {
+  can?: (key: string) => boolean;
+  permissions?: PermissionMap;
+}
+
+export default function ReservationManager({ can, permissions }: ReservationManagerProps) {
   const [reservations, setReservations] = useState<Reservation[]>([]);
   const [loading, setLoading] = useState(true);
+
+  const canManage = can ? can("reservations.manage") : hasPermission(permissions, "reservations.manage");
 
   useEffect(() => {
     // Single-field or unsorted query to avoid needing a Firestore composite index for (date desc, time asc)
@@ -51,7 +60,7 @@ export default function ReservationManager() {
       });
     } catch (error) {
       console.error("Failed to update reservation status:", error);
-      alert("Failed to update status.");
+      toastError("Failed to update status.");
     }
   };
 
@@ -132,7 +141,7 @@ export default function ReservationManager() {
               </div>
 
               <div className="flex items-center gap-2 mt-2 md:mt-0">
-                {res.status === 'pending' && (
+                {canManage && res.status === 'pending' && (
                   <>
                     <button
                       onClick={() => updateStatus(res.id!, 'confirmed')}
@@ -150,7 +159,7 @@ export default function ReservationManager() {
                     </button>
                   </>
                 )}
-                {res.status === 'confirmed' && (
+                {canManage && res.status === 'confirmed' && (
                   <button
                     onClick={() => updateStatus(res.id!, 'cancelled')}
                     className="flex items-center space-x-1.5 px-4 py-2 border border-stone-300 hover:bg-red-50 hover:text-red-600 hover:border-red-200 text-stone-600 text-xs font-bold rounded-lg transition-colors cursor-pointer"

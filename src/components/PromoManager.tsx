@@ -2,12 +2,21 @@ import React, { useState, useEffect } from 'react';
 import { collection, query, onSnapshot, doc, setDoc, deleteDoc, orderBy } from 'firebase/firestore';
 import { db } from '../firebase';
 import { PromoCode } from '../types';
+import { confirmDialog, toastError } from '../notify';
 import { TicketPercent, Plus, Trash2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { hasPermission, PermissionMap } from '../permissions';
 
-export default function PromoManager() {
+interface PromoManagerProps {
+  can?: (key: string) => boolean;
+  permissions?: PermissionMap;
+}
+
+export default function PromoManager({ can, permissions }: PromoManagerProps) {
   const [promos, setPromos] = useState<PromoCode[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  
+  const canManage = can ? can("promos.manage") : hasPermission(permissions, "promos.manage");
   
   const [code, setCode] = useState('');
   const [type, setType] = useState<'percentage' | 'fixed'>('percentage');
@@ -52,18 +61,19 @@ export default function PromoManager() {
       setExpiresAt('');
     } catch (error) {
       console.error("Error creating promo:", error);
-      alert("Failed to create promo code");
+      toastError("Failed to create promo code");
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (confirm('Are you sure you want to delete this promo code?')) {
+    confirmDialog('Are you sure you want to delete this promo code?', async () => {
       try {
         await deleteDoc(doc(db, 'promoCodes', id));
       } catch (error) {
         console.error("Error deleting promo:", error);
+        toastError("Failed to delete promo code");
       }
-    }
+    }, null, "Delete");
   };
 
   const toggleStatus = async (promo: PromoCode) => {
@@ -84,13 +94,15 @@ export default function PromoManager() {
           <h2 className="text-xl font-bold text-stone-900">Promo Codes</h2>
           <p className="text-sm text-stone-500">Manage discount codes for your customers</p>
         </div>
-        <button
-          onClick={() => setShowForm(!showForm)}
-          className="bg-amber-600 text-white px-4 py-2 rounded-xl text-sm font-medium hover:bg-amber-700 flex items-center transition-colors"
-        >
-          <Plus className="w-4 h-4 mr-2" />
-          New Promo
-        </button>
+        {canManage && (
+          <button
+            onClick={() => setShowForm(!showForm)}
+            className="bg-amber-600 text-white px-4 py-2 rounded-xl text-sm font-medium hover:bg-amber-700 flex items-center transition-colors"
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            New Promo
+          </button>
+        )}
       </div>
 
       {showForm && (
@@ -219,25 +231,33 @@ export default function PromoManager() {
                   {promo.usageCount} uses
                 </td>
                 <td className="px-6 py-4">
-                  <button
-                    onClick={() => toggleStatus(promo)}
-                    className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                      promo.active 
-                        ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' 
-                        : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
-                    }`}
-                  >
-                    {promo.active ? 'Active' : 'Inactive'}
-                  </button>
+                  {canManage ? (
+                    <button
+                      onClick={() => toggleStatus(promo)}
+                      className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium transition-colors cursor-pointer ${
+                        promo.active 
+                          ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' 
+                          : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                      }`}
+                    >
+                      {promo.active ? 'Active' : 'Inactive'}
+                    </button>
+                  ) : (
+                    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${promo.active ? 'bg-emerald-100 text-emerald-700' : 'bg-stone-100 text-stone-600'}`}>
+                      {promo.active ? 'Active' : 'Inactive'}
+                    </span>
+                  )}
                 </td>
                 <td className="px-6 py-4 text-right">
-                  <button
-                    onClick={() => promo.id && handleDelete(promo.id)}
-                    className="p-2 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors"
-                    title="Delete"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  {canManage && (
+                    <button
+                      onClick={() => promo.id && handleDelete(promo.id)}
+                      className="p-2 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                      title="Delete"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}

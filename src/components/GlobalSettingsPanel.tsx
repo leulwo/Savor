@@ -5,9 +5,11 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { Settings, Save, AlertCircle, CheckCircle, RotateCcw, Truck, CreditCard, ChevronDown, ChevronUp, Image as ImageIcon, Heart, MessageSquare, CalendarDays, Mail } from "lucide-react";
-import { db } from "../firebase";
+import { Settings, Save, AlertCircle, CheckCircle, RotateCcw, Truck, CreditCard, ChevronDown, ChevronUp, Image as ImageIcon, MessageSquare, CalendarDays, Mail, Clock } from "lucide-react";
+import { db, authedFetch } from "../firebase";
 import { doc, getDoc, setDoc } from "firebase/firestore";
+import { hasPermission, PermissionMap } from "../permissions";
+import { logAudit } from "../utils/auditLogger";
 
 export interface GlobalSettings {
   restaurantName?: string;
@@ -16,14 +18,23 @@ export interface GlobalSettings {
   flatFeeETB?: number;
   enableCOD?: boolean;
   isOpen?: boolean;
+  scheduleEnabled?: boolean;
+  openTime?: string;
+  closeTime?: string;
   enableMarketing?: boolean;
-  enableLoyalty?: boolean;
   enableReservations?: boolean;
   enableChatbot?: boolean;
   [key: string]: any;
 }
 
-export default function GlobalSettingsPanel() {
+interface GlobalSettingsPanelProps {
+  can?: (key: string) => boolean;
+  permissions?: PermissionMap;
+  actor?: { email: string; role: string };
+}
+
+export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalSettingsPanelProps) {
+  const canEdit = can ? can("settings.edit") : hasPermission(permissions, "settings.edit");
   const [settings, setSettings] = useState<GlobalSettings>({
     restaurantName: "Savory",
     logoUrl: "",
@@ -31,17 +42,21 @@ export default function GlobalSettingsPanel() {
     flatFeeETB: 0,
     enableCOD: true,
     isOpen: true,
+    scheduleEnabled: false,
+    openTime: "09:00",
+    closeTime: "22:00",
     enableMarketing: true,
-    enableLoyalty: true,
     enableReservations: true,
-    enableChatbot: true
+    enableChatbot: true,
+    prepTimeMinutes: 30,
+    scheduledStepsMinutes: 15
   });
-  
+
   const [loading, setLoading] = useState(false);
-  
+
   // Tab state for categories
   const [activeTab, setActiveTab] = useState<'general' | 'checkout' | 'features' | 'integrations'>('general');
-  
+
   const [shipdayTestLoading, setShipdayTestLoading] = useState(false);
   const [mailchimpTestLoading, setMailchimpTestLoading] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; orderCount?: number } | null>(null);
@@ -49,17 +64,23 @@ export default function GlobalSettingsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
+  const originalSettings = React.useRef<GlobalSettings>({});
+
   useEffect(() => {
     const fetchSettings = async () => {
       try {
         const docSnap = await getDoc(doc(db, "settings", "global"));
         if (docSnap.exists()) {
-          setSettings(prev => ({...prev, ...docSnap.data()}));
+          const data = docSnap.data();
+          originalSettings.current = data;
+          setSettings(prev => ({ ...prev, ...data }));
         } else {
           // Fallback to legacy checkout settings document if global doesn't exist
           const oldDocSnap = await getDoc(doc(db, "settings", "checkout"));
           if (oldDocSnap.exists()) {
-            setSettings(prev => ({...prev, ...oldDocSnap.data()}));
+            const data = oldDocSnap.data();
+            originalSettings.current = data;
+            setSettings(prev => ({ ...prev, ...data }));
           }
         }
       } catch (e) {
@@ -76,6 +97,10 @@ export default function GlobalSettingsPanel() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canEdit) {
+      setError("You do not have permission to edit settings.");
+      return;
+    }
     setLoading(true);
     setError(null);
     setSuccess(false);
@@ -85,13 +110,38 @@ export default function GlobalSettingsPanel() {
         ...settings,
         serviceTaxPercent: parseFloat(settings.serviceTaxPercent?.toString() || "0"),
         flatFeeETB: parseFloat(settings.flatFeeETB?.toString() || "0"),
+        prepTimeMinutes: parseInt(settings.prepTimeMinutes?.toString() || "30", 10) || 30,
+        scheduledStepsMinutes: parseInt(settings.scheduledStepsMinutes?.toString() || "15", 10) || 15,
+        enableCOD: !!settings.enableCOD,
+        isOpen: !!settings.isOpen,
+        scheduleEnabled: !!settings.scheduleEnabled,
+        openTime: settings.openTime || "09:00",
+        closeTime: settings.closeTime || "22:00",
+        enableMarketing: !!settings.enableMarketing,
+        enableReservations: !!settings.enableReservations,
+        enableChatbot: !!settings.enableChatbot,
         updatedAt: new Date().toISOString()
       };
-      
+
       await setDoc(doc(db, "settings", "global"), payload, { merge: true });
       // Duplicate to checkout for backwards compatibility if needed
       await setDoc(doc(db, "settings", "checkout"), payload, { merge: true });
-      
+
+      // Build a diff of changed settings fields for the audit log
+      const diff: Record<string, any> = {};
+      const editableFields: (keyof GlobalSettings)[] = ["restaurantName", "logoUrl", "serviceTaxPercent", "flatFeeETB", "enableCOD", "isOpen", "scheduleEnabled", "openTime", "closeTime", "enableMarketing", "enableReservations", "enableChatbot", "prepTimeMinutes", "scheduledStepsMinutes"];
+      editableFields.forEach(field => {
+        if (String(settings[field] ?? "") !== String(originalSettings.current[field] ?? "")) {
+          diff[field as string] = { from: originalSettings.current[field] ?? null, to: settings[field] ?? null };
+        }
+      });
+      await logAudit(actor || { email: 'system', role: 'unknown' }, {
+        action: 'Updated system settings',
+        category: 'settings',
+        details: Object.keys(diff).length > 0 ? diff : { note: 'No observable field changes' }
+      });
+
+      originalSettings.current = payload;
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
     } catch (e: any) {
@@ -105,7 +155,7 @@ export default function GlobalSettingsPanel() {
     setMailchimpTestLoading(true);
     setMailchimpTestResult(null);
     try {
-      const res = await fetch("/api/mailchimp/test");
+      const res = await authedFetch("/api/mailchimp/test");
       const data = await res.json();
       setMailchimpTestResult({ success: data.success, message: data.message || data.error });
     } catch (e) {
@@ -119,10 +169,10 @@ export default function GlobalSettingsPanel() {
     setShipdayTestLoading(true);
     setTestResult(null);
     try {
-      const res = await fetch("/api/shipday/test");
+      const res = await authedFetch("/api/shipday/test");
       const data = await res.json();
-      setTestResult({ 
-        success: data.success, 
+      setTestResult({
+        success: data.success,
         message: data.message || data.error,
         orderCount: data.orderCount
       });
@@ -255,7 +305,45 @@ export default function GlobalSettingsPanel() {
                 </div>
               </div>
             </div>
-            
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1.5">
+                  Minimum Prep Time (min)
+                </label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    min="0"
+                    required
+                    value={settings.prepTimeMinutes}
+                    onChange={e => handleChange("prepTimeMinutes", e.target.value)}
+                    className="w-full text-xs bg-stone-50/50 border border-stone-300 rounded-xl pl-3 pr-12 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 transition-all font-medium"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-stone-400">min</span>
+                </div>
+                <p className="text-[9px] text-stone-400 mt-2">Earliest a scheduled order can be placed (lead time).</p>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1.5">
+                  Schedule Slot Interval (min)
+                </label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    min="1"
+                    required
+                    value={settings.scheduledStepsMinutes}
+                    onChange={e => handleChange("scheduledStepsMinutes", e.target.value)}
+                    className="w-full text-xs bg-stone-50/50 border border-stone-300 rounded-xl pl-3 pr-12 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 transition-all font-medium"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-stone-400">min</span>
+                </div>
+                <p className="text-[9px] text-stone-400 mt-2">Spacing between available pickup/delivery times.</p>
+              </div>
+            </div>
+
             <div className="grid grid-cols-2 gap-4">
               <label className="flex items-center justify-between p-4 bg-stone-50 border border-stone-200 rounded-2xl cursor-pointer hover:bg-stone-100 transition-all">
                 <div className="flex items-center space-x-3">
@@ -299,6 +387,62 @@ export default function GlobalSettingsPanel() {
                 </div>
               </label>
             </div>
+
+            {/* Operating Schedule */}
+            <div className="p-4 bg-stone-50 border border-stone-200 rounded-2xl">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center space-x-3">
+                  <div className="p-2 bg-white rounded-xl shadow-sm">
+                    <Clock className="w-4 h-4 text-stone-600" />
+                  </div>
+                  <div>
+                    <span className="block text-[10px] font-black text-stone-800 uppercase tracking-tight leading-none">Operating Schedule</span>
+                    <span className="text-[9px] text-stone-400 font-medium">Auto open/close by time of day</span>
+                  </div>
+                </div>
+                <div className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={settings.scheduleEnabled}
+                    onChange={e => handleChange("scheduleEnabled", e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-5 bg-stone-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2.5px] after:start-[2.5px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
+                </div>
+              </div>
+
+              {settings.scheduleEnabled ? (
+                <>
+                  <div className="grid grid-cols-2 gap-4 mt-1">
+                    <div>
+                      <label className="block text-[9px] font-bold text-stone-500 uppercase tracking-widest mb-1">Opening Time</label>
+                      <input
+                        type="time"
+                        value={settings.openTime || "09:00"}
+                        onChange={e => handleChange("openTime", e.target.value)}
+                        className="w-full text-xs bg-white border border-stone-300 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 transition-all font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[9px] font-bold text-stone-500 uppercase tracking-widest mb-1">Closing Time</label>
+                      <input
+                        type="time"
+                        value={settings.closeTime || "22:00"}
+                        onChange={e => handleChange("closeTime", e.target.value)}
+                        className="w-full text-xs bg-white border border-stone-300 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 transition-all font-medium"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[9px] text-stone-400 mt-3 leading-relaxed">
+                    Orders are automatically stopped <span className="font-bold text-stone-500">{settings.prepTimeMinutes || 30} minutes</span> before closing time so the kitchen can finish preparing existing orders. The manual "Store Status" toggle above is ignored while the schedule is enabled.
+                  </p>
+                </>
+              ) : (
+                <p className="text-[9px] text-stone-400 mt-1 leading-relaxed">
+                  Enable the schedule to automatically accept orders only between opening and closing time. When disabled, the manual "Store Status" toggle controls availability.
+                </p>
+              )}
+            </div>
           </div>
         )}
 
@@ -306,22 +450,6 @@ export default function GlobalSettingsPanel() {
           <div className="space-y-4 animate-in fade-in">
             <p className="text-xs text-stone-500 mb-4">Toggle optional features across the application. When disabled, their respective tabs and user-facing UI will be hidden.</p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <label className="flex items-center justify-between p-4 bg-stone-50 border border-stone-200 rounded-2xl cursor-pointer hover:bg-stone-100 transition-all">
-                <div className="flex items-center space-x-3">
-                  <div className="p-2 bg-white rounded-xl shadow-sm text-pink-600">
-                    <Heart className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <span className="block text-[10px] font-black text-stone-800 uppercase tracking-tight leading-none">Loyalty Program</span>
-                    <span className="text-[9px] text-stone-400 font-medium">Points & Promos</span>
-                  </div>
-                </div>
-                <div className="relative inline-flex items-center cursor-pointer">
-                  <input type="checkbox" checked={settings.enableLoyalty} onChange={e => handleChange("enableLoyalty", e.target.checked)} className="sr-only peer" />
-                  <div className="w-9 h-5 bg-stone-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2.5px] after:start-[2.5px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
-                </div>
-              </label>
-
               <label className="flex items-center justify-between p-4 bg-stone-50 border border-stone-200 rounded-2xl cursor-pointer hover:bg-stone-100 transition-all">
                 <div className="flex items-center space-x-3">
                   <div className="p-2 bg-white rounded-xl shadow-sm text-blue-600">
@@ -353,14 +481,14 @@ export default function GlobalSettingsPanel() {
                   <div className="w-9 h-5 bg-stone-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2.5px] after:start-[2.5px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
                 </div>
               </label>
-              
+
               <label className="flex items-center justify-between p-4 bg-stone-50 border border-stone-200 rounded-2xl cursor-pointer hover:bg-stone-100 transition-all">
                 <div className="flex items-center space-x-3">
                   <div className="p-2 bg-white rounded-xl shadow-sm text-purple-600">
                     <MessageSquare className="w-4 h-4" />
                   </div>
                   <div>
-                    <span className="block text-[10px] font-black text-stone-800 uppercase tracking-tight leading-none">AI Chatbot</span>
+                    <span className="block text-[10px] font-black text-stone-800 uppercase tracking-tight leading-none">Chatbot</span>
                     <span className="text-[9px] text-stone-400 font-medium">Customer assistant</span>
                   </div>
                 </div>
@@ -395,11 +523,10 @@ export default function GlobalSettingsPanel() {
                 </button>
               </div>
               {testResult && (
-                <div className={`p-3 rounded-xl border flex items-start space-x-2 animate-in fade-in slide-in-from-top-1 ${
-                  testResult.success 
-                    ? 'bg-emerald-50 border-emerald-100 text-emerald-800' 
-                    : 'bg-rose-50 border-rose-100 text-rose-800'
-                }`}>
+                <div className={`p-3 rounded-xl border flex items-start space-x-2 animate-in fade-in slide-in-from-top-1 ${testResult.success
+                  ? 'bg-emerald-50 border-emerald-100 text-emerald-800'
+                  : 'bg-rose-50 border-rose-100 text-rose-800'
+                  }`}>
                   {testResult.success ? (
                     <CheckCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
                   ) : (
@@ -457,14 +584,18 @@ export default function GlobalSettingsPanel() {
               </div>
             )}
           </div>
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full md:w-auto bg-stone-900 hover:bg-black text-white text-[11px] font-black uppercase tracking-widest px-10 py-4 rounded-2xl shadow-xl shadow-stone-900/10 transition-all hover:-translate-y-1 active:translate-y-0 disabled:opacity-50 disabled:translate-y-0 flex items-center justify-center space-x-2 cursor-pointer"
-          >
-            {loading ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Save className="w-4 h-4" />}
-            <span>Save Configuration</span>
-          </button>
+          {canEdit ? (
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full md:w-auto bg-stone-900 hover:bg-black text-white text-[11px] font-black uppercase tracking-widest px-10 py-4 rounded-2xl shadow-xl shadow-stone-900/10 transition-all hover:-translate-y-1 active:translate-y-0 disabled:opacity-50 disabled:translate-y-0 flex items-center justify-center space-x-2 cursor-pointer"
+            >
+              {loading ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Save className="w-4 h-4" />}
+              <span>Save Configuration</span>
+            </button>
+          ) : (
+            <span className="text-[11px] text-stone-400 font-medium">Read only — you need the "Edit restaurant settings" permission to save changes.</span>
+          )}
         </div>
       </form>
     </div>

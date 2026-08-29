@@ -7,19 +7,34 @@ import React, { useState, useEffect } from "react";
 import { MenuItem } from "../types";
 import { Plus, Edit2, Trash2, Save, X, Utensils, Tag, Clock } from "lucide-react";
 import { db } from "../firebase";
-import { doc, setDoc, deleteDoc, collection, getDocs } from "firebase/firestore";
+import { doc, setDoc, updateDoc, deleteDoc, collection, getDocs } from "firebase/firestore";
+import { confirmDialog } from "../notify";
+import { hasPermission, PermissionMap } from "../permissions";
+import { logAudit } from "../utils/auditLogger";
 
 interface MenuManagerProps {
   onMenuUpdated: () => void;
   menu: MenuItem[];
   userRole?: string | null;
+  can?: (key: string) => boolean;
+  permissions?: PermissionMap;
+  actor?: { email: string; role: string };
 }
 
-export default function MenuManager({ menu = [], onMenuUpdated, userRole }: MenuManagerProps) {
+export default function MenuManager({ menu = [], onMenuUpdated, userRole, can, permissions, actor }: MenuManagerProps) {
   const [selectedItem, setSelectedItem] = useState<MenuItem | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+
+  const canCreate = can ? can("menu.create") : hasPermission(permissions, "menu.create");
+  const canEdit = can ? can("menu.edit") : hasPermission(permissions, "menu.edit");
+  const canEditPrice = can ? can("menu.editPrice") : hasPermission(permissions, "menu.editPrice");
+  const canDelete = can ? can("menu.delete") : hasPermission(permissions, "menu.delete");
+  const canEditAnyPricing = canEdit || canEditPrice;
+  const canModify = canCreate || canEdit || canEditPrice || canDelete;
+  // When a role can only edit prices (no menu.create/edit), lock all non-pricing fields.
+  const isPriceOnlyEdit = !!selectedItem && !canCreate && !canEdit && canEditPrice;
 
   // Form States
   const [id, setId] = useState("");
@@ -62,6 +77,8 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
   const [taxRatePercent, setTaxRatePercent] = useState<number>(15);
   const [isActive, setIsActive] = useState<boolean>(true);
   const [menuTiming, setMenuTiming] = useState<string>("All Day");
+  const [timingFrom, setTimingFrom] = useState<string>("08:00");
+  const [timingTo, setTimingTo] = useState<string>("11:00");
   const [galleryImages, setGalleryImages] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -86,6 +103,8 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
     setTaxRatePercent(15);
     setIsActive(true);
     setMenuTiming("All Day");
+    setTimingFrom("08:00");
+    setTimingTo("11:00");
     setSelectedItem(null);
     setIsEditing(false);
   };
@@ -113,6 +132,8 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
     setTaxRatePercent(item.taxRatePercent !== undefined ? item.taxRatePercent : 15);
     setIsActive(item.isActive !== false);
     setMenuTiming(item.menuTiming || "All Day");
+    setTimingFrom(item.timingFrom || "08:00");
+    setTimingTo(item.timingTo || "11:00");
     setIsEditing(true);
   };
 
@@ -120,6 +141,14 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
     e.preventDefault();
     if (!name || price <= 0) {
       setMessage({ type: 'error', text: 'Name and a valid positive price are required.' });
+      return;
+    }
+    if (!canModify) {
+      setMessage({ type: 'error', text: 'You do not have permission to create or edit menu items.' });
+      return;
+    }
+    if (id && !canCreate && !canEdit && !canEditPrice) {
+      setMessage({ type: 'error', text: 'You do not have permission to edit this item.' });
       return;
     }
 
@@ -138,11 +167,18 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
 
     const itemId = id || Math.random().toString(36).substring(2, 11);
 
+    const priceFields = {
+      price: parseFloat(price.toString()),
+      basePrice: parseFloat(basePrice.toString()) || parseFloat(price.toString()),
+      taxRate,
+      taxRatePercent: parseFloat(taxRatePercent.toString()) || 0,
+    };
+
     const payload = {
       id: itemId,
       name,
       description,
-      price: parseFloat(price.toString()),
+      ...priceFields,
       category: selectedCategories.length > 0 ? selectedCategories[0] : category,
       categories: selectedCategories.length > 0 ? selectedCategories : [category],
       promoStickers: selectedPromoStickers,
@@ -156,15 +192,27 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
         carbs,
         fat
       },
-      basePrice: parseFloat(basePrice.toString()) || parseFloat(price.toString()),
-      taxRate,
-      taxRatePercent: parseFloat(taxRatePercent.toString()) || 0,
       isActive,
-      menuTiming
+      menuTiming,
+      ...(menuTiming !== "All Day" ? { timingFrom, timingTo } : {})
     };
 
+    // Price-only editors may only persist the pricing fields.
+    const canSaveFullRecord = !id || canCreate || canEdit;
+    const isPriceOnlyUpdate = !canSaveFullRecord && canEditPrice;
+
     try {
-      await setDoc(doc(db, "menu", itemId), payload);
+      if (isPriceOnlyUpdate) {
+        await updateDoc(doc(db, "menu", itemId), priceFields);
+      } else {
+        await setDoc(doc(db, "menu", itemId), payload);
+      }
+      await logAudit(actor || { email: 'system', role: 'unknown' }, {
+        action: id ? 'Updated menu item' : 'Created menu item',
+        category: 'menu',
+        targetId: itemId,
+        details: { name, oldId: id || null, price: parseFloat(price.toString()), menuTiming, timingFrom, timingTo }
+      });
       setMessage({ type: 'success', text: id ? 'Item updated successfully!' : 'New menu item added successfully!' });
       onMenuUpdated();
       resetForm();
@@ -176,19 +224,25 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
   };
 
   const handleDelete = async (itemId: string) => {
-    if (!window.confirm("Are you sure you want to delete this menu item?")) return;
-    
-    setLoading(true);
-    try {
-      await deleteDoc(doc(db, "menu", itemId));
-      setMessage({ type: 'success', text: 'Item successfully deleted.' });
-      onMenuUpdated();
-      resetForm();
-    } catch (err: any) {
-      setMessage({ type: 'error', text: `Connection error: ${err.message}` });
-    } finally {
-      setLoading(false);
-    }
+    confirmDialog("Are you sure you want to delete this menu item?", async () => {
+      setLoading(true);
+      try {
+        await deleteDoc(doc(db, "menu", itemId));
+        await logAudit(actor || { email: 'system', role: 'unknown' }, {
+          action: 'Deleted menu item',
+          category: 'menu',
+          targetId: itemId,
+          details: { name: menu.find(m => m.id === itemId)?.name }
+        });
+        setMessage({ type: 'success', text: 'Menu item deleted successfully!' });
+        onMenuUpdated();
+        resetForm();
+      } catch (err: any) {
+        setMessage({ type: 'error', text: `Connection error: ${err.message}` });
+      } finally {
+        setLoading(false);
+      }
+    }, null, "Delete");
   };
 
   const filteredMenu = (menu || []).filter(item => 
@@ -206,7 +260,7 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
           <h3 className="font-serif text-xl font-bold text-stone-900">Customizer & Template Editor</h3>
           <p className="text-xs text-stone-500">Edit pre-made restaurant items or add custom culinary delights into the database.</p>
         </div>
-        {!isEditing && (
+        {!isEditing && canCreate && (
           <button
             onClick={() => { resetForm(); setIsEditing(true); }}
             className="mt-3 sm:mt-0 flex items-center bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-xl text-xs font-semibold tracking-wide cursor-pointer transition-colors"
@@ -257,20 +311,24 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                 </div>
               </div>
               <div className="flex items-center space-x-1.5">
-                <button
-                  onClick={() => loadItemToForm(item)}
-                  className="p-2 hover:bg-stone-100 rounded-lg text-stone-500 hover:text-stone-950 transition-colors cursor-pointer"
-                  title="Edit item parameters"
-                >
-                  <Edit2 className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => handleDelete(item.id)}
-                  className="p-2 hover:bg-rose-50 rounded-lg text-stone-400 hover:text-rose-600 transition-colors cursor-pointer"
-                  title="Remove from database"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                {canEditAnyPricing && (
+                  <button
+                    onClick={() => loadItemToForm(item)}
+                    className="p-2 hover:bg-stone-100 rounded-lg text-stone-500 hover:text-stone-950 transition-colors cursor-pointer"
+                    title={canEdit ? "Edit item parameters" : "Edit item prices"}
+                  >
+                    <Edit2 className="w-4 h-4" />
+                  </button>
+                )}
+                {canDelete && (
+                  <button
+                    onClick={() => handleDelete(item.id)}
+                    className="p-2 hover:bg-rose-50 rounded-lg text-stone-400 hover:text-rose-600 transition-colors cursor-pointer"
+                    title="Remove from database"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -294,10 +352,11 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                 <input
                   type="text"
                   required
+                  disabled={isPriceOnlyEdit}
                   value={name}
                   onChange={e => setName(e.target.value)}
                   placeholder="e.g., Spicy Doro Wat Croquettes"
-                  className="w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 focus:border-amber-500"
+                  className={`w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 focus:border-amber-500 ${isPriceOnlyEdit ? 'opacity-60 cursor-not-allowed bg-stone-100' : ''}`}
                 />
               </div>
 
@@ -307,7 +366,7 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                   type="number"
                   step="0.01"
                   required
-                  disabled={userRole === 'kitchen'}
+                  disabled={!canEditAnyPricing}
                   value={price || ""}
                   onChange={e => {
                     const val = parseFloat(e.target.value) || 0;
@@ -317,7 +376,7 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                     }
                   }}
                   placeholder="320"
-                  className={`w-full text-xs border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 ${userRole === 'kitchen' ? 'bg-stone-100 text-stone-500 cursor-not-allowed' : 'bg-white'}`}
+                  className={`w-full text-xs border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 ${!canEditAnyPricing ? 'bg-stone-100 text-stone-500 cursor-not-allowed' : 'bg-white'}`}
                 />
               </div>
 
@@ -325,9 +384,10 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                 <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-2">Categories * (Select at least one)</label>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   {(categories || []).map(c => (
-                    <label key={c.id} className="flex items-center space-x-2 bg-stone-50 border border-stone-200 p-2 rounded-lg cursor-pointer hover:bg-stone-100 transition-colors">
+                    <label key={c.id} className={`flex items-center space-x-2 bg-stone-50 border border-stone-200 p-2 rounded-lg cursor-pointer hover:bg-stone-100 transition-colors ${isPriceOnlyEdit ? 'opacity-60 cursor-not-allowed' : ''}`}>
                       <input
                         type="checkbox"
+                        disabled={isPriceOnlyEdit}
                         checked={(selectedCategories || []).includes(c.id)}
                         onChange={(e) => {
                           if (e.target.checked) {
@@ -348,9 +408,10 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                 <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-2">Promo Stickers</label>
                 <div className="flex flex-wrap gap-2">
                   {AVAILABLE_PROMO_STICKERS.map(sticker => (
-                    <label key={sticker} className="flex items-center space-x-2 bg-stone-50 border border-stone-200 p-2 rounded-lg cursor-pointer hover:bg-stone-100 transition-colors">
+                    <label key={sticker} className={`flex items-center space-x-2 bg-stone-50 border border-stone-200 p-2 rounded-lg cursor-pointer hover:bg-stone-100 transition-colors ${isPriceOnlyEdit ? 'opacity-60 cursor-not-allowed' : ''}`}>
                       <input
                         type="checkbox"
+                        disabled={isPriceOnlyEdit}
                         checked={selectedPromoStickers.includes(sticker)}
                         onChange={(e) => {
                           if (e.target.checked) {
@@ -371,23 +432,17 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                 <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-1">Description</label>
                 <textarea
                   value={description}
+                  disabled={isPriceOnlyEdit}
                   onChange={e => setDescription(e.target.value)}
                   placeholder="A detailed description of ingredients, baking methods..."
                   rows={2}
-                  className="w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                  className={`w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500 ${isPriceOnlyEdit ? 'opacity-60 cursor-not-allowed bg-stone-100' : ''}`}
                 />
               </div>
 
               <div className="col-span-2">
-                <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-1">Image (URL or Local Upload)</label>
+                <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-1">Image (Local Upload Only)</label>
                 <div className="space-y-2 bg-white p-3 border border-stone-250 rounded-xl">
-                  <input
-                    type="url"
-                    value={image}
-                    onChange={e => setImage(e.target.value)}
-                    placeholder="Main image URL: https://images.unsplash.com/..."
-                    className="w-full text-xs bg-stone-50 border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 focus:border-amber-500"
-                  />
                   <div className="flex items-center justify-between">
                     <label className="flex items-center justify-center px-3 py-1.5 border border-stone-300 rounded-lg shadow-xs text-xs font-semibold text-stone-700 bg-white hover:bg-stone-50 cursor-pointer transition-all focus-within:ring-2 focus-within:ring-amber-500">
                       <span>Upload Local Photo</span>
@@ -413,25 +468,21 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                       <div className="flex items-center space-x-2">
                         <img src={image} alt="Preview" className="w-8 h-8 rounded-lg object-cover border border-stone-200" />
                         <span className="text-[10px] text-emerald-600 font-bold uppercase tracking-wider">
-                          {image.startsWith('data:') ? 'Local Selected' : 'Custom URL'}
+                          {image.startsWith('data:') ? 'Local Selected' : 'External Preview'}
                         </span>
                       </div>
                     )}
                   </div>
+                  {!image && (
+                    <p className="text-[10px] text-stone-400">No image uploaded yet. Upload a photo from your device.</p>
+                  )}
                 </div>
               </div>
 
               <div className="col-span-2">
                 <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-1">Additional Gallery Images</label>
                 <div className="space-y-2 bg-white p-3 border border-stone-250 rounded-xl">
-                  <textarea
-                    value={galleryImages}
-                    onChange={e => setGalleryImages(e.target.value)}
-                    placeholder="Provide URLs (comma separated) or use the upload button..."
-                    rows={2}
-                    className="w-full text-xs bg-stone-50 border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500"
-                  />
-                  <div className="flex items-center justify-between mt-2">
+                  <div className="flex items-center justify-between">
                     <label className="flex items-center justify-center px-3 py-1.5 border border-stone-300 rounded-lg shadow-xs text-xs font-semibold text-stone-700 bg-white hover:bg-stone-50 cursor-pointer transition-all focus-within:ring-2 focus-within:ring-amber-500">
                       <span>Upload Local Photos</span>
                       <input
@@ -468,10 +519,11 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                 <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-1">Preparation Time</label>
                 <input
                   type="text"
+                  disabled={isPriceOnlyEdit}
                   value={prepTime}
                   onChange={e => setPrepTime(e.target.value)}
                   placeholder="15 mins"
-                  className="w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                  className={`w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500 ${isPriceOnlyEdit ? 'opacity-60 cursor-not-allowed bg-stone-100' : ''}`}
                 />
               </div>
 
@@ -479,21 +531,23 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                 <input
                   type="checkbox"
                   id="popular-chk"
+                  disabled={isPriceOnlyEdit}
                   checked={popular}
                   onChange={e => setPopular(e.target.checked)}
                   className="w-4 h-4 text-amber-600 border-stone-300 rounded focus:ring-amber-500"
                 />
-                <label htmlFor="popular-chk" className="text-xs font-semibold text-stone-700 select-none cursor-pointer">Popular/Specialty Dish</label>
+                <label htmlFor="popular-chk" className={`text-xs font-semibold text-stone-700 select-none ${isPriceOnlyEdit ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>Popular/Specialty Dish</label>
               </div>
 
               <div className="col-span-2">
                 <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-1">Ingredients (Comma Separated)</label>
                 <input
                   type="text"
+                  disabled={isPriceOnlyEdit}
                   value={ingredients}
                   onChange={e => setIngredients(e.target.value)}
                   placeholder="Rosemary, Garlic, Berbere, Olive Oil"
-                  className="w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                  className={`w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500 ${isPriceOnlyEdit ? 'opacity-60 cursor-not-allowed bg-stone-100' : ''}`}
                 />
               </div>
 
@@ -506,10 +560,11 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                     <input
                       type="number"
                       step="0.01"
+                      disabled={!canEditAnyPricing}
                       value={basePrice || ""}
                       onChange={e => setBasePrice(parseFloat(e.target.value) || 0)}
                       placeholder="e.g. 300"
-                      className="w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                      className={`w-full text-xs border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 ${!canEditAnyPricing ? 'bg-stone-100 text-stone-500 cursor-not-allowed' : 'bg-white'}`}
                     />
                   </div>
 
@@ -518,19 +573,28 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                     <input
                       type="number"
                       step="0.1"
+                      disabled={!canEditAnyPricing}
                       value={taxRatePercent || ""}
                       onChange={e => setTaxRatePercent(parseFloat(e.target.value) || 0)}
                       placeholder="e.g. 15"
-                      className="w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                      className={`w-full text-xs border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 ${!canEditAnyPricing ? 'bg-stone-100 text-stone-500 cursor-not-allowed' : 'bg-white'}`}
                     />
                   </div>
 
                   <div>
                     <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-1">Menu Timing / Schedule</label>
                     <select
+                      disabled={isPriceOnlyEdit}
                       value={menuTiming}
-                      onChange={e => setMenuTiming(e.target.value)}
-                      className="w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                      onChange={e => {
+                        const v = e.target.value;
+                        setMenuTiming(v);
+                        if (v === "All Day") {
+                          setTimingFrom("");
+                          setTimingTo("");
+                        }
+                      }}
+                      className={`w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 ${isPriceOnlyEdit ? 'opacity-60 cursor-not-allowed bg-stone-100' : ''}`}
                     >
                       <option value="All Day">All Day</option>
                       <option value="Breakfast Only">Breakfast Only</option>
@@ -540,15 +604,41 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                     </select>
                   </div>
 
+                  {menuTiming !== "All Day" && (
+                    <div className="grid grid-cols-2 gap-3 col-span-2">
+                      <div>
+                        <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-1">Available From</label>
+                        <input
+                          type="time"
+                          disabled={isPriceOnlyEdit}
+                          value={timingFrom}
+                          onChange={e => setTimingFrom(e.target.value)}
+                          className={`w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 ${isPriceOnlyEdit ? 'opacity-60 cursor-not-allowed bg-stone-100' : ''}`}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wide mb-1">Available Until</label>
+                        <input
+                          type="time"
+                          disabled={isPriceOnlyEdit}
+                          value={timingTo}
+                          onChange={e => setTimingTo(e.target.value)}
+                          className={`w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 ${isPriceOnlyEdit ? 'opacity-60 cursor-not-allowed bg-stone-100' : ''}`}
+                        />
+                      </div>
+                    </div>
+                  )}
+
                   <div className="flex items-center space-x-2 mt-5 pl-1">
                     <input
                       type="checkbox"
                       id="active-toggle-chk"
+                      disabled={isPriceOnlyEdit}
                       checked={isActive}
                       onChange={e => setIsActive(e.target.checked)}
                       className="w-4 h-4 text-emerald-600 border-stone-300 rounded focus:ring-emerald-500 cursor-pointer"
                     />
-                    <label htmlFor="active-toggle-chk" className="text-xs font-semibold text-stone-700 select-none cursor-pointer">
+                    <label htmlFor="active-toggle-chk" className={`text-xs font-semibold text-stone-700 select-none ${isPriceOnlyEdit ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
                       Dish Available (Active)
                     </label>
                   </div>
@@ -559,30 +649,33 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole }: Menu
                     <label className="block text-[9px] text-stone-500">Protein</label>
                     <input
                       type="text"
+                      disabled={isPriceOnlyEdit}
                       value={protein}
                       onChange={e => setProtein(e.target.value)}
                       placeholder="28g"
-                      className="w-full text-xs bg-white border border-stone-300 rounded px-2 py-1 focus:outline-none"
+                      className={`w-full text-xs bg-white border border-stone-300 rounded px-2 py-1 focus:outline-none ${isPriceOnlyEdit ? 'opacity-60 cursor-not-allowed bg-stone-100' : ''}`}
                     />
                   </div>
                   <div>
                     <label className="block text-[9px] text-stone-500">Carbs</label>
                     <input
                       type="text"
+                      disabled={isPriceOnlyEdit}
                       value={carbs}
                       onChange={e => setCarbs(e.target.value)}
                       placeholder="40g"
-                      className="w-full text-xs bg-white border border-stone-300 rounded px-2 py-1 focus:outline-none"
+                      className={`w-full text-xs bg-white border border-stone-300 rounded px-2 py-1 focus:outline-none ${isPriceOnlyEdit ? 'opacity-60 cursor-not-allowed bg-stone-100' : ''}`}
                     />
                   </div>
                   <div>
                     <label className="block text-[9px] text-stone-500">Fat</label>
                     <input
                       type="text"
+                      disabled={isPriceOnlyEdit}
                       value={fat}
                       onChange={e => setFat(e.target.value)}
                       placeholder="12g"
-                      className="w-full text-xs bg-white border border-stone-300 rounded px-2 py-1 focus:outline-none"
+                      className={`w-full text-xs bg-white border border-stone-300 rounded px-2 py-1 focus:outline-none ${isPriceOnlyEdit ? 'opacity-60 cursor-not-allowed bg-stone-100' : ''}`}
                     />
                   </div>
                 </div>

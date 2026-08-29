@@ -5,45 +5,107 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function adminDocument(email) {
-      return /databases/$(database)/documents/admins/$(email);
+    function email() {
+      return request.auth.token.email;
+    }
+
+    function emailVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function adminDoc() {
+      return /databases/$(database)/documents/admins/$(email());
+    }
+
+    function roleDocPath() {
+      return /databases/$(database)/documents/roles/$(roleOf());
+    }
+
+    function existsAdmin() {
+      return signedIn()
+        && emailVerified()
+        && email() != null
+        && exists(adminDoc());
     }
 
     function isAdmin() {
-      return signedIn()
-        && request.auth.token.email != null
-        && exists(adminDocument(request.auth.token.email))
-        && get(adminDocument(request.auth.token.email)).data.role == 'admin';
+      return existsAdmin() && roleOf() == 'admin';
+    }
+
+    function roleOf() {
+      return get(adminDoc()).data.role;
+    }
+
+    function roleDocExists() {
+      return exists(roleDocPath());
     }
 
     function ownsUserDocument(userId) {
       return signedIn() && request.auth.uid == userId;
     }
 
+    // Fallback defaults used only before the roles collection has been seeded,
+    // so staff can still log in and the rules behave like the original roles.
+    function defaultRolePerm(perm) {
+      return roleOf() == 'kitchen'
+          && (perm == 'kds.view' || perm == 'kds.startPreparing' || perm == 'kds.markReady' || perm == 'menu.view')
+          || roleOf() == 'cashier'
+          && (perm == 'menu.view' || perm == 'orders.view' || perm == 'orders.updateStatus' || perm == 'orders.markPaid' || perm == 'orders.cancel' || perm == 'orders.receipts' || perm == 'chat.view' || perm == 'chat.reply' || perm == 'reservations.view' || perm == 'reservations.manage' || perm == 'promos.view' || perm == 'customers.view');
+    }
+
+    // can(perm) is the single source of truth. The admin role always passes.
+    // Unseeded roles fall back to their built-in defaults.
+    function can(perm) {
+      return existsAdmin()
+          && (roleOf() == 'admin'
+              || (roleDocExists() ? get(roleDocPath()).data.permissions[perm] == true : defaultRolePerm(perm)));
+    }
+
+    // True only when the update touches pricing fields and nothing else.
+    function onlyPriceFieldsChanged() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'price', 'basePrice', 'taxRate', 'taxRatePercent'
+      ]);
+    }
+
     match /menu/{documentId} {
       allow read: if true;
-      allow write: if isAdmin();
+      allow create: if can('menu.create');
+      allow update: if can('menu.edit')
+          || (can('menu.editPrice') && onlyPriceFieldsChanged());
+      allow delete: if can('menu.delete');
     }
 
     match /categories/{documentId} {
       allow read: if true;
-      allow write: if isAdmin();
+      allow write: if can('menu.categories');
     }
 
     match /promoCodes/{documentId} {
-      allow get: if true;
-      allow list: if isAdmin();
-      allow write: if isAdmin();
+      allow get: if can('promos.view');
+      allow list: if can('promos.view');
+      allow write: if can('promos.manage');
+    }
+
+    match /roles/{roleId} {
+      allow read: if existsAdmin();
+      allow create, update, delete: if can('roles.edit') || roleOf() == 'admin';
     }
 
     match /admins/{email} {
-      allow get: if isAdmin() || (signedIn() && request.auth.token.email == email);
-      allow list: if isAdmin();
-      allow create, update, delete: if isAdmin();
+      allow get: if existsAdmin() || (signedIn() && request.auth.token.email == email);
+      allow list: if can('team.view');
+      allow create, update: if can('team.invite') || can('roles.edit');
+      allow delete: if can('team.remove') || can('roles.edit');
     }
 
     match /users/{userId} {
-      allow read, create, update, delete: if ownsUserDocument(userId) || isAdmin();
+      allow read: if ownsUserDocument(userId) || isAdmin() || can('customers.view');
+      allow create, delete: if ownsUserDocument(userId) || isAdmin();
+      allow update: if ownsUserDocument(userId)
+          || isAdmin()
+          || (can('customers.editPoints')
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['points']));
     }
 
     match /carts/{userId} {
@@ -51,15 +113,16 @@ service cloud.firestore {
     }
 
     match /orders/{orderId} {
-      allow get, list: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow get, list: if isAdmin() || can('orders.view') || can('kds.view') || (signedIn() && resource.data.userId == request.auth.uid);
       allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
-      allow update, delete: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow update: if isAdmin() || can('orders.updateStatus') || can('orders.markPaid') || can('orders.cancel') || can('kds.startPreparing') || can('kds.markReady') || (signedIn() && resource.data.userId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) && resource.data.status == 'pending' && request.resource.data.status == 'cancelled');
+      allow delete: if isAdmin();
     }
 
     match /reservations/{reservationId} {
-      allow read: if isAdmin();
+      allow read: if isAdmin() || can('reservations.view');
       allow create: if signedIn();
-      allow update, delete: if isAdmin();
+      allow update, delete: if isAdmin() || can('reservations.manage');
     }
 
     match /reviews/{reviewId} {
@@ -69,14 +132,21 @@ service cloud.firestore {
     }
 
     match /chat_messages/{messageId} {
-      allow read, write: if isAdmin();
+      allow read: if isAdmin() || can('chat.view');
       allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow write: if isAdmin() || can('chat.reply');
     }
 
     match /settings/{settingId} {
-      allow get: if settingId == 'global' || isAdmin();
-      allow list: if isAdmin();
-      allow write: if isAdmin();
+      allow get: if settingId == 'global' || isAdmin() || can('settings.view');
+      allow list: if isAdmin() || can('settings.view');
+      allow write: if isAdmin() || can('settings.edit');
+    }
+
+    match /audit_log/{logId} {
+      allow read: if isAdmin() || can('audit.view');
+      allow create: if existsAdmin();
+      allow update, delete: if false;
     }
 
     match /{document=**} {

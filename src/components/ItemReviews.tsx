@@ -3,6 +3,7 @@ import { db } from '../firebase';
 import { collection, query, where, orderBy, onSnapshot, doc, setDoc } from 'firebase/firestore';
 import { Review } from '../types';
 import { Star, User } from 'lucide-react';
+import { toastError } from '../notify';
 
 interface ItemReviewsProps {
   menuItemId: string;
@@ -48,7 +49,7 @@ export default function ItemReviews({ menuItemId, user }: ItemReviewsProps) {
       setComment('');
     } catch (error) {
       console.error("Failed to post review:", error);
-      alert("Failed to post review.");
+      toastError("Failed to post review.");
     } finally {
       setIsSubmitting(false);
     }

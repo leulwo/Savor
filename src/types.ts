@@ -31,6 +31,8 @@ export interface MenuItem {
   taxRatePercent?: number;
   isActive?: boolean;
   menuTiming?: string;
+  timingFrom?: string;
+  timingTo?: string;
 }
 
 export interface OrderItem {
@@ -51,9 +53,15 @@ export interface Order {
   googleMapsAddress?: string;
   specialInstructions?: string;
   paymentMethod: 'chapa' | 'cash';
-  paymentStatus: 'pending' | 'completed' | 'failed' | 'refunded';
+  paymentStatus: 'pending' | 'completed' | 'failed' | 'reversed';
+  fulfillmentType?: 'delivery' | 'pickup' | 'dineIn';
+  scheduledFor?: string;
   transactionRef: string;
   createdAt: string;
+  updatedAt?: string;
+  statusHistory?: { status: string; at: string }[];
+  paymentHistory?: { paymentStatus: string; at: string }[];
+  deliveryMinutes?: number;
   userId?: string;
   serviceTax?: number;
   flatFee?: number;
@@ -76,8 +84,6 @@ export interface Order {
   };
   promoCode?: string;
   discountAmount?: number;
-  pointsUsed?: number;
-  pointsEarned?: number;
 }
 
 export interface VpsStats {
@@ -98,8 +104,8 @@ export interface UserProfile {
   displayName: string;
   savedAddresses: string[];
   favoriteItems: string[];
-  points: number; // loyalty points
   createdAt: string;
+  points?: number;
 }
 
 export interface GlobalSettings {
@@ -112,10 +118,11 @@ export interface GlobalSettings {
   flatFeeETB?: number;
   enableCOD?: boolean;
   isOpen?: boolean;
+  prepTimeMinutes?: number;
+  scheduledStepsMinutes?: number;
 
   // Features
   enableMarketing?: boolean;
-  enableLoyalty?: boolean;
   enableReservations?: boolean;
   enableChatbot?: boolean;
   
@@ -164,4 +171,15 @@ export interface ChatMessage {
   role: 'user' | 'model';
   text: string;
   thinking?: string;
+}
+
+export interface AuditLogEntry {
+  id?: string;
+  actorEmail: string;
+  actorRole: string;
+  action: string;
+  category: 'order' | 'menu' | 'settings' | 'team' | 'customer' | 'general';
+  targetId?: string;
+  details?: Record<string, any>;
+  createdAt: any;
 }
