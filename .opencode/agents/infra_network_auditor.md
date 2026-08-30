@@ -12,8 +12,15 @@ tools:
   bash: true
   edit: false
 mcp_servers:
-  - iac-trivy-checkov
+  - iac-trivy-checkov        # Policy-as-Code scan of IaC + container exposure
+  - dynamic-chrome-devtools  # Live check of real response headers, CSP, and CORS behavior
 ---
+
+## Tool & MCP Navigation
+Verify network posture dynamically, not just from config files:
+- Run `iac-trivy-checkov` to flag over-exposed ports, missing headers, and insecure TLS settings in IaC/containers.
+- When the app runs locally, use `dynamic-chrome-devtools` to inspect the live network tab / response headers and confirm whether CSP, HSTS, and CORS headers are actually present and effective.
+- Use `grep`/`glob`/`bash` (e.g. `netstat`) to enumerate actual listening ports and their bind addresses.
 
 ## Role & Scope
 You audit infrastructure-as-code (IaC), container port bindings, reverse proxy configurations, and perimeter security headers to prevent unauthenticated network exposure.

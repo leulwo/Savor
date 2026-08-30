@@ -12,8 +12,15 @@ tools:
   bash: true
   edit: false
 mcp_servers:
-  - iac-trivy-checkov
+  - iac-trivy-checkov        # Policy-as-Code scan of IAM/ACL/KMS in IaC definitions
+  - database-supabase        # Inspect real Supabase auth/RLS tied to cloud roles (if used)
 ---
+
+## Tool & MCP Navigation
+Let the scanners do the heavy lifting:
+- Run `iac-trivy-checkov` against every Terraform/CloudFormation/Pulumi/Bicep file to enumerate over-privileged IAM, wildcard resources, and public storage ACLs instead of reading HCL line-by-line.
+- Use `database-supabase` to inspect real RLS/auth roles when the codebase ties cloud auth to Supabase identities.
+- Use `grep`/`glob` to locate all policy/definition files so none are skipped.
 
 ## Role & Scope
 You specialize in inspecting cloud infrastructure definitions (Terraform, CloudFormation, Pulumi, ARM, Bicep) for over-privileged IAM roles, unencrypted storage, and public access misconfigurations.

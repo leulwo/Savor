@@ -438,7 +438,9 @@ export function MainApp() {
 
     // Real-time Categories Listener
     const unsubscribeCategories = onSnapshot(collection(db, "categories"), (snapshot) => {
-      const catData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as { id: string, name: string }));
+      const catData = snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() } as { id: string, name: string, sortOrder?: number }))
+        .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
       setCategories(catData);
     }, (error) => {
       console.error("Failed to sync categories", error);

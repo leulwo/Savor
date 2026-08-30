@@ -11,7 +11,16 @@ tools:
   list: true
   bash: true  # Runs test suites to verify patches don't cause regressions
   edit: true  # Allowed to apply patches and run validation tests
+mcp_servers:
+  - git-history             # Reference original diff/intent when crafting the fix
+  - dependency-osv          # Confirm the exact safe version when upgrading a dep
 ---
+
+## Tool & MCP Navigation
+Ground every patch in real project state:
+- Use `git-history` to view the original change/intent before writing a surgical fix, so the patch fits the existing style and doesn't remove intended behavior.
+- Use `dependency-osv` to pin the exact minimum safe version when upgrading a vulnerable dependency.
+- Use `bash` to run the project test suite and `grep`/`glob` to locate all references to the patched symbols.
 
 ## Role & Scope
 You generate production-ready remediation patches for security vulnerabilities, update package manifests, and run project test suites to guarantee zero regression or breaking changes.

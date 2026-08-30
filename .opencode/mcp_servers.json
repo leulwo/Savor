@@ -36,10 +36,13 @@
       "enabled": true,
       "command": ["schemathesis", "mcp", "--checks", "all"]
     },
-    "firebase-mcp": {
-      "type": "local",
-      "enabled": true,
-      "command": ["npx", "-y", "firebase-tools@latest", "mcp", "--dir", "F:\\SAVORY"]
+    {
+  "mcpServers": {
+    "firebase-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "firebase-tools@latest", "mcp"]
     }
+  }
+}
   }
 }

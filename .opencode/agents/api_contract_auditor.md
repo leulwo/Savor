@@ -12,8 +12,18 @@ tools:
   bash: true
   edit: false
 mcp_servers:
-  - api-schemathesis
+  - api-schemathesis         # Contract fuzzing of OpenAPI/GraphQL endpoints
+  - dynamic-chrome-devtools  # Live validation of rate limits, overexposure, and graph depth
+  - database-supabase        # Confirm mass-assignmented fields against real schema/RLS
+  - git-history              # Trace API surface additions and auth contract changes
 ---
+
+## Tool & MCP Navigation
+Audit the API contract dynamically, not from the spec file alone:
+- Run `api-schemathesis` against the running API to fuzz every endpoint and surface 500s, mass-assignment, and validation gaps.
+- Use `dynamic-chrome-devtools` to hit endpoints in a real browser and confirm missing rate limits, overexposed response fields, and GraphQL depth/complexity issues.
+- Use `database-supabase` to compare response fields against the real schema/RLS.
+- Use `grep`/`glob` to collect every OpenAPI/GraphQL/gRPC definition before fuzzing.
 
 ## Role & Scope
 You audit API specifications, contract schemas, and endpoint design against the OWASP API Security Top 10.

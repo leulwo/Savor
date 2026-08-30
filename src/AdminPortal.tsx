@@ -77,11 +77,23 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
 }
 
 export default function AdminPortal() {
+  // Distinguish a network/offline failure (keep the session, retry) from a
+  // definitive authorization denial (sign out).
+  const isLikelyOfflineError = (err: any) => {
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return true;
+    const code = String(err?.code || "");
+    const msg = String(err?.message || "").toLowerCase();
+    return code === "offline" || code === "unavailable"
+      || msg.includes("offline") || msg.includes("no network") || msg.includes("network connection");
+  };
+
   const [isAdminAuthLoading, setIsAdminAuthLoading] = useState(true);
   const [adminUser, setAdminUser] = useState<any>(null);
   const [adminRole, setAdminRole] = useState<string | null>(null);
   const [permissions, setPermissions] = useState<PermissionMap>({});
   const [loginError, setLoginError] = useState("");
+  const [offlineNotice, setOfflineNotice] = useState("");
+  const [retryTick, setRetryTick] = useState(0);
 
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -141,6 +153,9 @@ export default function AdminPortal() {
   }, [activeTab, lastSeenTimestamp, permissions]);
 
   useEffect(() => {
+    const handleOnline = () => setRetryTick(t => t + 1);
+    window.addEventListener("online", handleOnline);
+
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
         // Only allow Google sign-in (Google verifies emails on the provider
@@ -166,6 +181,8 @@ export default function AdminPortal() {
 
           const adminDocRef = doc(db, "admins", emailLower);
           const adminDocSnap = await getDoc(adminDocRef);
+          const adminIsAuthorized = adminDocSnap.exists();
+          const adminReadFromCache = adminDocSnap.metadata.fromCache;
 
           const loadRolePermissions = async (role: string): Promise<PermissionMap> => {
             try {
@@ -184,7 +201,7 @@ export default function AdminPortal() {
             return fallback ? fallback.permissions : {};
           };
 
-          if (adminDocSnap.exists()) {
+          if (adminIsAuthorized) {
             const role = String(adminDocSnap.data()?.role || "");
             let roleIsValid = !!role && !!getDefaultRole(role);
             try {
@@ -198,6 +215,8 @@ export default function AdminPortal() {
               roleIsValid = !!role && !!getDefaultRole(role);
             }
             if (roleIsValid) {
+              setOfflineNotice("");
+              setLoginError("");
               setAdminUser(user);
               setAdminRole(role);
               const perms = await loadRolePermissions(role);
@@ -222,6 +241,12 @@ export default function AdminPortal() {
               setAdminUser(null);
               setAdminRole(null);
             }
+          } else if (adminReadFromCache) {
+            // Offline read with no cached admin record: authorization can't be
+            // confirmed yet, so KEEP the session and retry when connectivity returns.
+            setOfflineNotice("You appear to be offline. Your session is kept — retrying automatically when you're back online.");
+            setAdminUser(null);
+            setLoginError("");
           } else {
             setLoginError(`Access Denied: The account ${emailLower} is not authorized.`);
             await signOut(auth);
@@ -230,17 +255,29 @@ export default function AdminPortal() {
           }
         } catch (err: any) {
           console.error("Error verifying admin role:", err);
-          setLoginError("An error occurred while verifying your administrator role.");
-          await signOut(auth);
-          setAdminUser(null);
+          if (isLikelyOfflineError(err)) {
+            // Network failure is NOT an authorization denial: keep the session
+            // and retry instead of wiping the shared Firebase auth state.
+            setOfflineNotice("You appear to be offline. Your session is kept — retrying automatically when you're back online.");
+            setLoginError("");
+          } else {
+            setLoginError("An error occurred while verifying your administrator role.");
+            await signOut(auth);
+            setAdminUser(null);
+            setAdminRole(null);
+          }
         }
       } else {
+        setOfflineNotice("");
         setAdminUser(null);
       }
       setIsAdminAuthLoading(false);
     });
-    return () => unsubscribe();
-  }, []);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      unsubscribe();
+    };
+  }, [retryTick]);
 
   const handleAdminLogin = async () => {
     setLoginError("");
@@ -325,6 +362,18 @@ export default function AdminPortal() {
             </div>
           </div>
           <div className="space-y-4">
+            {offlineNotice && (
+              <div className="bg-amber-50 text-amber-800 text-xs p-3 rounded-lg border border-amber-200 flex items-start justify-between gap-2">
+                <span>{offlineNotice}</span>
+                <button
+                  type="button"
+                  onClick={() => setRetryTick(t => t + 1)}
+                  className="font-bold underline cursor-pointer whitespace-nowrap hover:text-amber-900"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
             {loginError && (
               <div className="bg-red-50 text-red-600 text-xs p-3 rounded-lg border border-red-100">
                 {loginError}

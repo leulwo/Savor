@@ -603,7 +603,7 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
               className="w-full md:w-auto bg-stone-900 hover:bg-black text-white text-[11px] font-black uppercase tracking-widest px-10 py-4 rounded-2xl shadow-xl shadow-stone-900/10 transition-all hover:-translate-y-1 active:translate-y-0 disabled:opacity-50 disabled:translate-y-0 flex items-center justify-center space-x-2 cursor-pointer"
             >
               {loading ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Save className="w-4 h-4" />}
-              <span>Save Configuration</span>
+              <span>Save</span>
             </button>
           ) : (
             <span className="text-[11px] text-stone-400 font-medium">Read only — you need the "Edit restaurant settings" permission to save changes.</span>

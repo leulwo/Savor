@@ -282,7 +282,7 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
             <div>
               <p className="text-xs font-bold text-blue-900">Unsaved configuration changes</p>
               <p className="text-[11px] text-blue-800 mt-0.5">
-                {totalDirtyCount()} permission {totalDirtyCount() === 1 ? 'change' : 'changes'} across {Object.keys(dirtyRoles).length} role{Object.keys(dirtyRoles).length === 1 ? '' : 's'} are staged. Apply them with "Save Configuration".
+                {totalDirtyCount()} permission {totalDirtyCount() === 1 ? 'change' : 'changes'} across {Object.keys(dirtyRoles).length} role{Object.keys(dirtyRoles).length === 1 ? '' : 's'} are staged. Apply them with "Save".
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -297,7 +297,7 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
                 className="px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition-colors cursor-pointer flex items-center space-x-1.5"
               >
                 <Save className="w-3.5 h-3.5" />
-                <span>Save Configuration</span>
+                <span>Save</span>
               </button>
             </div>
           </div>
@@ -320,7 +320,7 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
                         <span className="text-sm font-bold text-stone-900">{role.name}</span>
                         <span className="inline-block text-[9px] font-mono uppercase bg-stone-100 text-stone-500 px-2 py-0.5 rounded font-bold">{role.id}</span>
                         {role.builtin && (
-                          <span className="inline-block text-[9px] font-mono uppercase bg-amber-100 text-amber-800 px-2 py-0.5 rounded font-bold">Built-in</span>
+                          <span className="inline-block text-[9px] font-mono uppercase bg-amber-100 text-amber-800 px-2 py-0.5 rounded font-bold"></span>
                         )}
                         {isRoleDirty(role.id) && (
                           <span className="inline-block text-[9px] font-mono uppercase bg-blue-100 text-blue-800 px-2 py-0.5 rounded font-bold">
