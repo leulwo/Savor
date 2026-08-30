@@ -5,16 +5,20 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { Settings, Save, AlertCircle, CheckCircle, RotateCcw, Truck, CreditCard, ChevronDown, ChevronUp, Image as ImageIcon, MessageSquare, CalendarDays, Mail, Clock } from "lucide-react";
-import { db, authedFetch } from "../firebase";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { Settings, Save, AlertCircle, CheckCircle, RotateCcw, Truck, CreditCard, ChevronDown, ChevronUp, Image as ImageIcon, MessageSquare, CalendarDays, Mail, Download, Trash2, ShieldAlert, Upload, X } from "lucide-react";
+import { db } from "../firebase";
+import { doc, getDoc, setDoc, collection, getDocs, deleteDoc, writeBatch } from "firebase/firestore";
 import { hasPermission, PermissionMap } from "../permissions";
 import { logAudit } from "../utils/auditLogger";
+import SquareImageCropper from "./SquareImageCropper";
+import { confirmDialog } from "../notify";
 import { confirmDialog } from "../notify";
 
 export interface GlobalSettings {
   restaurantName?: string;
   logoUrl?: string;
+  businessEmail?: string;
+  businessPhone?: string;
   serviceTaxPercent?: number;
   flatFeeETB?: number;
   enableCOD?: boolean;
@@ -25,6 +29,8 @@ export interface GlobalSettings {
   enableMarketing?: boolean;
   enableReservations?: boolean;
   enableChatbot?: boolean;
+  prepTimeMinutes?: number;
+  scheduledStepsMinutes?: number;
   [key: string]: any;
 }
 
