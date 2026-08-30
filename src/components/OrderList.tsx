@@ -86,11 +86,18 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
   };
 
   const handleStatusChange = async (orderId: string, currentStatus: Order['status'], nextStatus: Order['status']) => {
-    let deliveryMinutes = 0;
-    if (nextStatus === "ready") {
-      deliveryMinutes = defaultDeliveryMinutes;
-    }
-    updateStatus(orderId, nextStatus, undefined, deliveryMinutes);
+    confirmDialog(
+      `Mark this order as "${nextStatus.toUpperCase()}" (currently ${currentStatus.toUpperCase()})?`,
+      () => {
+        let deliveryMinutes = 0;
+        if (nextStatus === "ready") {
+          deliveryMinutes = defaultDeliveryMinutes;
+        }
+        updateStatus(orderId, nextStatus, undefined, deliveryMinutes);
+      },
+      null,
+      nextStatus === "ready" ? "Mark Ready" : "Confirm"
+    );
   };
 
   const getStatusColor = (status: Order['status']) => {
@@ -356,7 +363,12 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
                                   {order.status !== "delivered" && order.status !== "cancelled" && canCancel && (
                                     <button
                                       onClick={() => {
-                                        updateStatus(order.id, "cancelled");
+                                        confirmDialog(
+                                          "Cancel this order?\n\nThis cannot be undone. The customer will see the order as cancelled.",
+                                          () => { updateStatus(order.id, "cancelled"); },
+                                          () => {},
+                                          "Cancel Order"
+                                        );
                                         setActiveMenuId(null);
                                       }}
                                       disabled={loadingId === order.id}

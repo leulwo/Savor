@@ -65,30 +65,31 @@ export default function TeamManager({ currentUserEmail = '', userRole, can = () 
         setIsSubmitting(true);
         setMessage(null);
 
-        const emailLower = email.trim().toLowerCase();
+    const emailLower = email.trim().toLowerCase();
+    const roleLabel = roles.find(r => r.id === role)?.name || role;
 
-        try {
-            await setDoc(doc(db, "admins", emailLower), {
-                email: emailLower,
-                role,
-                createdAt: new Date().toISOString()
-            });
+    confirmDialog(`Grant "${roleLabel}" role access to ${emailLower}?\n\nThey will be able to sign in and use the Admin portal right away.`, async () => {
+      try {        await setDoc(doc(db, "admins", emailLower), {
+          email: emailLower,
+          role,
+          createdAt: new Date().toISOString()
+        });
 
-            const roleLabel = roles.find(r => r.id === role)?.name || role;
-            await logAudit(actor || { email: currentUserEmail, role: userRole || 'unknown' }, {
-                action: 'Granted team access',
-                category: 'team',
-                targetId: emailLower,
-                details: { role, roleLabel }
-            });
-            setMessage({ type: 'success', text: `Successfully granted ${emailLower} the "${roleLabel}" role.` });
-            setEmail("");
-        } catch (err: any) {
-            setMessage({ type: 'error', text: err?.message || "Failed to add team member." });
-        } finally {
-            setIsSubmitting(false);
-        }
-    };
+        await logAudit(actor || { email: currentUserEmail, role: userRole || 'unknown' }, {
+          action: 'Granted team access',
+          category: 'team',
+          targetId: emailLower,
+          details: { role, roleLabel }
+        });
+        setMessage({ type: 'success', text: `Successfully granted ${emailLower} the "${roleLabel}" role.` });
+        setEmail("");
+      } catch (err: any) {
+        setMessage({ type: 'error', text: err?.message || "Failed to add team member." });
+      } finally {
+        setIsSubmitting(false);
+      }
+    }, () => setIsSubmitting(false), "Grant");
+  };
 
     const handleDeleteMember = async (memberEmail: string) => {
         if (memberEmail.toLowerCase() === currentUserEmail.toLowerCase()) {

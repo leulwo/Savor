@@ -5,8 +5,7 @@
 
 import React, { useState, useMemo } from "react";
 import { 
-  FileText, Download, Printer, Calendar, TrendingUp, Clock, Users, Utensils, 
-  ChevronDown, Filter, AlertCircle, ArrowUpRight, BarChart3
+  FileText, Download, Printer, TrendingUp, Users, Utensils, AlertCircle
 } from "lucide-react";
 import { Order, MenuItem } from "../types";
 import { downloadXlsx } from "../utils/exportUtils";
@@ -27,7 +26,7 @@ export default function ReportsManager({
 }: ReportsManagerProps) {
   const canView = can ? can("reports.view") : hasPermission(permissions, "reports.view");
 
-  const [activeReport, setActiveReport] = useState<'sales' | 'peakhours' | 'customers' | 'items'>('sales');
+  const [activeReport, setActiveReport] = useState<'sales' | 'customers' | 'items'>('sales');
   const [timeRange, setTimeRange] = useState<'7days' | '30days' | '90days' | 'all'>('30days');
 
   // Filter orders by time range
@@ -56,34 +55,6 @@ export default function ReportsManager({
     });
 
     return Object.values(map).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [filteredOrders]);
-
-  // 2. Peak Hours Analysis Data (00:00 to 23:00)
-  const peakHoursData = useMemo(() => {
-    const hours: { hour: number; label: string; count: number; revenue: number }[] = Array.from({ length: 24 }, (_, i) => ({
-      hour: i,
-      label: `${i.toString().padStart(2, '0')}:00`,
-      count: 0,
-      revenue: 0
-    }));
-
-    filteredOrders.forEach(o => {
-      if (o.status === 'cancelled') return;
-      try {
-        const d = new Date(o.createdAt);
-        const h = d.getHours();
-        if (hours[h]) {
-          hours[h].count += 1;
-          hours[h].revenue += (o.total || 0);
-        }
-      } catch (e) {}
-    });
-
-    const maxCount = Math.max(...hours.map(h => h.count), 1);
-    return hours.map(h => ({
-      ...h,
-      percentage: Math.round((h.count / maxCount) * 100)
-    }));
   }, [filteredOrders]);
 
   // 3. Customer Leaderboard Data
@@ -151,13 +122,6 @@ export default function ReportsManager({
         "Collected Flat Fees": r.fees.toFixed(2)
       }));
       downloadXlsx(`Savory_Sales_Report_${timeRange}.xlsx`, [{ name: "Daily Sales", rows: data }]);
-    } else if (activeReport === 'peakhours') {
-      const data = peakHoursData.map(h => ({
-        "Hour of Day": h.label,
-        "Orders Count": h.count,
-        "Revenue Generated (ETB)": h.revenue.toFixed(2)
-      }));
-      downloadXlsx(`Savory_Peak_Hours_Report_${timeRange}.xlsx`, [{ name: "Peak Hours", rows: data }]);
     } else if (activeReport === 'customers') {
       const data = topCustomersData.map((c, idx) => ({
         "Rank": idx + 1,
@@ -241,7 +205,7 @@ export default function ReportsManager({
       </div>
 
       {/* Report Navigation Tabs */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 no-print">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 no-print">
         <button
           onClick={() => setActiveReport('sales')}
           className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
@@ -253,19 +217,6 @@ export default function ReportsManager({
           <TrendingUp className="w-4 h-4 mb-1" />
           <p className="text-xs font-bold">Daily Sales</p>
           <p className="text-[10px] opacity-80">Revenue & tax breakdown</p>
-        </button>
-
-        <button
-          onClick={() => setActiveReport('peakhours')}
-          className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
-            activeReport === 'peakhours'
-              ? 'bg-amber-500 text-stone-950 border-amber-500 shadow-md font-bold'
-              : 'bg-white text-stone-600 border-stone-200 hover:border-stone-300'
-          }`}
-        >
-          <Clock className="w-4 h-4 mb-1" />
-          <p className="text-xs font-bold">Peak Hours</p>
-          <p className="text-[10px] opacity-80">Hourly volume heatmap</p>
         </button>
 
         <button
@@ -333,46 +284,6 @@ export default function ReportsManager({
                   ))}
                 </tbody>
               </table>
-            </div>
-          </div>
-        )}
-
-        {activeReport === 'peakhours' && (
-          <div className="p-6 space-y-6">
-            <div className="flex items-center justify-between border-b border-stone-100 pb-3">
-              <h3 className="font-bold text-xs uppercase tracking-wider text-stone-700">Hourly Order Density Heatmap</h3>
-              <span className="text-xs text-stone-400">Peak ordering hours over selected period</span>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3">
-              {peakHoursData.map(hour => (
-                <div 
-                  key={hour.hour}
-                  className={`p-3 rounded-xl border flex flex-col justify-between transition-all ${
-                    hour.count > 0 
-                      ? 'bg-amber-500/10 border-amber-200' 
-                      : 'bg-stone-50 border-stone-100 opacity-60'
-                  }`}
-                >
-                  <div className="flex justify-between items-center text-xs font-bold mb-2">
-                    <span className="font-mono text-stone-800">{hour.label}</span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-white text-stone-600 border border-stone-200 font-mono">
-                      {hour.count} orders
-                    </span>
-                  </div>
-
-                  <div className="w-full bg-stone-200 h-1.5 rounded-full overflow-hidden mb-2">
-                    <div 
-                      className="bg-amber-500 h-full rounded-full transition-all" 
-                      style={{ width: `${hour.percentage}%` }}
-                    />
-                  </div>
-
-                  <p className="text-[10px] font-mono text-stone-500 truncate">
-                    {hour.revenue > 0 ? `${hour.revenue.toFixed(0)} ETB` : '—'}
-                  </p>
-                </div>
-              ))}
             </div>
           </div>
         )}

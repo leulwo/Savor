@@ -8,16 +8,13 @@ import {
 } from 'recharts';
 import {
   TrendingUp, DollarSign, ShoppingBag, Activity, Calendar, Filter, RefreshCw,
-  Users, Repeat, Clock, BadgePercent, Banknote, FileDown, Table2, CreditCard,
-  ArrowUpRight, ArrowDownRight
+  Users, Repeat, Clock, BadgePercent, Banknote, Table2, CreditCard
 } from 'lucide-react';
 import {
   format, subDays, startOfDay, endOfDay, startOfWeek, startOfMonth,
   endOfMonth, startOfYear, isWithinInterval, parseISO,
   differenceInCalendarDays, getDay, getHours, addDays
 } from 'date-fns';
-import { downloadCsv, downloadXlsx, SheetRow } from '../utils/exportUtils';
-import { toastError } from '../notify';
 
 type RangeKey = 'today' | 'yesterday' | '7d' | '30d' | '90d' | 'month' | 'year' | 'all' | 'custom';
 
@@ -113,7 +110,7 @@ interface CustomerStat {
   lastOrder: string;
 }
 
-export default function AnalyticsDashboard({ can }: { can?: (key: string) => boolean }) {
+export default function AnalyticsDashboard() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [rangeKey, setRangeKey] = useState<RangeKey>('30d');
@@ -121,10 +118,8 @@ export default function AnalyticsDashboard({ can }: { can?: (key: string) => boo
   const [customEnd, setCustomEnd] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
 
-  const canExport = can ? can("analytics.export") : true;
   const [paymentFilter, setPaymentFilter] = useState<string>('all'); // all | cash | chapa
   const [selectedDay, setSelectedDay] = useState<string | null>(null); // daily sheet drill-down
-  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     const q = query(collection(db, 'orders'), orderBy('createdAt', 'asc'));
@@ -313,7 +308,6 @@ export default function AnalyticsDashboard({ can }: { can?: (key: string) => boo
         c.lastOrder = format(orderDate, 'MMM dd, yyyy');
       }
 
-      // prep time: time from createdAt -> "ready" (from statusHistory or first non-pending)
       const history = order.statusHistory || [];
       let readyAt: string | null = null;
       for (const h of history) {
@@ -374,7 +368,7 @@ export default function AnalyticsDashboard({ can }: { can?: (key: string) => boo
     });
 
     // ---- payment method ----
-    const paymentMethodName: Record<string, string> = { chapa: 'Chapa (Online)', cash: 'Cash on Delivery' };
+    const paymentMethodName: Record<string, string> = { chapa: 'Online', cash: 'Cash on Delivery' };
     const paymentMethodData: any[] = Array.from(paymentMap.entries()).map(([key, val]) => ({
       name: paymentMethodName[key] || key,
       key,
@@ -472,127 +466,6 @@ export default function AnalyticsDashboard({ can }: { can?: (key: string) => boo
     return Array.from(map.values()).sort((a, b) => b.revenue - a.revenue).slice(0, 8);
   }, [filteredOrders]);
 
-  async function handleExport(type: 'csv' | 'xlsx', scope: 'transactions' | 'daily' | 'items' | 'customers') {
-    setExporting(true);
-    const dateStamp = format(new Date(), 'yyyy-MM-dd');
-    try {
-      const txColumns = [
-        { key: 'date', label: 'Date' },
-        { key: 'orderId', label: 'Order ID' },
-        { key: 'customer', label: 'Customer' },
-        { key: 'phone', label: 'Phone' },
-        { key: 'email', label: 'Email' },
-        { key: 'address', label: 'Address' },
-        { key: 'items', label: 'Items' },
-        { key: 'qty', label: 'Qty' },
-        { key: 'subtotal', label: 'Subtotal (ETB)' },
-        { key: 'serviceTax', label: 'Service Tax (ETB)' },
-        { key: 'flatFee', label: 'Delivery Fee (ETB)' },
-        { key: 'discount', label: 'Discount (ETB)' },
-        { key: 'total', label: 'Total (ETB)' },
-        { key: 'paymentMethod', label: 'Payment Method' },
-        { key: 'paymentStatus', label: 'Payment Status' },
-        { key: 'orderStatus', label: 'Order Status' },
-        { key: 'promo', label: 'Promo Code' }
-      ];
-
-      if (scope === 'transactions') {
-        const rows: SheetRow[] = (rangeOrders || [])
-          .filter(o => selectedDay ? format(parseOrderDate(o) || new Date(), 'yyyy-MM-dd') === selectedDay : true)
-          .sort((a, b) => (parseOrderDate(a)?.getTime() || 0) - (parseOrderDate(b)?.getTime() || 0))
-          .map(o => {
-            const d = parseOrderDate(o);
-            const sum = itemsSummary(o);
-            return {
-              date: d ? format(d, 'yyyy-MM-dd HH:mm') : '',
-              orderId: o.id,
-              customer: o.customerName || 'Guest',
-              phone: o.customerPhone || '',
-              email: o.customerEmail || '',
-              address: [o.blockNumber, o.roomNumber].filter(Boolean).join(' | ') || o.googleMapsAddress || '',
-              items: sum.text,
-              qty: sum.qty,
-              subtotal: round(sum.subtotal),
-              serviceTax: round(o.serviceTax || 0),
-              flatFee: round(o.flatFee || 0),
-              discount: round(o.discountAmount || 0),
-              total: round(o.total || 0),
-              paymentMethod: o.paymentMethod === 'chapa' ? 'Chapa' : 'Cash',
-              paymentStatus: o.paymentStatus || 'pending',
-              orderStatus: o.status || 'unknown',
-              promo: o.promoCode || ''
-            };
-          });
-        if (type === 'csv') {
-          const fname = `Savory_Transactions_${dateStamp}.csv`;
-          downloadCsv(fname, rows, txColumns);
-        } else {
-          await downloadXlsx(`Savory_Transactions_${dateStamp}.xlsx`, [
-            { name: 'Transactions', rows, columns: txColumns },
-            { name: 'Daily Summary', rows: dailyExportRows(), columns: dailyColumns() }
-          ]);
-        }
-      } else if (scope === 'daily') {
-        const rows = dailyExportRows();
-        if (type === 'csv') downloadCsv(`Savory_DailySummary_${dateStamp}.csv`, rows, dailyColumns());
-        else await downloadXlsx(`Savory_DailySummary_${dateStamp}.xlsx`, [{ name: 'Daily Summary', rows, columns: dailyColumns() }]);
-      } else if (scope === 'items') {
-        const rows: SheetRow[] = (itemSalesData || []).map(i => ({
-          item: i.name,
-          quantity: i.quantity,
-          revenue: round(i.revenue)
-        }));
-        const cols = [
-          { key: 'item', label: 'Item' },
-          { key: 'quantity', label: 'Units Sold' },
-          { key: 'revenue', label: 'Revenue (ETB)' }
-        ];
-        if (type === 'csv') downloadCsv(`Savory_Items_${dateStamp}.csv`, rows, cols);
-        else await downloadXlsx(`Savory_Items_${dateStamp}.xlsx`, [{ name: 'Items', rows, columns: cols }]);
-      } else if (scope === 'customers') {
-        const rows: SheetRow[] = (topCustomers || []).map(c => ({
-          name: c.name, email: c.email, phone: c.phone, orders: c.orders,
-          revenue: round(c.revenue), avgOrder: round(c.avgOrder), lastOrder: c.lastOrder
-        }));
-        const cols = [
-          { key: 'name', label: 'Customer' }, { key: 'email', label: 'Email' }, { key: 'phone', label: 'Phone' },
-          { key: 'orders', label: 'Orders' }, { key: 'revenue', label: 'Revenue (ETB)' },
-          { key: 'avgOrder', label: 'Avg Order (ETB)' }, { key: 'lastOrder', label: 'Last Order' }
-        ];
-        if (type === 'csv') downloadCsv(`Savory_Customers_${dateStamp}.csv`, rows, cols);
-        else await downloadXlsx(`Savory_Customers_${dateStamp}.xlsx`, [{ name: 'Customers', rows, columns: cols }]);
-      }
-    } catch (e) {
-      console.error('Export failed', e);
-      toastError('Export failed: ' + (e as Error).message);
-    } finally {
-      setExporting(false);
-    }
-  }
-
-  function dailyExportRows(): SheetRow[] {
-    return (dailyRows || []).map(r => ({
-      date: r.date,
-      day: r.label,
-      orders: r.orders,
-      items: r.items,
-      netRevenue: round(r.netRevenue),
-      grossRevenue: round(r.grossRevenue),
-      chapa: round(r.chapa),
-      cash: round(r.cash),
-      avgOrder: round(r.avgOrder)
-    }));
-  }
-  function dailyColumns() {
-    return [
-      { key: 'date', label: 'Date' }, { key: 'day', label: 'Day' }, { key: 'orders', label: 'Orders' },
-      { key: 'items', label: 'Items Sold' }, { key: 'netRevenue', label: 'Net Revenue (ETB)' },
-      { key: 'grossRevenue', label: 'Gross Revenue (ETB)' }, { key: 'chapa', label: 'Chapa (ETB)' },
-      { key: 'cash', label: 'Cash (ETB)' }, { key: 'avgOrder', label: 'Avg Order (ETB)' }
-    ];
-  }
-  function round(n: number) { return Math.round(n * 100) / 100; }
-
   const rangeLabel = useMemo(() => {
     if (!range) return 'Range';
     if (rangeKey === 'all') return 'All Time';
@@ -663,33 +536,9 @@ export default function AnalyticsDashboard({ can }: { can?: (key: string) => boo
             className="text-xs border border-stone-300 rounded-lg px-3 py-2 bg-white focus:ring-2 focus:ring-amber-500 outline-none"
           >
             <option value="all">All Payments</option>
-            <option value="chapa">Chapa (Online)</option>
+            <option value="chapa">Online</option>
             <option value="cash">Cash on Delivery</option>
           </select>
-
-          {/* Export menu */}
-          {canExport && (
-            <div className="relative group">
-            <button
-              disabled={exporting}
-              onClick={() => handleExport('xlsx', 'transactions')}
-              className="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold px-3 py-2 rounded-lg transition-colors cursor-pointer"
-            >
-              <FileDown className="w-3.5 h-3.5" />
-              {exporting ? 'Exporting...' : 'Export Sheet'}
-            </button>
-            <div className="hidden group-hover:flex absolute right-0 top-full mt-1 z-30 flex-col bg-white border border-stone-200 rounded-xl shadow-xl overflow-hidden w-52">
-              <button onClick={() => handleExport('xlsx', 'transactions')} className="text-left px-4 py-2.5 text-xs font-medium text-stone-700 hover:bg-amber-50 transition-colors cursor-pointer">Transactions → Excel (.xlsx)</button>
-              <button onClick={() => handleExport('csv', 'transactions')} className="text-left px-4 py-2.5 text-xs font-medium text-stone-700 hover:bg-amber-50 transition-colors cursor-pointer">Transactions → CSV</button>
-              <div className="border-t border-stone-100" />
-              <button onClick={() => handleExport('xlsx', 'daily')} className="text-left px-4 py-2.5 text-xs font-medium text-stone-700 hover:bg-amber-50 transition-colors cursor-pointer">Daily Summary → Excel</button>
-              <button onClick={() => handleExport('csv', 'daily')} className="text-left px-4 py-2.5 text-xs font-medium text-stone-700 hover:bg-amber-50 transition-colors cursor-pointer">Daily Summary → CSV</button>
-              <div className="border-t border-stone-100" />
-              <button onClick={() => handleExport('xlsx', 'items')} className="text-left px-4 py-2.5 text-xs font-medium text-stone-700 hover:bg-amber-50 transition-colors cursor-pointer">Items Sold → Excel</button>
-              <button onClick={() => handleExport('xlsx', 'customers')} className="text-left px-4 py-2.5 text-xs font-medium text-stone-700 hover:bg-amber-50 transition-colors cursor-pointer">Top Customers → Excel</button>
-            </div>
-          </div>
-          )}
         </div>
       </div>
 
@@ -891,15 +740,6 @@ export default function AnalyticsDashboard({ can }: { can?: (key: string) => boo
                 </button>
               )}
             </h3>
-            <div className="flex items-center gap-2">
-              {canExport && (
-                <>
-                  <button onClick={() => handleExport('csv', 'daily')} className="text-[10px] font-bold text-stone-600 border border-stone-300 rounded px-2 py-1 hover:bg-stone-100 transition-colors cursor-pointer">CSV</button>
-                  <button onClick={() => handleExport('xlsx', 'daily')} className="text-[10px] font-bold text-emerald-700 border border-emerald-200 bg-emerald-50 rounded px-2 py-1 hover:bg-emerald-100 transition-colors cursor-pointer">Excel</button>
-                  <button onClick={() => handleExport('xlsx', 'transactions')} className="text-[10px] font-bold text-stone-600 border border-stone-300 rounded px-2 py-1 hover:bg-stone-100 transition-colors cursor-pointer">Full Log</button>
-                </>
-              )}
-            </div>
           </div>
           <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
             <table className="w-full text-left border-collapse">
@@ -951,14 +791,6 @@ export default function AnalyticsDashboard({ can }: { can?: (key: string) => boo
                 <p className="text-xs font-bold text-stone-700 uppercase tracking-wide">
                   Orders — {format(parseISO(selectedDay), 'MMMM d, yyyy')}
                 </p>
-                {canExport && (
-                  <button
-                    onClick={() => handleExport('csv', 'transactions')}
-                    className="text-[10px] font-bold text-amber-700 border border-amber-200 bg-white rounded px-2 py-1 hover:bg-amber-100 transition-colors cursor-pointer"
-                  >
-                    Export this day's orders
-                  </button>
-                )}
               </div>
               <div className="overflow-x-auto max-h-[360px] overflow-y-auto border-t border-amber-100">
                 <table className="w-full text-left border-collapse">
@@ -1012,113 +844,42 @@ export default function AnalyticsDashboard({ can }: { can?: (key: string) => boo
           )}
         </div>
 
-        {/* ===== Tables row ===== */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          <div className="border border-stone-100 rounded-xl overflow-hidden flex flex-col">
-            <div className="p-4 border-b border-stone-100 bg-stone-50 flex items-center justify-between">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-stone-700 flex items-center">
-                <TrendingUp className="w-3.5 h-3.5 mr-2 text-emerald-600" />
-                Top Performing Items
-              </h3>
-              {canExport && <button onClick={() => handleExport('xlsx', 'items')} className="text-[10px] font-bold text-stone-500 hover:text-emerald-700 border border-stone-200 rounded px-2 py-1 transition-colors cursor-pointer">Export</button>}
-            </div>
-            <div className="p-0 overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-white border-b border-stone-100">
-                    <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider">Item Name</th>
-                    <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Units Sold</th>
-                    <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Revenue</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-stone-100 bg-white">
-                  {topItems.length > 0 ? topItems.map((item, idx) => (
-                    <tr key={idx} className="hover:bg-stone-50/50 transition-colors">
-                      <td className="py-3 px-4 text-xs font-bold text-stone-900">{item.name}</td>
-                      <td className="py-3 px-4 text-xs text-stone-600 text-right">{item.quantity}</td>
-                      <td className="py-3 px-4 text-xs font-mono font-medium text-emerald-600 text-right">{fmtNum(item.revenue)} ETB</td>
-                    </tr>
-                  )) : (
-                    <tr><td colSpan={3} className="py-6 px-4 text-center text-xs text-stone-400">No items sold in this period.</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+        {/* ===== Fulfillment & status mix ===== */}
+        <div className="border border-stone-100 rounded-xl overflow-hidden flex flex-col">
+          <div className="p-4 border-b border-stone-100 bg-indigo-50/40 flex items-center justify-between">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-900 flex items-center">
+              <Clock className="w-3.5 h-3.5 mr-2 text-indigo-600" />
+              Fulfillment Time (Place → Ready)
+            </h3>
+            <span className="text-[10px] font-bold text-indigo-500">{prepStats.sampleCount} orders tracked</span>
           </div>
-
-          <div className="border border-stone-100 rounded-xl overflow-hidden flex flex-col">
-            <div className="p-4 border-b border-stone-100 bg-stone-50 flex items-center justify-between">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-stone-700 flex items-center">
-                <Users className="w-3.5 h-3.5 mr-2 text-violet-600" />
-                Top Customers
-              </h3>
-              {canExport && <button onClick={() => handleExport('xlsx', 'customers')} className="text-[10px] font-bold text-stone-500 hover:text-violet-700 border border-stone-200 rounded px-2 py-1 transition-colors cursor-pointer">Export</button>}
-            </div>
-            <div className="p-0 overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-white border-b border-stone-100">
-                    <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider">Customer</th>
-                    <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Orders</th>
-                    <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Revenue</th>
-                    <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Avg Order</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-stone-100 bg-white">
-                  {topCustomers.length > 0 ? topCustomers.map((c, idx) => (
-                    <tr key={idx} className="hover:bg-stone-50/50 transition-colors">
-                      <td className="py-3 px-4">
-                        <div className="text-xs font-bold text-stone-900">{c.name}</div>
-                        <div className="text-[10px] text-stone-400 truncate max-w-[140px]">{c.email || c.phone || 'no contact'}</div>
-                      </td>
-                      <td className="py-3 px-4 text-xs text-stone-600 text-right">{c.orders} {c.orders > 1 && '★'}</td>
-                      <td className="py-3 px-4 text-xs font-mono font-medium text-emerald-600 text-right">{fmtNum(c.revenue)} ETB</td>
-                      <td className="py-3 px-4 text-xs font-mono text-stone-500 text-right">{fmtNum(c.avgOrder)}</td>
-                    </tr>
-                  )) : (
-                    <tr><td colSpan={4} className="py-6 px-4 text-center text-xs text-stone-400">No customer data in this period.</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div className="border border-stone-100 rounded-xl overflow-hidden flex flex-col">
-            <div className="p-4 border-b border-stone-100 bg-indigo-50/40 flex items-center justify-between">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-900 flex items-center">
-                <Clock className="w-3.5 h-3.5 mr-2 text-indigo-600" />
-                Fulfillment Time (Place → Ready)
-              </h3>
-              <span className="text-[10px] font-bold text-indigo-500">{prepStats.sampleCount} orders tracked</span>
-            </div>
-            <div className="p-4">
-              {fulfillmentData.length > 0 ? (
-                <div className="h-40 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={fulfillmentData} layout="vertical" margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                      <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#E5E7EB" />
-                      <XAxis type="number" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#6B7280' }} />
-                      <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#6B7280' }} width={70} />
-                      <Tooltip cursor={{ fill: '#F3F4F6' }} contentStyle={{ borderRadius: '8px', border: 'none' }} />
-                      <Bar dataKey="count" fill="#2563EB" radius={[0, 4, 4, 0]} name="Orders" />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              ) : (
-                <div className="h-40 flex items-center justify-center text-stone-400 text-xs">
-                  Track order status changes to see prep times.<br />Available once orders are marked Ready/Delivered.
-                </div>
-              )}
-            </div>
-            <div className="px-4 pb-4 pt-1">
-              <p className="text-[9px] uppercase tracking-wider text-stone-400 font-bold mb-2">Order Status Mix</p>
-              <div className="flex flex-wrap gap-1.5">
-                {statusData.length > 0 ? statusData.map((s, i) => (
-                  <span key={i} className="inline-flex items-center gap-1 text-[10px] font-mono font-bold px-2 py-1 rounded-full border" style={{ backgroundColor: `${COLORS[i % COLORS.length]}14`, borderColor: `${COLORS[i % COLORS.length]}33`, color: COLORS[i % COLORS.length] }}>
-                    {s.name}: {s.count}
-                  </span>
-                )) : <span className="text-[10px] text-stone-400">No status data</span>}
+          <div className="p-4">
+            {fulfillmentData.length > 0 ? (
+              <div className="h-40 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={fulfillmentData} layout="vertical" margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#E5E7EB" />
+                    <XAxis type="number" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#6B7280' }} />
+                    <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#6B7280' }} width={70} />
+                    <Tooltip cursor={{ fill: '#F3F4F6' }} contentStyle={{ borderRadius: '8px', border: 'none' }} />
+                    <Bar dataKey="count" fill="#2563EB" radius={[0, 4, 4, 0]} name="Orders" />
+                  </BarChart>
+                </ResponsiveContainer>
               </div>
+            ) : (
+              <div className="h-40 flex items-center justify-center text-stone-400 text-xs">
+                Track order status changes to see prep times.<br />Available once orders are marked Ready/Delivered.
+              </div>
+            )}
+          </div>
+          <div className="px-4 pb-4 pt-1">
+            <p className="text-[9px] uppercase tracking-wider text-stone-400 font-bold mb-2">Order Status Mix</p>
+            <div className="flex flex-wrap gap-1.5">
+              {statusData.length > 0 ? statusData.map((s, i) => (
+                <span key={i} className="inline-flex items-center gap-1 text-[10px] font-mono font-bold px-2 py-1 rounded-full border" style={{ backgroundColor: `${COLORS[i % COLORS.length]}14`, borderColor: `${COLORS[i % COLORS.length]}33`, color: COLORS[i % COLORS.length] }}>
+                  {s.name}: {s.count}
+                </span>
+              )) : <span className="text-[10px] text-stone-400">No status data</span>}
             </div>
           </div>
         </div>

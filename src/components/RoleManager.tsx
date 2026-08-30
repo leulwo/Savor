@@ -3,7 +3,7 @@ import { db } from "../firebase";
 import { collection, onSnapshot, doc, setDoc, deleteDoc, writeBatch } from "firebase/firestore";
 import { confirmDialog } from "../notify";
 import { PERMISSION_GROUPS, DEFAULT_ROLES, ALL_PERMISSIONS, RoleDefinition, PermissionMap, hasPermission } from "../permissions";
-import { ShieldCheck, Lock, Plus, Trash2, ChevronDown, ChevronUp, Users } from "lucide-react";
+import { ShieldCheck, Lock, Plus, Trash2, ChevronDown, ChevronUp, Users, Save } from "lucide-react";
 
 interface RoleManagerProps {
   can?: (key: string) => boolean;
@@ -15,8 +15,30 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
   const [expandedRole, setExpandedRole] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [newRoleName, setNewRoleName] = useState("");
+  // Staged permission changes: roleId -> desired permission map. NOT written to
+  // Firestore until "Save Configuration" is confirmed.
+  const [dirtyRoles, setDirtyRoles] = useState<Record<string, PermissionMap>>({});
 
   const canEditRoles = can("roles.edit");
+
+  // Effective permission map for a role: staged value if it exists, else baseline.
+  const getPerms = (roleId: string): PermissionMap =>
+    dirtyRoles[roleId] ?? (roles.find(r => r.id === roleId)?.permissions ?? {});
+
+  const isRoleDirty = (roleId: string) => Object.prototype.hasOwnProperty.call(dirtyRoles, roleId);
+
+  const changedCount = (roleId: string): number => {
+    const base = roles.find(r => r.id === roleId);
+    if (!base || !isRoleDirty(roleId)) return 0;
+    const staged = dirtyRoles[roleId];
+    return Object.keys(staged).filter(k => hasPermission(staged, k) !== hasPermission(base.permissions, k)).length;
+  };
+
+  const totalDirtyCount = (): number => {
+    let total = 0;
+    Object.keys(dirtyRoles).forEach(id => { total += changedCount(id); });
+    return total;
+  };
 
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, "roles"), (snapshot) => {
@@ -56,55 +78,73 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
     }
   };
 
-  const togglePermission = async (roleId: string, key: string) => {
+  const togglePermission = (roleId: string, key: string) => {
     const role = roles.find(r => r.id === roleId);
-    if (!role || role.builtin && roleId === 'admin') return;
+    if (!role || (role.builtin && roleId === 'admin')) return;
 
-    const nextPermissions: PermissionMap = { ...role.permissions };
+    const current = dirtyRoles[roleId] ?? { ...role.permissions };
+    const nextPermissions: PermissionMap = { ...current };
     nextPermissions[key] = !hasPermission(nextPermissions, key);
 
-    const nextRoles = roles.map(r => r.id === roleId ? { ...r, permissions: nextPermissions } : r);
-    setRoles(nextRoles);
-
-    try {
-      await setDoc(doc(db, "roles", roleId), {
-        id: role.id,
-        name: role.name,
-        description: role.description,
-        builtin: role.builtin,
-        permissions: nextPermissions,
-      });
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err?.message || "Failed to update role." });
-    }
+    // Stage only; nothing is written until Save Configuration is confirmed.
+    setDirtyRoles(prev => ({ ...prev, [roleId]: nextPermissions }));
   };
 
-  const toggleAllInGroup = async (roleId: string, groupIndex: number, enable: boolean) => {
+  const toggleAllInGroup = (roleId: string, groupIndex: number, enable: boolean) => {
     const role = roles.find(r => r.id === roleId);
-    if (!role || role.builtin && roleId === 'admin') return;
+    if (!role || (role.builtin && roleId === 'admin')) return;
 
     const group = PERMISSION_GROUPS[groupIndex];
     if (!group) return;
 
-    const nextPermissions: PermissionMap = { ...role.permissions };
+    const current = dirtyRoles[roleId] ?? { ...role.permissions };
+    const nextPermissions: PermissionMap = { ...current };
     group.permissions.forEach(p => {
       nextPermissions[p.key] = enable;
     });
 
-    const nextRoles = roles.map(r => r.id === roleId ? { ...r, permissions: nextPermissions } : r);
-    setRoles(nextRoles);
+    setDirtyRoles(prev => ({ ...prev, [roleId]: nextPermissions }));
+  };
 
-    try {
-      await setDoc(doc(db, "roles", roleId), {
-        id: role.id,
-        name: role.name,
-        description: role.description,
-        builtin: role.builtin,
-        permissions: nextPermissions,
-      });
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err?.message || "Failed to update role." });
-    }
+  // Persist all staged permission changes to Firestore in a single batch, after
+  // explicit confirmation.
+  const saveConfiguration = async () => {
+    const total = totalDirtyCount();
+    const roleCount = Object.keys(dirtyRoles).length;
+    if (total === 0 || roleCount === 0) return;
+
+    confirmDialog(
+      `Save ${total} permission change${total === 1 ? '' : 's'} across ${roleCount} role${roleCount === 1 ? '' : 's'}?\n\nThis will take effect immediately for every team member assigned to those roles.`,
+      async () => {
+        try {
+          const batch = writeBatch(db);
+          for (const [roleId, perms] of Object.entries(dirtyRoles)) {
+            const base = roles.find(r => r.id === roleId);
+            if (!base) continue;
+            batch.set(doc(db, "roles", roleId), {
+              id: base.id,
+              name: base.name,
+              description: base.description,
+              builtin: base.builtin,
+              permissions: perms,
+            });
+          }
+          await batch.commit();
+          setRoles(prev => prev.map(r => dirtyRoles[r.id] ? { ...r, permissions: dirtyRoles[r.id] } : r));
+          setDirtyRoles({});
+          setMessage({ type: 'success', text: `Saved ${total} permission change(s).` });
+        } catch (err: any) {
+          setMessage({ type: 'error', text: err?.message || "Failed to save role configuration." });
+        }
+      },
+      null,
+      "Save"
+    );
+  };
+
+  const discardChanges = () => {
+    setDirtyRoles({});
+    setMessage({ type: 'success', text: 'Discarded all pending permission changes.' });
   };
 
   const updateRoleMeta = async (roleId: string, patch: Partial<RoleDefinition>) => {
@@ -237,6 +277,32 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
           </form>
         )}
 
+        {canEditRoles && totalDirtyCount() > 0 && (
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-blue-50 border border-blue-200 rounded-2xl p-4">
+            <div>
+              <p className="text-xs font-bold text-blue-900">Unsaved configuration changes</p>
+              <p className="text-[11px] text-blue-800 mt-0.5">
+                {totalDirtyCount()} permission {totalDirtyCount() === 1 ? 'change' : 'changes'} across {Object.keys(dirtyRoles).length} role{Object.keys(dirtyRoles).length === 1 ? '' : 's'} are staged. Apply them with "Save Configuration".
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={discardChanges}
+                className="px-4 py-2 text-xs font-bold text-stone-600 bg-white border border-stone-300 rounded-xl hover:bg-stone-50 transition-colors cursor-pointer"
+              >
+                Discard
+              </button>
+              <button
+                onClick={saveConfiguration}
+                className="px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition-colors cursor-pointer flex items-center space-x-1.5"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>Save Configuration</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="space-y-4">
           {roles.map(role => {
             const isExpanded = expandedRole === role.id;
@@ -256,13 +322,18 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
                         {role.builtin && (
                           <span className="inline-block text-[9px] font-mono uppercase bg-amber-100 text-amber-800 px-2 py-0.5 rounded font-bold">Built-in</span>
                         )}
+                        {isRoleDirty(role.id) && (
+                          <span className="inline-block text-[9px] font-mono uppercase bg-blue-100 text-blue-800 px-2 py-0.5 rounded font-bold">
+                            {changedCount(role.id)} unsaved
+                          </span>
+                        )}
                       </div>
                       {role.description && <p className="text-[11px] text-stone-500 mt-0.5">{role.description}</p>}
                     </div>
                   </div>
                   <div className="flex items-center space-x-2">
                     <span className="text-[10px] font-mono text-stone-400 hidden sm:inline">
-                      {Object.values(role.permissions || {}).filter(Boolean).length}/{ALL_PERMISSIONS.length} permissions
+                      {Object.values(getPerms(role.id) || {}).filter(Boolean).length}/{ALL_PERMISSIONS.length} permissions
                     </span>
                     {canEditRoles && !isAdmin && (
                       <button
@@ -302,7 +373,7 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
                       <p className="text-xs text-stone-500 italic">The Admin role always has full access and cannot be modified.</p>
                     ) : (
                       PERMISSION_GROUPS.map((group, gi) => {
-                        const enabledCount = group.permissions.filter(p => hasPermission(role.permissions, p.key)).length;
+                        const enabledCount = group.permissions.filter(p => hasPermission(getPerms(role.id), p.key)).length;
                         const allOn = enabledCount === group.permissions.length;
                         const noneOn = enabledCount === 0;
 
@@ -334,7 +405,7 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
                             </div>
                             <div className="p-3 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                               {group.permissions.map(perm => {
-                                const enabled = hasPermission(role.permissions, perm.key);
+                                const enabled = hasPermission(getPerms(role.id), perm.key);
                                 return (
                                   <label key={perm.key} className={`flex items-start space-x-2.5 p-2 rounded-lg cursor-pointer transition-colors select-none ${enabled ? 'bg-emerald-50/70 hover:bg-emerald-50' : 'hover:bg-stone-50'}`}>
                                     <input

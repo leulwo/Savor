@@ -148,7 +148,7 @@ export default function AuditLog({ can, permissions }: AuditLogProps) {
         <div className="p-4 bg-stone-50/50 border-b border-stone-100 flex items-center justify-between">
           <h3 className="font-bold text-xs uppercase tracking-wider text-stone-700">Activity Stream ({filteredLogs.length} entries)</h3>
           <span className="text-[11px] text-stone-400 font-mono flex items-center gap-1">
-            <Clock className="w-3 h-3" /> Live Firestore Stream
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse inline-block" /> Stream
           </span>
         </div>
 

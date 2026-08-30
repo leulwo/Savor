@@ -8,6 +8,7 @@ import { hasPermission, PermissionMap } from "../permissions";
 interface AdminChatProps {
   can?: (key: string) => boolean;
   permissions?: PermissionMap;
+  currentStaffName?: string;
 }
 
 interface ChatMessage {
@@ -15,6 +16,7 @@ interface ChatMessage {
   role: 'user' | 'model';
   text: string;
   customerName?: string;
+  senderName?: string;
   createdAt: any;
 }
 
@@ -26,7 +28,7 @@ interface Conversation {
   unreadCount: number;
 }
 
-export default function AdminChat({ can, permissions }: AdminChatProps) {
+export default function AdminChat({ can, permissions, currentStaffName = '' }: AdminChatProps) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -146,6 +148,7 @@ export default function AdminChat({ can, permissions }: AdminChatProps) {
         conversationId: selectedId,
         role: 'model', // 'model' is used for the responder role
         text,
+        senderName: currentStaffName.trim() || 'Staff',
         createdAt: serverTimestamp()
       });
     } catch (err) {
@@ -251,7 +254,7 @@ export default function AdminChat({ can, permissions }: AdminChatProps) {
                 <div key={idx} className={`flex ${msg.role === 'model' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[70%] group`}>
                     <div className={`text-[9px] mb-1 font-bold uppercase tracking-wider text-stone-400 ${msg.role === 'model' ? 'text-right' : 'text-left'}`}>
-                      {msg.role === 'model' ? 'Restaurant (You)' : (msg.customerName || 'Customer')}
+                      {msg.role === 'model' ? (msg.senderName || currentStaffName || 'Restaurant') : (msg.customerName || 'Customer')}
                     </div>
                     <div className={`p-3 rounded-2xl text-xs leading-relaxed shadow-sm ${
                       msg.role === 'model'

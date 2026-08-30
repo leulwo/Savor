@@ -3,7 +3,7 @@ import { db } from '../firebase';
 import { collection, query, orderBy, onSnapshot, doc, updateDoc } from 'firebase/firestore';
 import { Reservation } from '../types';
 import { CalendarDays, CheckCircle, XCircle, Clock, Users, Mail, Phone, User } from 'lucide-react';
-import { toastError } from '../notify';
+import { toastError, confirmDialog } from '../notify';
 import { hasPermission, PermissionMap } from '../permissions';
 
 interface ReservationManagerProps {
@@ -54,14 +54,16 @@ export default function ReservationManager({ can, permissions }: ReservationMana
   }, []);
 
   const updateStatus = async (id: string, newStatus: 'confirmed' | 'cancelled') => {
-    try {
-      await updateDoc(doc(db, 'reservations', id), {
-        status: newStatus
-      });
-    } catch (error) {
-      console.error("Failed to update reservation status:", error);
-      toastError("Failed to update status.");
-    }
+    confirmDialog(`Mark this reservation as "${newStatus.toUpperCase()}"?`, async () => {
+      try {
+        await updateDoc(doc(db, 'reservations', id), {
+          status: newStatus
+        });
+      } catch (error) {
+        console.error("Failed to update reservation status:", error);
+        toastError("Failed to update status.");
+      }
+    }, null, newStatus === "confirmed" ? "Confirm" : "Cancel");
   };
 
   if (loading) {

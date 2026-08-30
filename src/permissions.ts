@@ -25,10 +25,11 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     permissions: [
       { key: "menu.view", label: "View menu items" },
       { key: "menu.create", label: "Create new items" },
-      { key: "menu.edit", label: "Edit items (name, description, availability)" },
+      { key: "menu.edit", label: "Edit item content (name, description, image, timing)" },
       { key: "menu.editPrice", label: "Edit item prices only" },
+      { key: "menu.editAvailability", label: "Toggle dish availability (available / unavailable)" },
       { key: "menu.delete", label: "Delete items" },
-      { key: "menu.categories", label: "Manage categories" },
+      { key: "menu.categories", label: "Manage categories & assign items to categories" },
     ],
   },
   {
@@ -74,7 +75,6 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     group: "Customers",
     permissions: [
       { key: "customers.view", label: "View customer profiles & history" },
-      { key: "customers.editPoints", label: "Adjust customer loyalty points" },
     ],
   },
   {
@@ -121,38 +121,6 @@ export const DEFAULT_ROLES: RoleDefinition[] = [
     builtin: true,
     permissions: allPermissions(),
   },
-  {
-    id: "kitchen",
-    name: "Kitchen Staff",
-    description: "Kitchen display, order visibility and cooking workflow. No menu editing, payments or settings.",
-    builtin: true,
-    permissions: {
-      "menu.view": true,
-      "kds.view": true,
-      "kds.startPreparing": true,
-      "kds.markReady": true,
-    },
-  },
-  {
-    id: "cashier",
-    name: "Cashier",
-    description: "Order management, payments, inbox and reservations. No menu editing, analytics or settings.",
-    builtin: true,
-    permissions: {
-      "menu.view": true,
-      "orders.view": true,
-      "orders.updateStatus": true,
-      "orders.markPaid": true,
-      "orders.cancel": true,
-      "orders.receipts": true,
-      "chat.view": true,
-      "chat.reply": true,
-      "reservations.view": true,
-      "reservations.manage": true,
-      "promos.view": true,
-      "customers.view": true,
-    },
-  },
 ];
 
 export function getDefaultRole(roleId: string): RoleDefinition | undefined {
@@ -165,12 +133,30 @@ export function hasPermission(permissions: PermissionMap | undefined | null, key
 
 export async function seedDefaultRoles(db: any): Promise<void> {
   try {
-    const { collection, getDocs, doc, setDoc } = await import("firebase/firestore");
+    const { collection, getDocs, getDoc, doc, setDoc } = await import("firebase/firestore");
     const snapshot = await getDocs(collection(db, "roles"));
     const existing = new Set(snapshot.docs.map(d => d.id));
     let wrote = false;
     for (const role of DEFAULT_ROLES) {
-      if (!existing.has(role.id)) {
+      if (existing.has(role.id)) {
+        const roleDocRef = doc(db, "roles", role.id);
+        const roleDocSnap = await getDoc(roleDocRef);
+        const current = roleDocSnap.exists()
+          ? (roleDocSnap.data() as any)?.permissions || {}
+          : {};
+        let changed = false;
+        const merged = { ...current };
+        for (const key of Object.keys(role.permissions)) {
+          if (!(key in merged)) {
+            merged[key] = role.permissions[key];
+            changed = true;
+          }
+        }
+        if (changed) {
+          await setDoc(roleDocRef, { ...(roleDocSnap.data() || {}), permissions: merged });
+          wrote = true;
+        }
+      } else {
         await setDoc(doc(db, "roles", role.id), {
           id: role.id,
           name: role.name,

@@ -8,6 +8,14 @@ export interface Category {
   name: string;
 }
 
+export interface MenuItemVariation {
+  id: string;
+  label: string;
+  price: number;
+  isAvailable?: boolean;
+  isDefault?: boolean;
+}
+
 export interface MenuItem {
   id: string;
   name: string;
@@ -19,7 +27,6 @@ export interface MenuItem {
   image: string;
   galleryImages?: string[];
   popular?: boolean;
-  prepTime: string;
   ingredients: string[];
   nutrition: {
     protein: string;
@@ -27,17 +34,21 @@ export interface MenuItem {
     fat: string;
   };
   basePrice?: number;
-  taxRate?: string;
-  taxRatePercent?: number;
   isActive?: boolean;
   menuTiming?: string;
   timingFrom?: string;
   timingTo?: string;
+  variations?: MenuItemVariation[];
+}
+
+export interface OrderMenuItem extends MenuItem {
+  variation?: { id: string; label: string };
 }
 
 export interface OrderItem {
-  menuItem: MenuItem;
+  menuItem: OrderMenuItem;
   quantity: number;
+  variationId?: string | null;
 }
 
 export interface Order {
@@ -105,7 +116,6 @@ export interface UserProfile {
   savedAddresses: string[];
   favoriteItems: string[];
   createdAt: string;
-  points?: number;
 }
 
 export interface GlobalSettings {

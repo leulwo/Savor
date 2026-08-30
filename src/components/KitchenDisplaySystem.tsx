@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../firebase';
 import { collection, query, where, orderBy, onSnapshot, doc, updateDoc } from 'firebase/firestore';
-import { toastError } from '../notify';
+import { toastError, confirmDialog } from '../notify';
 import { Order } from '../types';
 import { ChefHat, CheckCircle, Clock, Flame } from 'lucide-react';
 import { hasPermission, PermissionMap } from '../permissions';
@@ -56,14 +56,21 @@ export default function KitchenDisplaySystem({ can, permissions }: KitchenDispla
   }, []);
 
   const updateOrderStatus = async (orderId: string, newStatus: string) => {
-    try {
-      await updateDoc(doc(db, 'orders', orderId), {
-        status: newStatus
-      });
-    } catch (error) {
-      console.error("Failed to update order status:", error);
-      toastError("Failed to update order status. If you are a staff member, make sure the " + newStatus + " permission is granted to your role.");
-    }
+    confirmDialog(
+      `Mark this order as "${newStatus.toUpperCase()}"?`,
+      async () => {
+        try {
+          await updateDoc(doc(db, 'orders', orderId), {
+            status: newStatus
+          });
+        } catch (error) {
+          console.error("Failed to update order status:", error);
+          toastError("Failed to update order status. If you are a staff member, make sure the " + newStatus + " permission is granted to your role.");
+        }
+      },
+      null,
+      newStatus === "ready" ? "Mark Ready" : "Start Preparing"
+    );
   };
 
   const pendingOrders = (orders || []).filter(o => o?.status === 'pending' && isDue(o));
@@ -157,7 +164,7 @@ export default function KitchenDisplaySystem({ can, permissions }: KitchenDispla
                     {(order.items || []).map((item, idx) => (
                       <li key={idx} className="flex justify-between text-sm">
                         <span className="font-bold text-amber-400">{item.quantity || 1}x</span>
-                        <span className="flex-1 ml-2 text-stone-200">{item.menuItem?.name || 'Dish'}</span>
+                        <span className="flex-1 ml-2 text-stone-200">{item.menuItem?.name || 'Dish'}{item.menuItem?.variation?.label ? ` — ${item.menuItem.variation.label}` : ''}</span>
                       </li>
                     ))}
                   </ul>
@@ -239,7 +246,7 @@ export default function KitchenDisplaySystem({ can, permissions }: KitchenDispla
                     {(order.items || []).map((item, idx) => (
                       <li key={idx} className="flex justify-between text-sm">
                         <span className="font-bold text-blue-400">{item.quantity || 1}x</span>
-                        <span className="flex-1 ml-2 text-stone-300">{item.menuItem?.name || 'Dish'}</span>
+                        <span className="flex-1 ml-2 text-stone-300">{item.menuItem?.name || 'Dish'}{item.menuItem?.variation?.label ? ` — ${item.menuItem.variation.label}` : ''}</span>
                       </li>
                     ))}
                   </ul>

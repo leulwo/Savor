@@ -38,31 +38,33 @@ export default function PromoManager({ can, permissions }: PromoManagerProps) {
     e.preventDefault();
     if (!code || !value) return;
 
-    const newPromo: PromoCode = {
-      code: code.toUpperCase(),
-      type,
-      value: Number(value),
-      minOrderAmount: minOrder ? Number(minOrder) : undefined,
-      maxDiscount: maxDiscount ? Number(maxDiscount) : undefined,
-      active: true,
-      usageCount: 0,
-      expiresAt: expiresAt || undefined,
-      createdAt: new Date().toISOString()
-    };
+    confirmDialog(`Create promo code "${code.toUpperCase()}" worth ${type === 'percentage' ? value + '%' : value + ' ETB'}?`, async () => {
+      const newPromo: PromoCode = {
+        code: code.toUpperCase(),
+        type,
+        value: Number(value),
+        minOrderAmount: minOrder ? Number(minOrder) : undefined,
+        maxDiscount: maxDiscount ? Number(maxDiscount) : undefined,
+        active: true,
+        usageCount: 0,
+        expiresAt: expiresAt || undefined,
+        createdAt: new Date().toISOString()
+      };
 
-    try {
-      // Use code as document ID for easy querying
-      await setDoc(doc(db, 'promoCodes', newPromo.code), newPromo);
-      setShowForm(false);
-      setCode('');
-      setValue('');
-      setMinOrder('');
-      setMaxDiscount('');
-      setExpiresAt('');
-    } catch (error) {
-      console.error("Error creating promo:", error);
-      toastError("Failed to create promo code");
-    }
+      try {
+        // Use code as document ID for easy querying
+        await setDoc(doc(db, 'promoCodes', newPromo.code), newPromo);
+        setShowForm(false);
+        setCode('');
+        setValue('');
+        setMinOrder('');
+        setMaxDiscount('');
+        setExpiresAt('');
+      } catch (error) {
+        console.error("Error creating promo:", error);
+        toastError("Failed to create promo code");
+      }
+    }, null, "Create");
   };
 
   const handleDelete = async (id: string) => {
@@ -78,11 +80,15 @@ export default function PromoManager({ can, permissions }: PromoManagerProps) {
 
   const toggleStatus = async (promo: PromoCode) => {
     if (!promo.id) return;
-    try {
-      await setDoc(doc(db, 'promoCodes', promo.id), { active: !promo.active }, { merge: true });
-    } catch (error) {
-      console.error("Error toggling status:", error);
-    }
+    const action = promo.active ? "deactivate" : "activate";
+    confirmDialog(`Are you sure you want to ${action} promo code "${promo.id}"? Customers ${promo.active ? 'will no longer be able to use' : 'will now be able to use'} this code.`, async () => {
+      try {
+        await setDoc(doc(db, 'promoCodes', promo.id), { active: !promo.active }, { merge: true });
+      } catch (error) {
+        console.error("Error toggling status:", error);
+        toastError("Failed to update promo code status");
+      }
+    }, null, action === "activate" ? "Activate" : "Deactivate");
   };
 
   if (loading) return <div>Loading promotions...</div>;

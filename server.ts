@@ -76,7 +76,7 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // Middleware: require a valid Firebase ID token for admin/staff-only routes.
 // Token is read from the `Authorization: Bearer <idToken>` header, with a
 // fallback to `x-firebase-token` header / `token` query param for non-browser callers.
-async function requireStaffAuth(req: any, res: any, next: any) {
+async function verifyFirebaseToken(req: any): Promise<any | null> {
   try {
     const header = (req.headers?.authorization as string) || "";
     let token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
@@ -86,19 +86,63 @@ async function requireStaffAuth(req: any, res: any, next: any) {
     if (!token && req.query?.token) {
       token = String(req.query.token).trim();
     }
-
-    if (!token) {
-      return res.status(401).json({ error: "Unauthorized: Missing Firebase ID token." });
-    }
-
-    const decodedToken = await getAuth(appFirebase).verifyIdToken(token);
-    res.locals.uid = decodedToken.uid;
-    res.locals.token = decodedToken;
-    next();
+    if (!token) return null;
+    return await getAuth(appFirebase).verifyIdToken(token);
   } catch (error: any) {
     console.warn("[AUTH] Firebase ID token verification failed:", error?.code || error?.message);
+    return null;
+  }
+}
+
+async function requireStaffAuth(req: any, res: any, next: any) {
+  const decodedToken = await verifyFirebaseToken(req);
+  if (!decodedToken) {
     return res.status(401).json({ error: "Unauthorized: Invalid or expired Firebase ID token." });
   }
+  res.locals.uid = decodedToken.uid;
+  res.locals.token = decodedToken;
+  next();
+}
+
+// Middleware: require a valid signed-in customer session. Strictly enforces
+// that every order is placed by an authenticated account (no guest checkout).
+async function requireCustomerAuth(req: any, res: any, next: any) {
+  const decodedToken = await verifyFirebaseToken(req);
+  if (!decodedToken) {
+    return res.status(401).json({ error: "Please sign in to place an order." });
+  }
+  res.locals.uid = decodedToken.uid;
+  res.locals.token = decodedToken;
+  next();
+}
+
+// Resolve a staff member's role + permission map from Firestore. This mirrors
+// the single source of truth in firestore.rules (admins/{email}.role ->
+// roles/{role}.permissions). The admin role always passes. Returns null when the
+// caller is not a recognised active admin record or has no role.
+async function resolveStaffPermissions(email: string): Promise<{ role: string; permissions: Record<string, boolean> } | null> {
+  try {
+    if (!email) return null;
+    const adminSnap = await db.collection("admins").doc(email).get();
+    if (!adminSnap.exists) return null;
+    const adminData = adminSnap.data() || {};
+    const role = adminData.role;
+    if (!role) return null;
+    if (role === "admin") return { role: "admin", permissions: {} };
+    const roleSnap = await db.collection("roles").doc(role).get();
+    const permissions: Record<string, boolean> = roleSnap.exists ? (roleSnap.data()?.permissions || {}) : {};
+    return { role, permissions };
+  } catch (err: any) {
+    console.warn("[AUTH] Failed to resolve staff permissions:", err?.message);
+    return null;
+  }
+}
+
+// True when the caller's role holds the given permission (admin always passes).
+function staffHas(permCtx: { role: string; permissions: Record<string, boolean> } | null, perm: string): boolean {
+  if (!permCtx) return false;
+  if (permCtx.role === "admin") return true;
+  return permCtx.permissions[perm] === true;
 }
 
 // True when an env secret is unset or still a known dev placeholder. Webhook /
@@ -116,6 +160,47 @@ function isMissingOrPlaceholderSecret(value?: string): boolean {
   ];
   const upper = secret.toUpperCase();
   return placeholders.some((p) => upper.includes(p)) || /xxxx/i.test(secret);
+}
+
+// Stale pending orders (payment never received) are auto-cancelled so unpaid
+// orders don't pile up. Orders are marked cancelled (never deleted) so a late
+// webhook/verify success can still revive them instead of being lost.
+const ORDER_PENDING_TIMEOUT_MS = 10 * 60 * 1000;
+let lastSweepAt = 0;
+
+async function cancelStalePendingOrders(db: any) {
+  try {
+    const cutoff = new Date(Date.now() - ORDER_PENDING_TIMEOUT_MS).toISOString();
+    const snap = await db.collection("orders").where("createdAt", "<", cutoff).get();
+    let cancelled = 0;
+    for (const doc of snap.docs) {
+      const data = doc.data();
+      if (data.paymentStatus !== "pending") continue;
+      await doc.ref.update({
+        paymentStatus: "cancelled",
+        status: "cancelled",
+        updatedAt: new Date().toISOString(),
+        statusHistory: Array.isArray(data.statusHistory)
+          ? [...data.statusHistory, { status: "cancelled", at: new Date().toISOString(), reason: "payment timeout" }]
+          : [{ status: "cancelled", at: new Date().toISOString(), reason: "payment timeout" }]
+      });
+      cancelled++;
+    }
+    if (cancelled > 0) {
+      console.log(`[ORDER SWEEP] Cancelled ${cancelled} stale pending order(s).`);
+    }
+  } catch (err: any) {
+    console.error("[ORDER SWEEP] Error during sweep:", err.message);
+  }
+}
+
+// Opportunistic sweep used by request handlers; throttled to once per 2 minutes
+// so a busy server doesn't hammer Firestore with duplicate sweeps.
+async function sweepStaleOrdersLazy() {
+  const now = Date.now();
+  if (now - lastSweepAt < 2 * 60 * 1000) return;
+  lastSweepAt = now;
+  await cancelStalePendingOrders(db);
 }
 
 // Helper to trigger Shipday order creation
@@ -315,12 +400,9 @@ app.post("/api/menu", requireStaffAuth, async (req, res) => {
     const newItem = {
       ...item,
       id: itemId,
-      prepTime: item.prepTime || "15 mins",
       ingredients: item.ingredients || [],
       nutrition: item.nutrition || { protein: "0g", carbs: "0g", fat: "0g" },
       basePrice: item.basePrice !== undefined ? item.basePrice : item.price,
-      taxRate: item.taxRate || "Food Tax (15%)",
-      taxRatePercent: item.taxRatePercent !== undefined ? item.taxRatePercent : 15,
       isActive: item.isActive !== false,
       menuTiming: item.menuTiming || "All Day",
       categories: item.categories || [item.category],
@@ -362,11 +444,14 @@ app.get("/api/orders", requireStaffAuth, async (req, res) => {
   }
 });
 
-app.post("/api/orders", async (req, res) => {
+app.post("/api/orders", requireCustomerAuth, async (req, res) => {
   try {
     const orderData = req.body;
     if (!orderData.items || orderData.items.length === 0) {
       return res.status(400).json({ error: "Order items cannot be empty." });
+    }
+    if (orderData.userId && orderData.userId !== res.locals.uid) {
+      return res.status(403).json({ error: "Order account does not match your session." });
     }
 
     const orderId = orderData.id || `TX-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -401,9 +486,40 @@ app.post("/api/orders", async (req, res) => {
         return res.status(400).json({ error: `Menu item '${menuItemId}' is no longer available and cannot be ordered.` });
       }
       const menuData = menuDoc.data();
-      const unitPrice = Number(menuData.price) || 0;
+      let unitPrice = Number(menuData.price) || 0;
+      // If the customer chose a variation (size/amount), the authoritative unit
+      // price comes from that variation and availability is enforced per-variation.
+const menuVariations = Array.isArray(menuData.variations) ? menuData.variations : [];
+      const rawVariationId = line?.variationId || raw?.variationId;
+      const variationId = rawVariationId ? String(rawVariationId) : null;
+      let variation: any = null;
+      if (menuVariations.length > 0) {
+        // Variants are the real products: resolve the choice (explicit, else the
+        // marked main/default variation, else the first available one).
+        variation = variationId ? menuVariations.find(v => v && String(v.id) === String(variationId)) : null;
+        if (!variation) variation = menuVariations.find(v => v && v.isDefault && v.isAvailable !== false);
+        if (!variation) variation = menuVariations.find(v => v && v.isAvailable !== false);
+        if (!variation) {
+          return res.status(400).json({ error: `'${menuData.name || menuItemId}' has no available options right now.` });
+        }
+        if (variation.isAvailable === false) {
+          return res.status(400).json({ error: `'${variation.label || "That option"}' for '${menuData.name || menuItemId}' is currently unavailable.` });
+        }
+        const vPrice = Number(variation.price);
+        if (!isFinite(vPrice) || vPrice < 0) {
+          return res.status(400).json({ error: `'${variation.label || "That option"}' for '${menuData.name || menuItemId}' does not have a valid price.` });
+        }
+        unitPrice = vPrice;
+      } else if (variationId) {
+        return res.status(400).json({ error: `'${menuData.name || menuItemId}' no longer has selectable options.` });
+      }
       subtotal += unitPrice * quantity;
-      recomputedItems.push({ menuItem: { ...menuData, id: menuData.id || String(menuItemId) }, quantity });
+      const { variations: _unusedVariations, ...baseMenuData } = menuData;
+      const menuItemSnapshot: any = { ...baseMenuData, id: menuData.id || String(menuItemId), price: unitPrice };
+      if (variation) {
+        menuItemSnapshot.variation = { id: String(variation.id), label: variation.label || "" };
+      }
+      recomputedItems.push({ menuItem: menuItemSnapshot, quantity, variationId: variation ? String(variation.id) : null });
     }
 
     // Service tax and delivery fee come from the authoritative checkout settings.
@@ -460,7 +576,7 @@ app.post("/api/orders", async (req, res) => {
       updatedAt: nowISO,
       statusHistory: [{ status, at: nowISO }],
       paymentHistory: [{ paymentStatus, at: nowISO }],
-      userId: orderData.userId || null,
+      userId: res.locals.uid,
       serviceTax: serviceTax,
       flatFee: flatFee,
       promoCode: orderData.promoCode ? String(orderData.promoCode).trim().toUpperCase() : null,
@@ -481,10 +597,53 @@ app.patch("/api/orders/:id", requireStaffAuth, async (req, res) => {
     const { id } = req.params;
     const { status, paymentStatus, deliveryMinutes } = req.body;
 
+    const email = res.locals?.token?.email;
+    const permCtx = await resolveStaffPermissions(email);
+
+    // ---- Field-scoped authorization ----
+    // Each order permission may change ONLY its own field. This mirrors the
+    // strict separation enforced by firestore.rules for the client path, and
+    // closes the gap where this Admin-SDK write would otherwise bypass rules.
     const nowISO = new Date().toISOString();
     const existingRef = db.collection("orders").doc(id);
     const existingSnap = await existingRef.get();
     const existingData = existingSnap.exists ? existingSnap.data() : {};
+
+    const statusChanging = status !== undefined && status !== existingData.status;
+    const paymentChanging = paymentStatus !== undefined && paymentStatus !== existingData.paymentStatus;
+    const deliveryChanging = !!deliveryMinutes && deliveryMinutes !== existingData.deliveryMinutes;
+
+    // status transitions are authorized by permission, mirroring the field-
+    // scoped firestore.rules: cancel and KDS transitions each map to their own
+    // permission, and paymentStatus requires orders.markPaid.
+    if (statusChanging) {
+      const from = existingData.status;
+      const to = status;
+      let allowed = false;
+      let permLabel = "";
+      if (to === "cancelled") {
+        allowed = staffHas(permCtx, "orders.cancel");
+        permLabel = "cancel orders";
+      } else if (from === "pending" && to === "preparing") {
+        allowed = staffHas(permCtx, "orders.updateStatus") || staffHas(permCtx, "kds.startPreparing");
+        permLabel = "start preparing orders";
+      } else if (from === "preparing" && to === "ready") {
+        allowed = staffHas(permCtx, "orders.updateStatus") || staffHas(permCtx, "kds.markReady");
+        permLabel = "mark orders ready";
+      } else {
+        allowed = staffHas(permCtx, "orders.updateStatus");
+        permLabel = "update order status";
+      }
+      if (!allowed) {
+        return res.status(403).json({ error: `Forbidden: Your role does not have permission to ${permLabel}.` });
+      }
+    }
+    if (paymentChanging && !staffHas(permCtx, "orders.markPaid")) {
+      return res.status(403).json({ error: "Forbidden: Your role does not have permission to update payment status." });
+    }
+    if (deliveryChanging && !staffHas(permCtx, "orders.updateStatus")) {
+      return res.status(403).json({ error: "Forbidden: Your role does not have permission to update delivery details." });
+    }
 
     const updates: any = {
       updatedAt: nowISO,
@@ -492,15 +651,15 @@ app.patch("/api/orders/:id", requireStaffAuth, async (req, res) => {
       paymentHistory: Array.isArray(existingData.paymentHistory) ? existingData.paymentHistory : []
     };
 
-    if (status && status !== existingData.status) {
+    if (statusChanging) {
       updates.status = status;
       updates.statusHistory.push({ status, at: nowISO });
     }
-    if (paymentStatus && paymentStatus !== existingData.paymentStatus) {
+    if (paymentChanging) {
       updates.paymentStatus = paymentStatus;
       updates.paymentHistory.push({ paymentStatus, at: nowISO });
     }
-    if (deliveryMinutes) updates.deliveryMinutes = deliveryMinutes;
+    if (deliveryChanging) updates.deliveryMinutes = deliveryMinutes;
 
     if (Object.keys(updates).length > 0) {
       await existingRef.update(updates);
@@ -767,7 +926,7 @@ app.get("/api/chapa/callback", async (req, res) => {
 });
 
 // Chapa Initialize
-app.post("/api/chapa/initialize", async (req, res) => {
+app.post("/api/chapa/initialize", requireCustomerAuth, async (req, res) => {
   try {
     dotenv.config({ override: true });
     const { amount, email, first_name, last_name, phone_number, items } = req.body;
@@ -816,7 +975,7 @@ app.post("/api/chapa/initialize", async (req, res) => {
       })(),
       transactionRef: tx_ref,
       createdAt: new Date().toISOString(),
-      userId: req.body.userId || null,
+      userId: res.locals.uid,
       serviceTax: req.body.serviceTax || 0,
       flatFee: req.body.flatFee || 0,
       promoCode: req.body.promoCode || null,
@@ -918,6 +1077,7 @@ app.post("/api/chapa/initialize", async (req, res) => {
 // Callback verification from Chapa
 app.get("/api/chapa/verify/:txRef", async (req, res) => {
   console.log(`[CHAPA VERIFY] Verification request received for txRef: ${req.params.txRef}`);
+  void sweepStaleOrdersLazy();
   try {
     dotenv.config({ override: true });
     const { txRef } = req.params;
@@ -1056,32 +1216,6 @@ app.get("/api/customers", requireStaffAuth, async (req, res) => {
     res.json(customers);
   } catch (error: any) {
     res.status(500).json({ error: "Failed to fetch customers", details: error.message });
-  }
-});
-
-app.patch("/api/customers/:uid/points", requireStaffAuth, async (req, res) => {
-  try {
-    const { uid } = req.params;
-    const { delta } = req.body;
-
-    if (typeof delta !== "number" || isNaN(delta)) {
-      return res.status(400).json({ error: "A numeric 'delta' is required to adjust loyalty points." });
-    }
-
-    const userRef = db.collection("users").doc(uid);
-    const snap = await userRef.get();
-    if (!snap.exists) {
-      return res.status(404).json({ error: "Customer account not found." });
-    }
-
-    const current = Number(snap.data()?.points) || 0;
-    const adjusted = Math.max(0, current + delta);
-
-    await userRef.set({ points: adjusted }, { merge: true });
-
-    res.json({ success: true, points: adjusted, delta });
-  } catch (error: any) {
-    res.status(500).json({ error: "Failed to adjust loyalty points", details: error.message });
   }
 });
 
@@ -1394,6 +1528,8 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[SERVER] Ready! on http://localhost:${PORT}`);
+    setInterval(() => { void cancelStalePendingOrders(db); }, 2 * 60 * 1000).unref();
+    console.log("[ORDER SWEEP] Stale-order sweep interval started (every 2 min).");
   });
 }
 

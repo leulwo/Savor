@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect } from "react";
 import { Routes, Route, useNavigate, useParams, Link, useLocation } from "react-router-dom";
-import { MenuItem, Order, OrderItem } from "./types";
+import { MenuItem, MenuItemVariation, Order, OrderItem } from "./types";
 
 import AdminPortal from "./AdminPortal";
 import {
@@ -13,7 +13,6 @@ import {
   ShoppingCart,
   X,
   CheckCircle,
-  ArrowRight,
   ChevronRight,
   ClipboardList,
   Trash2,
@@ -32,56 +31,48 @@ import {
   Store,
   ShoppingBag
 } from "lucide-react";
-import { db, auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged } from "./firebase";
+import { db, auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged, authedFetch } from "./firebase";
 import { collection, onSnapshot, doc, query, where, setDoc, getDoc, updateDoc } from "firebase/firestore";
 import { APIProvider } from "@vis.gl/react-google-maps";
 import GoogleMapsAddressInput from "./GoogleMapsAddressInput";
 import Chatbot from "./components/Chatbot";
 import ItemReviews from "./components/ItemReviews";
 import { confirmDialog, toastError, toastSuccess, toastInfo, toastWarning } from "./notify";
+import { normalizeGalleryImages } from "./utils/galleries";
+import { parseHHMMToMinutes, scheduleAccepts, formatTimeHHMM } from "./utils/schedule";
 // @ts-ignore
 import chapaLogoImg from "./images.png";
 
 const API_KEY = process.env.GOOGLE_MAPS_PLATFORM_KEY || (import.meta as any).env?.VITE_GOOGLE_MAPS_PLATFORM_KEY || "";
 
-// ---- Operating schedule ----
-// Orders are accepted between openTime and (closeTime - prepTimeMinutes) so
-// the kitchen can finish preparing existing orders before closing.
-function parseHHMMToMinutes(value: string | undefined | null): number | null {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(String(value ?? ""));
-  if (!m) return null;
-  const mins = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
-  return mins >= 0 && mins < 1440 ? mins : null;
+// ---- Product variations (e.g. drink sizes) ----
+function itemVariations(item: MenuItem): MenuItemVariation[] {
+  return Array.isArray(item.variations) ? item.variations.filter(v => v && typeof v === "object") : [];
 }
-
-function scheduleAccepts(s: { scheduleEnabled?: boolean; openTime?: string; closeTime?: string; prepTimeMinutes?: number; isOpen?: boolean }, now: Date = new Date()):
-  { accepting: boolean; reason?: "notOpen" | "stopOrders" } {
-  if (!s) return { accepting: true };
-  if (!s.scheduleEnabled) return { accepting: !!s.isOpen };
-  const open = parseHHMMToMinutes(s.openTime);
-  const close = parseHHMMToMinutes(s.closeTime);
-  if (open === null || close === null) return { accepting: !!s.isOpen };
-  const prep = Math.max(0, Number(s.prepTimeMinutes) || 30);
-  const cutoff = Math.min(1440, close - prep);
-  const nowMin = now.getHours() * 60 + now.getMinutes();
-  if (open < close) {
-    if (nowMin >= open && nowMin < cutoff) return { accepting: true };
-    return { accepting: false, reason: nowMin < open ? "notOpen" : "stopOrders" };
+function isVariationAvailable(v: MenuItemVariation): boolean {
+  return v.isAvailable !== false;
+}
+function variationPrice(v: MenuItemVariation): number {
+  const p = Number(v?.price);
+  return isFinite(p) && p >= 0 ? p : 0;
+}
+function menuDisplayPrice(item: MenuItem): string {
+  const vs = itemVariations(item);
+  if (vs.length === 0) {
+    return `${(Number(item.price) || 0).toFixed(2)} ETB`;
   }
-  // Overnight schedule (e.g. 18:00 → 02:00).
-  if (nowMin >= open || nowMin < cutoff) return { accepting: true };
-  return { accepting: false, reason: nowMin >= cutoff ? "stopOrders" : "notOpen" };
+  // The marked default (main) variation is the headline product when available.
+  const def = vs.find(v => v.isDefault);
+  if (def && isVariationAvailable(def)) {
+    return `${variationPrice(def).toFixed(2)} ETB`;
+  }
+  const available = vs.filter(isVariationAvailable);
+  if (available.length === 0) return "Unavailable";
+  return `From ${Math.min(...available.map(variationPrice)).toFixed(2)} ETB`;
 }
 
-function formatTimeHHMM(value: string | undefined | null): string {
-  const mins = parseHHMMToMinutes(value);
-  if (mins === null) return "";
-  const hours24 = Math.floor(mins / 60);
-  const minutes = mins % 60;
-  const period = hours24 >= 12 ? "PM" : "AM";
-  const hours12 = hours24 % 12 === 0 ? 12 : hours24 % 12;
-  return minutes === 0 ? `${hours12} ${period}` : `${hours12}:${String(minutes).padStart(2, "0")} ${period}`;
-}
+// ---- Operating schedule ----
+// Schedule helpers (parseHHMMToMinutes, scheduleAccepts, formatTimeHHMM) live in utils/schedule.ts.
 
 const loadChapaScript = (): Promise<boolean> => {
   if (typeof window !== "undefined" && (window as any).ChapaCheckout) {
@@ -157,7 +148,6 @@ export function MainApp() {
 
   // Auth state
   const [user, setUser] = useState<any>(null);
-  const [isGuest, setIsGuest] = useState(false);
   const [userProfile, setUserProfile] = useState<any>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
@@ -220,6 +210,7 @@ export function MainApp() {
   const [expandedProduct, setExpandedProduct] = useState<MenuItem | null>(null);
   const [expandedQuantity, setExpandedQuantity] = useState(1);
   const [activeImageIndex, setActiveImageIndex] = useState(0);
+  const [expandedVariationId, setExpandedVariationId] = useState<string | null>(null);
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -228,7 +219,14 @@ export function MainApp() {
     const match = location.pathname.match(/^\/food\/(.+)/);
     if (match) {
       const food = menu.find(item => item.id === match[1]);
-      if (food) setExpandedProduct(food);
+      if (food) {
+        setExpandedProduct(food);
+        setExpandedQuantity(1);
+        setActiveImageIndex(0);
+        const vs = itemVariations(food);
+        const preselect = vs.find(v => v.isDefault && isVariationAvailable(v)) || vs.find(isVariationAvailable);
+        setExpandedVariationId(preselect ? String(preselect.id) : null);
+      }
     } else if (expandedProduct && location.pathname === "/") {
       setExpandedProduct(null);
     }
@@ -236,6 +234,7 @@ export function MainApp() {
 
   const handleCloseProductModal = () => {
     setExpandedProduct(null);
+    setExpandedVariationId(null);
     navigate("/");
   };
 
@@ -254,6 +253,7 @@ export function MainApp() {
     scheduledStepsMinutes: 15
   });
   const [now, setNow] = useState(() => new Date());
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [globalSettings, setGlobalSettings] = useState<any>(null);
   const [subscribeEmail, setSubscribeEmail] = useState("");
   const [subscribeStatus, setSubscribeStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
@@ -293,17 +293,27 @@ export function MainApp() {
       })
       .then(data => {
         if (!cancelled) {
-          setCheckoutSettings({
-            serviceTaxPercent: data.serviceTaxPercent ?? 15,
-            flatFeeETB: data.flatFeeETB ?? 0,
-            isOpen: data.isOpen ?? true,
-            scheduleEnabled: data.scheduleEnabled ?? false,
-            openTime: data.openTime ?? "09:00",
-            closeTime: data.closeTime ?? "22:00",
-            enableCOD: data.enableCOD ?? true,
-            prepTimeMinutes: data.prepTimeMinutes ?? 30,
-            scheduledStepsMinutes: data.scheduledStepsMinutes ?? 15
-          });
+          // The fetch is only schedule-authoritative when the server actually
+          // includes the schedule fields. Older server builds omit them, so we
+          // don't downgrade/flag-loaded then — the live checkout listener
+          // (admins) or the next fetch will provide them. This prevents the
+          // "closed for a few seconds after refresh" flash.
+          const hasSchedule = Object.prototype.hasOwnProperty.call(data, "scheduleEnabled");
+          setCheckoutSettings(prev => ({
+            ...prev,
+            serviceTaxPercent: data.serviceTaxPercent ?? prev.serviceTaxPercent ?? 15,
+            flatFeeETB: data.flatFeeETB ?? prev.flatFeeETB ?? 0,
+            isOpen: data.isOpen ?? prev.isOpen ?? true,
+            enableCOD: data.enableCOD ?? prev.enableCOD ?? true,
+            prepTimeMinutes: data.prepTimeMinutes ?? prev.prepTimeMinutes ?? 30,
+            scheduledStepsMinutes: data.scheduledStepsMinutes ?? prev.scheduledStepsMinutes ?? 15,
+            ...(hasSchedule ? {
+              scheduleEnabled: data.scheduleEnabled ?? prev.scheduleEnabled ?? false,
+              openTime: data.openTime ?? prev.openTime ?? "09:00",
+              closeTime: data.closeTime ?? prev.closeTime ?? "22:00"
+            } : {})
+          }));
+          if (hasSchedule) setSettingsLoaded(true);
         }
       })
       .catch(error => console.error("Failed to fetch checkout settings", error));
@@ -331,6 +341,7 @@ export function MainApp() {
           prepTimeMinutes: data.prepTimeMinutes ?? 30,
           scheduledStepsMinutes: data.scheduledStepsMinutes ?? 15
         });
+        setSettingsLoaded(true);
       }
     }, (error) => {
       console.error("Failed to subscribe to checkout settings", error);
@@ -350,7 +361,8 @@ export function MainApp() {
   }, []);
 
   const scheduleStatus = scheduleAccepts(checkoutSettings, now);
-  const isOpen = checkoutSettings.scheduleEnabled ? scheduleStatus.accepting : !!checkoutSettings.isOpen;
+  // Treat as open until real settings arrive so the closed banner/buttons never flash during load.
+  const isOpen = !settingsLoaded ? true : (checkoutSettings.scheduleEnabled ? scheduleStatus.accepting : !!checkoutSettings.isOpen);
 
   const [activeOrderId, setActiveOrderId] = useState<string | null>(() => {
     const params = new URLSearchParams(window.location.search);
@@ -628,21 +640,32 @@ export function MainApp() {
     }
   };
 
-  const addToCart = (item: MenuItem) => {
+  const addToCart = (item: MenuItem, variation?: MenuItemVariation) => {
+    const variationId = variation ? String(variation.id) : undefined;
+    const unitPrice = variation ? variationPrice(variation) : (Number(item.price) || 0);
+    const snapshot: OrderItem["menuItem"] = {
+      ...item,
+      price: unitPrice,
+      variation: variation ? { id: String(variation.id), label: variation.label || "" } : undefined
+    };
     setCart(prev => {
-      const existing = prev.find(i => i.menuItem.id === item.id);
+      const existing = prev.find(i => i.menuItem.id === item.id && (i.variationId ?? null) === (variationId ?? null));
       if (existing) {
-        return prev.map(i => i.menuItem.id === item.id ? { ...i, quantity: i.quantity + 1 } : i);
+        return prev.map(i =>
+          (i.menuItem.id === item.id && (i.variationId ?? null) === (variationId ?? null))
+            ? { ...i, quantity: i.quantity + 1 }
+            : i
+        );
       }
-      return [...prev, { menuItem: item, quantity: 1 }];
+      return [...prev, { menuItem: snapshot, quantity: 1, variationId }];
     });
     // Removed automatic cart sidebar popup to wait until user clicks explicitly
   };
 
-  const updateCartQuantity = (itemId: string, delta: number) => {
+  const updateCartQuantity = (itemId: string, variationId: string | null | undefined, delta: number) => {
     setCart(prev => {
       return prev.map(i => {
-        if (i.menuItem.id === itemId) {
+        if (i.menuItem.id === itemId && (i.variationId ?? null) === (variationId ?? null)) {
           const nextQty = i.quantity + delta;
           return nextQty > 0 ? { ...i, quantity: nextQty } : i;
         }
@@ -651,8 +674,8 @@ export function MainApp() {
     });
   };
 
-  const removeFromCart = (itemId: string) => {
-    setCart(prev => prev.filter(i => i.menuItem.id !== itemId));
+  const removeFromCart = (itemId: string, variationId?: string | null) => {
+    setCart(prev => prev.filter(i => !(i.menuItem.id === itemId && (i.variationId ?? null) === (variationId ?? null))));
   };
 
   const cartTotal = cart.reduce((acc, item) => acc + (item.menuItem.price * item.quantity), 0);
@@ -758,7 +781,7 @@ export function MainApp() {
 
     try {
       if (paymentMethod === 'chapa') {
-        const res = await fetch("/api/chapa/initialize", {
+        const res = await authedFetch("/api/chapa/initialize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -774,7 +797,7 @@ export function MainApp() {
             specialInstructions,
             fulfillmentType,
             scheduledFor: finalScheduledFor,
-            userId: user?.uid || null,
+            userId: user.uid,
             serviceTax: taxAmount,
             flatFee: deliveryFee,
             promoCode: appliedPromo?.code || null,
@@ -856,7 +879,7 @@ export function MainApp() {
         }
       } else {
         // Save order as pending in DB directly for Cash
-        const res = await fetch("/api/orders", {
+        const res = await authedFetch("/api/orders", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -874,7 +897,7 @@ export function MainApp() {
             paymentMethod: "cash",
             paymentStatus: "pending",
             status: "pending",
-            userId: user?.uid,
+            userId: user.uid,
             serviceTax: taxAmount,
             flatFee: deliveryFee,
             promoCode: appliedPromo?.code,
@@ -933,7 +956,11 @@ export function MainApp() {
     const normalizedSearchQuery = searchQuery.toLowerCase();
     const matchesSearch = (item.name || '').toLowerCase().includes(normalizedSearchQuery) ||
       (item.description || '').toLowerCase().includes(normalizedSearchQuery);
-    const isCurrentlyActive = item.isActive !== false;
+    // Varied items are listed whenever at least one variation is buyable; the
+    // generic isActive toggle only applies to items without variations.
+    const isCurrentlyActive = itemVariations(item).length > 0
+      ? itemVariations(item).some(v => isVariationAvailable(v))
+      : item.isActive !== false;
     return matchesCategory && matchesSearch && isCurrentlyActive && isItemCurrentlyAvailable(item);
   });
 
@@ -958,7 +985,7 @@ export function MainApp() {
     );
   }
 
-  if (!user && !isGuest) {
+  if (!user) {
     return (
       <div className="min-h-screen bg-stone-50 flex flex-col items-center justify-center px-4 py-12">
         <div className="bg-white p-8 md:p-10 rounded-3xl shadow-xl max-w-md w-full text-center border border-stone-200">
@@ -970,7 +997,7 @@ export function MainApp() {
             </div>
           )}
           <h1 className="font-serif text-3xl font-bold text-stone-900 mb-2">Welcome to {globalSettings?.restaurantName || "SAVORY"}</h1>
-          <p className="text-stone-500 mb-6 text-sm">Sign in to sync your profile and rewards, or browse as a guest.</p>
+          <p className="text-stone-500 mb-6 text-sm">Sign in to place your order. You can also create an account anytime — it takes less than a minute.</p>
 
           <div className="space-y-3">
             <button
@@ -984,14 +1011,6 @@ export function MainApp() {
                 <User className="w-5 h-5" />
               )}
               <span>{loginLoading ? "Signing in..." : "Sign in with Google"}</span>
-            </button>
-
-            <button
-              onClick={() => setIsGuest(true)}
-              className="w-full flex items-center justify-center space-x-2 bg-stone-100 hover:bg-amber-600 hover:text-white text-stone-800 p-3.5 rounded-xl font-bold transition-all cursor-pointer border border-stone-300 text-sm"
-            >
-              <span>Browse Menu as Guest</span>
-              <ArrowRight className="w-4 h-4" />
             </button>
           </div>
 
@@ -1223,8 +1242,8 @@ export function MainApp() {
                                   </div>
                                   <p className="text-xs md:text-sm text-stone-600 mt-1 font-serif italic line-clamp-2">{dish.description}</p>
                                   <div className="flex space-x-2 mt-2 font-sans items-center">
-                                    {dish.popular && <span className="text-[10px] font-bold text-amber-700 uppercase tracking-widest">★ Popular</span>}
-                                    {dish.prepTime && <span className="text-[10px] text-stone-500 uppercase tracking-widest">{dish.popular ? '• ' : ''}{dish.prepTime}</span>}
+                                    {dish.popular && <span className="text-[10px] font-bold text-amber-700 uppercase tracking-widest">Popular</span>}
+                                    
                                     {dish.menuTiming && dish.menuTiming !== "All Day" && (
                                       <span className="text-[10px] text-emerald-700 uppercase tracking-widest">• {dish.menuTiming}{dish.timingFrom && dish.timingTo ? ` (Available ${dish.timingFrom}–${dish.timingTo})` : ''}</span>
                                     )}
@@ -1232,13 +1251,17 @@ export function MainApp() {
                                 </div>
                               </div>
                               <div className="pl-0 sm:pl-4 mt-3 sm:mt-0 shrink-0 flex flex-row sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto">
-                                <span className="font-mono text-base md:text-lg font-bold text-stone-900 group-hover:text-amber-700 transition-colors">{dish.price.toFixed(2)} ETB</span>
+                                <span className="font-mono text-base md:text-lg font-bold text-stone-900 group-hover:text-amber-700 transition-colors">{menuDisplayPrice(dish)}</span>
                                 <button
                                   disabled={!isOpen}
                                   onClick={(e) => {
                                     e.preventDefault();
                                     e.stopPropagation();
-                                    addToCart(dish);
+                                    if (itemVariations(dish).length > 0) {
+                                      navigate(`/food/${dish.id}`);
+                                    } else {
+                                      addToCart(dish);
+                                    }
                                   }}
                                   className={`mt-0 sm:mt-2 text-[10px] font-bold uppercase tracking-widest px-4 py-1.5 rounded transition-colors ${isOpen
                                     ? 'bg-stone-200 text-stone-800 hover:bg-amber-600 hover:text-white'
@@ -1279,8 +1302,8 @@ export function MainApp() {
                                   </div>
                                   <p className="text-xs md:text-sm text-stone-600 mt-1 font-serif italic line-clamp-2">{dish.description}</p>
                                   <div className="flex space-x-2 mt-2 font-sans items-center">
-                                    {dish.popular && <span className="text-[10px] font-bold text-amber-700 uppercase tracking-widest">★ Popular</span>}
-                                    {dish.prepTime && <span className="text-[10px] text-stone-500 uppercase tracking-widest">{dish.popular ? '• ' : ''}{dish.prepTime}</span>}
+                                    {dish.popular && <span className="text-[10px] font-bold text-amber-700 uppercase tracking-widest">Popular</span>}
+                                    
                                     {dish.menuTiming && dish.menuTiming !== "All Day" && (
                                       <span className="text-[10px] text-emerald-700 uppercase tracking-widest">• {dish.menuTiming}{dish.timingFrom && dish.timingTo ? ` (Available ${dish.timingFrom}–${dish.timingTo})` : ''}</span>
                                     )}
@@ -1288,13 +1311,17 @@ export function MainApp() {
                                 </div>
                               </div>
                               <div className="pl-0 sm:pl-4 mt-3 sm:mt-0 shrink-0 flex flex-row sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto">
-                                <span className="font-mono text-base md:text-lg font-bold text-stone-900 group-hover:text-amber-700 transition-colors">{dish.price.toFixed(2)} ETB</span>
+                                <span className="font-mono text-base md:text-lg font-bold text-stone-900 group-hover:text-amber-700 transition-colors">{menuDisplayPrice(dish)}</span>
                                 <button
                                   disabled={!isOpen}
                                   onClick={(e) => {
                                     e.preventDefault();
                                     e.stopPropagation();
-                                    addToCart(dish);
+                                    if (itemVariations(dish).length > 0) {
+                                      navigate(`/food/${dish.id}`);
+                                    } else {
+                                      addToCart(dish);
+                                    }
                                   }}
                                   className={`mt-0 sm:mt-2 text-[10px] font-bold uppercase tracking-widest px-4 py-1.5 rounded transition-colors ${isOpen
                                     ? 'bg-stone-200 text-stone-800 hover:bg-amber-600 hover:text-white'
@@ -1357,21 +1384,24 @@ export function MainApp() {
                 ) : (
                   !isCheckingOut ? (
                     cart.map((item) => (
-                      <div key={item.menuItem.id} className="flex justify-between items-center pb-4 border-b border-stone-100 animate-fade-in">
+                      <div key={`${item.menuItem.id}-${item.variationId || ''}`} className="flex justify-between items-center pb-4 border-b border-stone-100 animate-fade-in">
                         <div className="flex items-center space-x-3 truncate">
                           <img src={item.menuItem.image} alt={item.menuItem.name} className="w-12 h-12 rounded-lg object-cover bg-stone-100 border border-stone-200 flex-shrink-0" />
                           <div className="truncate">
                             <h4 className="font-serif font-bold text-stone-950 text-sm leading-tight">{item.menuItem.name}</h4>
+                            {item.menuItem.variation?.label && (
+                              <span className="text-[10px] text-amber-700 font-semibold block mt-0.5">{item.menuItem.variation.label}</span>
+                            )}
                             <span className="text-xs text-amber-700 font-semibold font-mono block mt-1">{item.menuItem.price.toFixed(2)} ETB</span>
                           </div>
                         </div>
                         <div className="flex items-center space-x-2.5">
                           <div className="flex items-center border border-stone-200 rounded-lg bg-stone-50">
-                            <button onClick={() => updateCartQuantity(item.menuItem.id, -1)} className="px-2 py-1 text-stone-500 hover:text-stone-900 font-bold cursor-pointer">-</button>
+                            <button onClick={() => updateCartQuantity(item.menuItem.id, item.variationId, -1)} className="px-2 py-1 text-stone-500 hover:text-stone-900 font-bold cursor-pointer">-</button>
                             <span className="px-2 text-xs font-bold font-mono text-stone-800">{item.quantity}</span>
-                            <button onClick={() => updateCartQuantity(item.menuItem.id, 1)} className="px-2 py-1 text-stone-500 hover:text-stone-900 font-bold cursor-pointer">+</button>
+                            <button onClick={() => updateCartQuantity(item.menuItem.id, item.variationId, 1)} className="px-2 py-1 text-stone-500 hover:text-stone-900 font-bold cursor-pointer">+</button>
                           </div>
-                          <button onClick={() => removeFromCart(item.menuItem.id)} className="text-stone-400 hover:text-rose-600 p-1 cursor-pointer">
+                          <button onClick={() => removeFromCart(item.menuItem.id, item.variationId)} className="text-stone-400 hover:text-rose-600 p-1 cursor-pointer">
                             <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
@@ -1867,6 +1897,9 @@ export function MainApp() {
                           ) : (
                             item.menuItem?.name || "Gourmet Dish"
                           )}
+                          {item.menuItem?.variation?.label && (
+                            <span className="text-stone-400"> ({item.menuItem.variation.label})</span>
+                          )}
                         </span>
                         <span className="font-mono text-stone-950 font-medium">{((item.menuItem?.price || 0) * item.quantity).toFixed(2)} ETB</span>
                       </div>
@@ -2214,6 +2247,9 @@ export function MainApp() {
                                       ) : (
                                         item.menuItem?.name || "Dish"
                                       )}
+                                      {item.menuItem?.variation?.label && (
+                                        <span className="text-stone-400"> ({item.menuItem.variation.label})</span>
+                                      )}
                                     </span>
                                     <span className="font-mono font-medium text-stone-900">{((item.menuItem?.price || 0) * item.quantity).toFixed(2)} ETB</span>
                                   </div>
@@ -2346,7 +2382,7 @@ export function MainApp() {
               onClick={e => e.stopPropagation()}
             >
               {(() => {
-                const allImages = [expandedProduct.image, ...(expandedProduct.galleryImages || [])];
+                const allImages = [expandedProduct.image, ...normalizeGalleryImages(expandedProduct.galleryImages)];
                 return (
                   <div className="relative h-64 md:h-80 w-full bg-stone-100 flex flex-col group">
                     <img
@@ -2377,7 +2413,16 @@ export function MainApp() {
                 );
               })()}
 
-              <div className="p-6 md:p-8 space-y-6">
+              {(() => {
+                const modalVariations = itemVariations(expandedProduct);
+                const selectedVariation =
+                  expandedVariationId
+                    ? modalVariations.find(v => String(v.id) === String(expandedVariationId)) || null
+                    : null;
+                const modalUnitPrice = selectedVariation ? variationPrice(selectedVariation) : (Number(expandedProduct.price) || 0);
+                const anyAvailable = modalVariations.length === 0 || modalVariations.some(v => isVariationAvailable(v));
+                return (
+                  <div className="p-6 md:p-8 space-y-6">
                 <div>
                   <div className="flex flex-wrap gap-2 mb-3">
                     {expandedProduct.popular && (
@@ -2391,10 +2436,6 @@ export function MainApp() {
                         {sticker}
                       </span>
                     ))}
-                    <span className="bg-stone-100 text-stone-600 text-[10px] font-bold px-2 py-0.5 rounded-md font-mono tracking-wide uppercase shadow-sm border border-stone-200">
-                      <Clock className="w-3 h-3 inline mr-1 text-amber-600" />
-                      {expandedProduct.prepTime || '15 mins'}
-                    </span>
                   </div>
 
                   <div className="flex justify-between items-start gap-4">
@@ -2402,7 +2443,7 @@ export function MainApp() {
                       {expandedProduct.name}
                     </h2>
                     <div className="text-right shrink-0">
-                      <span className="font-mono text-xl font-bold text-amber-700 block">{expandedProduct.price.toFixed(2)} ETB</span>
+                      <span className="font-mono text-xl font-bold text-amber-700 block">{modalUnitPrice.toFixed(2)} ETB</span>
                     </div>
                   </div>
 
@@ -2410,6 +2451,42 @@ export function MainApp() {
                     {expandedProduct.description}
                   </p>
                 </div>
+
+                {modalVariations.length > 0 && (
+                  <div className="space-y-2">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-stone-900">Choose an Option</h4>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {modalVariations.map(v => {
+                        const available = isVariationAvailable(v);
+                        const selected = !!selectedVariation && String(selectedVariation.id) === String(v.id);
+                        return (
+                          <button
+                            key={v.id}
+                            type="button"
+                            disabled={!available}
+                            onClick={() => setExpandedVariationId(String(v.id))}
+                            className={`relative text-left border rounded-xl px-3 py-2.5 transition-all ${!available
+                              ? 'border-stone-200 bg-stone-50 opacity-60 cursor-not-allowed'
+                              : selected
+                                ? 'border-amber-500 bg-amber-50 ring-1 ring-amber-500/30'
+                                : 'border-stone-300 bg-white hover:border-amber-400 hover:bg-amber-50/40 cursor-pointer'
+                              }`}
+                          >
+                            
+                            <span className={`block text-sm font-bold ${selected ? 'text-amber-900' : 'text-stone-900'}`}>{v.label}</span>
+                            <span className="block text-[11px] font-mono font-semibold text-amber-700 mt-0.5">{variationPrice(v).toFixed(2)} ETB</span>
+                            {!available && (
+                              <span className="absolute bottom-0 inset-x-0 rounded-b-xl bg-rose-50 text-rose-500 text-[8px] font-bold text-center py-0.5 uppercase tracking-wide">Unavailable</span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {!anyAvailable && (
+                      <p className="text-[11px] text-rose-600 font-semibold">All options are currently unavailable.</p>
+                    )}
+                  </div>
+                )}
 
                 {expandedProduct.ingredients && expandedProduct.ingredients.length > 0 && (
                   <div className="space-y-2">
@@ -2443,21 +2520,19 @@ export function MainApp() {
                   </div>
 
                   <button
-                    disabled={!isOpen}
+                    disabled={!isOpen || !anyAvailable}
                     onClick={() => {
-                      addToCart(expandedProduct);
-                      if (expandedQuantity > 1) {
-                        for (let i = 1; i < expandedQuantity; i++) {
-                          addToCart(expandedProduct);
-                        }
+                      const variation = selectedVariation || undefined;
+                      for (let i = 0; i < expandedQuantity; i++) {
+                        addToCart(expandedProduct, variation);
                       }
                       handleCloseProductModal();
                     }}
-                    className={`flex-grow font-bold py-3.5 px-6 rounded-xl transition-colors w-full flex justify-between items-center text-sm tracking-wide shadow-md ${isOpen ? 'bg-stone-900 hover:bg-amber-600 text-white cursor-pointer' : 'bg-stone-300 text-stone-500 cursor-not-allowed'
+                    className={`flex-grow font-bold py-3.5 px-6 rounded-xl transition-colors w-full flex justify-between items-center text-sm tracking-wide shadow-md ${isOpen && anyAvailable ? 'bg-stone-900 hover:bg-amber-600 text-white cursor-pointer' : 'bg-stone-300 text-stone-500 cursor-not-allowed'
                       }`}
                   >
-                    <span className="uppercase">{isOpen ? 'Add to Order' : 'Closed'}</span>
-                    {isOpen && <span className="font-mono bg-white/20 px-2 py-1 rounded">{(expandedProduct.price * expandedQuantity).toFixed(2)} ETB</span>}
+                    <span className="uppercase">{isOpen ? (anyAvailable ? 'Add to Order' : 'Unavailable') : 'Closed'}</span>
+                    {isOpen && anyAvailable && <span className="font-mono bg-white/20 px-2 py-1 rounded">{(modalUnitPrice * expandedQuantity).toFixed(2)} ETB</span>}
                   </button>
                 </div>
 
@@ -2465,7 +2540,9 @@ export function MainApp() {
                 <div className="mt-8">
                   <ItemReviews menuItemId={expandedProduct.id} user={user} />
                 </div>
-              </div>
+                  </div>
+                );
+              })()}
             </div>
           </div>
         )}

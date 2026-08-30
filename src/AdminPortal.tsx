@@ -6,17 +6,17 @@ import OrderList from "./components/OrderList";
 import CategoryManager from "./components/CategoryManager";
 import GlobalSettingsPanel from "./components/GlobalSettingsPanel";
 import AnalyticsDashboard from "./components/AnalyticsDashboard";
+import OverviewDashboard from "./components/OverviewDashboard";
 import AdminChat from "./components/AdminChat";
 import ReservationManager from "./components/ReservationManager";
 import KitchenDisplaySystem from "./components/KitchenDisplaySystem";
-import TeamManager from "./components/TeamManager";
 import PromoManager from "./components/PromoManager";
-import RoleManager from "./components/RoleManager";
+import TeamAndRoles from "./components/TeamAndRoles";
 import CustomerManager from "./components/CustomerManager";
 import ReportsManager from "./components/ReportsManager";
 import AuditLog from "./components/AuditLog";
 import CommandPalette from "./components/CommandPalette";
-import { Utensils, Settings, LogOut, LayoutDashboard, MessageSquare, CalendarDays, ChefHat, ShoppingBag, Percent, Users, FileText, History, Search } from "lucide-react";
+import { Utensils, Settings, LogOut, LayoutDashboard, MessageSquare, CalendarDays, ChefHat, ShoppingBag, Percent, Users, FileText, History, Search, BarChart3 } from "lucide-react";
 import { db, auth, authedFetch, googleProvider } from "./firebase";
 import { collection, query, where, orderBy, onSnapshot, doc, getDoc } from "firebase/firestore";
 import { PermissionMap, hasPermission, getDefaultRole, seedDefaultRoles } from "./permissions";
@@ -86,7 +86,7 @@ export default function AdminPortal() {
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [customers, setCustomers] = useState<UserProfile[]>([]);
-  const [activeTab, setActiveTab] = useState<'overview' | 'menu' | 'orders' | 'chat' | 'reservations' | 'kds' | 'marketing' | 'settings' | 'customers' | 'reports' | 'audit'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'analytics' | 'menu' | 'orders' | 'chat' | 'reservations' | 'kds' | 'marketing' | 'settings' | 'customers' | 'reports' | 'audit'>('overview');
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [totalUnread, setTotalUnread] = useState(0);
 
@@ -551,22 +551,19 @@ export default function AdminPortal() {
           <ErrorBoundary fallbackTitle="Admin Panel Module Error">
             {activeTab === 'overview' && can('analytics.view') && (
               <div className="animate-fade-in max-w-5xl mx-auto space-y-8">
-                <AnalyticsDashboard can={can} />
+                <AnalyticsDashboard />
               </div>
             )}
 
             {activeTab === 'settings' && (can('team.view') || can('settings.view')) && (
               <div className="space-y-8 animate-fade-in max-w-4xl mx-auto">
                 {can('team.view') && (
-                  <>
-                    <TeamManager
-                      currentUserEmail={adminUser?.email || ''}
-                      userRole={adminRole}
-                      can={can}
-                      actor={actor}
-                    />
-                    <RoleManager can={can} />
-                  </>
+                  <TeamAndRoles
+                    currentUserEmail={adminUser?.email || ''}
+                    userRole={adminRole}
+                    can={can}
+                    actor={actor}
+                  />
                 )}
                 {can('settings.view') && (
                   <GlobalSettingsPanel can={can} actor={actor} />
@@ -639,7 +636,7 @@ export default function AdminPortal() {
 
             {activeTab === 'chat' && can('chat.view') && (
               <div className="animate-fade-in max-w-5xl mx-auto h-[70vh]">
-                <AdminChat can={can} />
+                <AdminChat can={can} currentStaffName={adminUser?.displayName || ''} />
               </div>
             )}
 

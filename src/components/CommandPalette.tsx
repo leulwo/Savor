@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { 
   Search, ShoppingBag, Utensils, Users, LayoutDashboard, Settings, 
-  History, CalendarDays, ChefHat, Percent, MessageSquare, ArrowRight, X, Sparkles
+  History, CalendarDays, ChefHat, Percent, MessageSquare, ArrowRight, X, Sparkles, BarChart3
 } from "lucide-react";
 import { Order, MenuItem, UserProfile } from "../types";
 
@@ -62,6 +62,7 @@ export default function CommandPalette({
 
   const quickNavItems = [
     { label: "Dashboard Overview", tab: "overview", icon: LayoutDashboard, category: "Navigation" },
+    { label: "Revenue Analytics", tab: "analytics", icon: BarChart3, category: "Navigation" },
     { label: "Orders Management", tab: "orders", icon: ShoppingBag, category: "Navigation" },
     { label: "Menu & Categories", tab: "menu", icon: Utensils, category: "Navigation" },
     { label: "Kitchen Display (KDS)", tab: "kds", icon: ChefHat, category: "Navigation" },

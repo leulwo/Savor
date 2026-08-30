@@ -35,18 +35,20 @@ export default function CategoryManager({ can, permissions }: CategoryManagerPro
   const handleAddCategory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
-    setLoading(true);
 
-    try {
-      const id = name.trim().toLowerCase().replace(/\s+/g, '-');
-      await setDoc(doc(db, "categories", id), { name: name.trim() });
-      await fetchCategories();
-      setName("");
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setLoading(false);
-    }
+    confirmDialog(`Add the new category "${name.trim()}"? You'll be able to assign menu items to it.`, async () => {
+      setLoading(true);
+      try {
+        const id = name.trim().toLowerCase().replace(/\s+/g, '-');
+        await setDoc(doc(db, "categories", id), { name: name.trim() });
+        await fetchCategories();
+        setName("");
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setLoading(false);
+      }
+    }, null, "Add");
   };
 
   const handleDeleteCategory = async (id: string) => {

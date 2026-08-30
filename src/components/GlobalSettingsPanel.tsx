@@ -10,6 +10,7 @@ import { db, authedFetch } from "../firebase";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { hasPermission, PermissionMap } from "../permissions";
 import { logAudit } from "../utils/auditLogger";
+import { confirmDialog } from "../notify";
 
 export interface GlobalSettings {
   restaurantName?: string;
@@ -95,12 +96,7 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
     setSettings(prev => ({ ...prev, [field]: value }));
   };
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!canEdit) {
-      setError("You do not have permission to edit settings.");
-      return;
-    }
+  const doSave = async () => {
     setLoading(true);
     setError(null);
     setSuccess(false);
@@ -149,6 +145,20 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSave = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canEdit) {
+      setError("You do not have permission to edit settings.");
+      return;
+    }
+    confirmDialog(
+      "Save these changes to the restaurant settings?\n\nChanges to tax, delivery fees and opening behavior take effect immediately for all customers.",
+      () => { doSave(); },
+      null,
+      "Save"
+    );
   };
 
   const testMailchimp = async () => {
@@ -365,55 +375,40 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
                   <div className="w-9 h-5 bg-stone-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2.5px] after:start-[2.5px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
                 </div>
               </label>
-
-              <label className="flex items-center justify-between p-4 bg-stone-50 border border-stone-200 rounded-2xl cursor-pointer hover:bg-stone-100 transition-all">
-                <div className="flex items-center space-x-3">
-                  <div className="p-2 bg-white rounded-xl shadow-sm">
-                    <RotateCcw className="w-4 h-4 text-stone-600" />
-                  </div>
-                  <div>
-                    <span className="block text-[10px] font-black text-stone-800 uppercase tracking-tight leading-none">Store Status</span>
-                    <span className="text-[9px] text-stone-400 font-medium">Accept Orders</span>
-                  </div>
-                </div>
-                <div className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={settings.isOpen}
-                    onChange={e => handleChange("isOpen", e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-stone-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2.5px] after:start-[2.5px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
-                </div>
-              </label>
             </div>
 
-            {/* Operating Schedule */}
+            {/* Online Ordering: one control, admin picks manual or scheduled */}
             <div className="p-4 bg-stone-50 border border-stone-200 rounded-2xl">
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center space-x-3">
-                  <div className="p-2 bg-white rounded-xl shadow-sm">
-                    <Clock className="w-4 h-4 text-stone-600" />
-                  </div>
-                  <div>
-                    <span className="block text-[10px] font-black text-stone-800 uppercase tracking-tight leading-none">Operating Schedule</span>
-                    <span className="text-[9px] text-stone-400 font-medium">Auto open/close by time of day</span>
-                  </div>
+              <div className="flex items-center space-x-3 mb-3">
+                <div className="p-2 bg-white rounded-xl shadow-sm">
+                  <Clock className="w-4 h-4 text-stone-600" />
                 </div>
-                <div className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={settings.scheduleEnabled}
-                    onChange={e => handleChange("scheduleEnabled", e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-stone-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2.5px] after:start-[2.5px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
+                <div>
+                  <span className="block text-[10px] font-black text-stone-800 uppercase tracking-tight leading-none">Online Ordering</span>
+                  <span className="text-[9px] text-stone-400 font-medium">Control when the site accepts orders</span>
                 </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 bg-white p-1 rounded-xl border border-stone-200 mb-3">
+                <button
+                  type="button"
+                  onClick={() => handleChange("scheduleEnabled", false)}
+                  className={`rounded-lg py-2 text-[10px] font-bold uppercase tracking-widest transition-colors cursor-pointer ${!settings.scheduleEnabled ? 'bg-stone-900 text-white' : 'text-stone-500 hover:bg-stone-100'}`}
+                >
+                  Manual
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleChange("scheduleEnabled", true)}
+                  className={`rounded-lg py-2 text-[10px] font-bold uppercase tracking-widest transition-colors cursor-pointer ${settings.scheduleEnabled ? 'bg-stone-900 text-white' : 'text-stone-500 hover:bg-stone-100'}`}
+                >
+                  Schedule
+                </button>
               </div>
 
               {settings.scheduleEnabled ? (
                 <>
-                  <div className="grid grid-cols-2 gap-4 mt-1">
+                  <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="block text-[9px] font-bold text-stone-500 uppercase tracking-widest mb-1">Opening Time</label>
                       <input
@@ -434,13 +429,30 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
                     </div>
                   </div>
                   <p className="text-[9px] text-stone-400 mt-3 leading-relaxed">
-                    Orders are automatically stopped <span className="font-bold text-stone-500">{settings.prepTimeMinutes || 30} minutes</span> before closing time so the kitchen can finish preparing existing orders. The manual "Store Status" toggle above is ignored while the schedule is enabled.
+                    Orders stop being accepted <span className="font-bold text-stone-500">{settings.prepTimeMinutes || 30} minutes</span> before closing time so the kitchen can finish preparing existing orders. Web orders open & close automatically every day at these times.
                   </p>
                 </>
               ) : (
-                <p className="text-[9px] text-stone-400 mt-1 leading-relaxed">
-                  Enable the schedule to automatically accept orders only between opening and closing time. When disabled, the manual "Store Status" toggle controls availability.
-                </p>
+                <label className="flex items-center justify-between p-4 bg-white border border-stone-200 rounded-xl cursor-pointer hover:bg-stone-100 transition-all">
+                  <div className="flex items-center space-x-3">
+                    <div className="p-2 bg-stone-50 rounded-xl">
+                      <RotateCcw className="w-4 h-4 text-stone-600" />
+                    </div>
+                    <div>
+                      <span className="block text-[10px] font-black text-stone-800 uppercase tracking-tight leading-none">Accept Orders</span>
+                      <span className="text-[9px] text-stone-400 font-medium">Manual control</span>
+                    </div>
+                  </div>
+                  <div className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={settings.isOpen}
+                      onChange={e => handleChange("isOpen", e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-9 h-5 bg-stone-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2.5px] after:start-[2.5px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
+                  </div>
+                </label>
               )}
             </div>
           </div>
@@ -580,7 +592,7 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
             {success && (
               <div className="flex items-center space-x-2 text-emerald-600 animate-in fade-in slide-in-from-left-2">
                 <CheckCircle className="w-4 h-4" />
-                <span className="text-xs font-bold uppercase tracking-tight">Configuration Synchronized</span>
+                <span className="text-xs font-bold uppercase tracking-tight"></span>
               </div>
             )}
           </div>

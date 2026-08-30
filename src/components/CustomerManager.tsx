@@ -5,14 +5,12 @@
 
 import React, { useState, useEffect } from "react";
 import { 
-  Users, Search, ShoppingBag, MapPin, Heart, ChevronRight, X, AlertCircle, CheckCircle, RefreshCw, Plus, Minus, Star
+  Users, Search, ShoppingBag, MapPin, Heart, ChevronRight, X, AlertCircle, CheckCircle, RefreshCw
 } from "lucide-react";
 import { db, authedFetch } from "../firebase";
 import { collection, onSnapshot } from "firebase/firestore";
 import { UserProfile, Order } from "../types";
 import { hasPermission, PermissionMap } from "../permissions";
-import { logAudit } from "../utils/auditLogger";
-import { confirmDialog } from "../notify";
 
 interface CustomerManagerProps {
   can?: (key: string) => boolean;
@@ -28,15 +26,12 @@ export default function CustomerManager({
   actor
 }: CustomerManagerProps) {
   const canView = can ? can("customers.view") : hasPermission(permissions, "customers.view");
-  const canEditPoints = can ? can("customers.editPoints") : hasPermission(permissions, "customers.editPoints");
 
   const [customers, setCustomers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCustomer, setSelectedCustomer] = useState<UserProfile | null>(null);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [pointDelta, setPointDelta] = useState<string>("");
-  const [adjusting, setAdjusting] = useState(false);
 
   useEffect(() => {
     if (!canView) {
@@ -79,56 +74,7 @@ export default function CustomerManager({
   });
 
   const getCustomerOrders = (uid: string) => {
-    return orders.filter(o => o.userId === uid || o.customerEmail?.toLowerCase() === selectedCustomer?.email?.toLowerCase());
-  };
-
-  const adjustPoints = async (delta: number) => {
-    if (!selectedCustomer) return;
-    if (delta === 0) return;
-
-    const newValue = (selectedCustomer.points ?? 0) + delta;
-    if (newValue < 0) {
-      setStatusMessage({ type: 'error', text: 'Points cannot go below zero.' });
-      return;
-    }
-
-    const actionLabel = delta > 0 ? 'Add' : 'Deduct';
-    confirmDialog(
-      `${actionLabel} ${Math.abs(delta)} loyalty point${Math.abs(delta) === 1 ? '' : 's'} ${delta > 0 ? 'to' : 'from'} ${selectedCustomer.email || selectedCustomer.displayName}? New balance will be ${newValue}.`,
-      async () => {
-        setAdjusting(true);
-        setStatusMessage(null);
-        try {
-          const res = await authedFetch(`/api/customers/${selectedCustomer.uid}/points`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ delta })
-          });
-          const data = await res.json();
-          if (res.ok) {
-            setStatusMessage({ type: 'success', text: `Points updated. New balance: ${data.points ?? newValue}` });
-            // Optimistically update local snapshot
-            setCustomers(prev => prev.map(c => c.uid === selectedCustomer.uid ? { ...c, points: data.points ?? newValue } : c));
-            setSelectedCustomer(prev => prev ? { ...prev, points: data.points ?? newValue } : prev);
-            await logAudit(actor || { email: 'system', role: 'admin' }, {
-              action: `Adjusted loyalty points by ${delta > 0 ? '+' : ''}${delta}`,
-              category: 'customer',
-              targetId: selectedCustomer.uid,
-              details: { email: selectedCustomer.email, from: selectedCustomer.points ?? 0, to: newValue, delta }
-            });
-          } else {
-            setStatusMessage({ type: 'error', text: data.error || 'Failed to adjust points.' });
-          }
-        } catch (e: any) {
-          setStatusMessage({ type: 'error', text: `Connection error: ${e?.message || 'Unknown error'}` });
-        } finally {
-          setAdjusting(false);
-          setPointDelta("");
-        }
-      },
-      null,
-      `${actionLabel} Points`
-    );
+    return orders.filter(o => o.userId === uid);
   };
 
   if (!canView) {
@@ -203,16 +149,13 @@ export default function CustomerManager({
                 <tr>
                   <th className="px-5 py-3.5">Customer</th>
                   <th className="px-5 py-3.5">Total Orders</th>
-                  <th className="px-5 py-3.5">Loyalty Points</th>
                   <th className="px-5 py-3.5">Joined</th>
                   <th className="px-5 py-3.5 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-100">
                 {filteredCustomers.map(customer => {
-                  const customerOrders = orders.filter(
-                    o => o.userId === customer.uid || (customer.email && o.customerEmail?.toLowerCase() === customer.email.toLowerCase())
-                  );
+                  const customerOrders = orders.filter(o => o.userId === customer.uid);
                   const initials = (customer.displayName || customer.email || "C")
                     .split(" ")
                     .map(n => n[0])
@@ -235,12 +178,6 @@ export default function CustomerManager({
                       </td>
                       <td className="px-5 py-3.5 font-medium text-stone-700">
                         {customerOrders.length} order{customerOrders.length === 1 ? '' : 's'}
-                      </td>
-                      <td className="px-5 py-3.5">
-                        <span className="inline-flex items-center space-x-1 text-amber-700 font-bold">
-                          <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                          <span className="font-mono">{customer.points ?? 0}</span>
-                        </span>
                       </td>
                       <td className="px-5 py-3.5 text-stone-400 text-[11px]">
                         {customer.createdAt ? (
@@ -334,49 +271,6 @@ export default function CustomerManager({
                   </p>
                 </div>
               </div>
-
-              {/* Loyalty Points Adjustment */}
-              {canEditPoints && (
-                <div className="p-4 bg-amber-50/50 border border-amber-200 rounded-xl">
-                  <div className="flex items-center justify-between mb-3">
-                    <h4 className="font-bold text-sm text-stone-900 flex items-center space-x-1.5">
-                      <Star className="w-4 h-4 fill-amber-400 text-amber-400" />
-                      <span>Loyalty Points</span>
-                    </h4>
-                    <span className="font-mono font-bold text-amber-700 text-sm">{selectedCustomer.points ?? 0} pts</span>
-                  </div>
-
-                  <div className="flex items-center space-x-2">
-                    <div className="flex-1 flex items-center space-x-2">
-                      <input
-                        type="number"
-                        value={pointDelta}
-                        onChange={e => setPointDelta(e.target.value)}
-                        placeholder="Amount"
-                        min={0}
-                        className="w-full text-xs bg-white border border-stone-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500"
-                      />
-                    </div>
-                    <button
-                      onClick={() => adjustPoints(parseInt(pointDelta || "0", 10) || 0)}
-                      disabled={adjusting || !pointDelta || (parseInt(pointDelta, 10) || 0) <= 0}
-                      className="flex items-center space-x-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3 py-2 rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>Add</span>
-                    </button>
-                    <button
-                      onClick={() => adjustPoints(-(parseInt(pointDelta || "0", 10) || 0))}
-                      disabled={adjusting || !pointDelta || (parseInt(pointDelta, 10) || 0) <= 0}
-                      className="flex items-center space-x-1 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold px-3 py-2 rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
-                    >
-                      <Minus className="w-3.5 h-3.5" />
-                      <span>Deduct</span>
-                    </button>
-                  </div>
-                  <p className="text-[10px] text-stone-500 mt-2">Adjust the customer's loyalty balance. Changes are recorded in the audit log.</p>
-                </div>
-              )}
 
               {/* Customer Order History */}
               <div className="space-y-3">
