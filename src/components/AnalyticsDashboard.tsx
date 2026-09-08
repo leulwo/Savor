@@ -311,12 +311,12 @@ export default function AnalyticsDashboard() {
       const history = order.statusHistory || [];
       let readyAt: string | null = null;
       for (const h of history) {
-        if (h.status === 'ready' || h.status === 'delivered') {
+        if (h.status === 'ready' || h.status === 'dispatched' || h.status === 'delivered') {
           readyAt = h.at;
           break;
         }
       }
-      if (!readyAt && (order.status === 'ready' || order.status === 'delivered') && order.updatedAt) {
+      if (!readyAt && (order.status === 'ready' || order.status === 'dispatched' || order.status === 'delivered') && order.updatedAt) {
         readyAt = order.updatedAt;
       }
       if (readyAt) {
@@ -376,7 +376,7 @@ export default function AnalyticsDashboard() {
     }));
 
     // ---- status distribution (ordered) ----
-    const statusOrder = ['pending', 'preparing', 'ready', 'delivered', 'cancelled'];
+    const statusOrder = ['pending', 'preparing', 'ready', 'dispatched', 'delivered', 'cancelled'];
     const statusData: any[] = statusOrder
       .map(s => ({ name: s.charAt(0).toUpperCase() + s.slice(1), count: statusMap.get(s) || 0 }))
       .filter(d => d.count > 0);
@@ -575,7 +575,7 @@ export default function AnalyticsDashboard() {
           <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-4">
             <div className="flex items-center space-x-2 text-indigo-600 mb-2">
               <Banknote className="w-4 h-4" />
-              <p className="text-[10px] uppercase font-bold tracking-wider">Chapa Revenue</p>
+              <p className="text-[10px] uppercase font-bold tracking-wider">Online Revenue</p>
             </div>
             <p className="font-mono text-2xl font-bold text-indigo-900">{fmtNum(kpi.chapaRevenue)} ETB</p>
             <p className="text-[10px] text-indigo-400 mt-1">{chapaShare.toFixed(0)}% of paid sales</p>
@@ -749,7 +749,7 @@ export default function AnalyticsDashboard() {
                   <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Orders</th>
                   <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Items</th>
                   <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Net Revenue</th>
-                  <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Chapa</th>
+                  <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Online</th>
                   <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Cash</th>
                   <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Avg Order</th>
                   <th className="py-3 px-4 text-[10px] font-bold text-stone-500 uppercase tracking-wider text-right">Act.</th>
@@ -824,7 +824,7 @@ export default function AnalyticsDashboard() {
                             <td className="py-2.5 px-4 text-xs text-stone-700">{order.customerName || 'Guest'}</td>
                             <td className="py-2.5 px-4 text-xs text-stone-600 max-w-[260px] truncate">{sum.text || '—'}</td>
                             <td className="py-2.5 px-4 text-xs font-bold uppercase text-stone-500">
-                              {order.paymentMethod === 'chapa' ? 'Chapa' : 'Cash'}
+                              {order.paymentMethod === 'chapa' ? 'Online' : 'Cash'}
                             </td>
                             <td className={`py-2.5 px-4 text-right text-xs font-mono font-bold ${refundLike ? 'text-rose-600' : 'text-emerald-600'}`}>
                               {fmtNum(order.total || 0)} ETB

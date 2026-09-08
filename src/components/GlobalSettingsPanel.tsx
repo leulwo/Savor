@@ -5,20 +5,23 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { Settings, Save, AlertCircle, CheckCircle, RotateCcw, Truck, CreditCard, ChevronDown, ChevronUp, Image as ImageIcon, MessageSquare, CalendarDays, Mail, Download, Trash2, ShieldAlert, Upload, X } from "lucide-react";
+import { Settings, Save, AlertCircle, CheckCircle, RotateCcw, Truck, CreditCard, ChevronDown, ChevronUp, Image as ImageIcon, MessageSquare, CalendarDays, Mail, Download, Trash2, ShieldAlert, Upload, X, Clock, MapPin, Phone, Eye, EyeOff } from "lucide-react";
 import { db } from "../firebase";
 import { doc, getDoc, setDoc, collection, getDocs, deleteDoc, writeBatch } from "firebase/firestore";
 import { hasPermission, PermissionMap } from "../permissions";
 import { logAudit } from "../utils/auditLogger";
 import SquareImageCropper from "./SquareImageCropper";
-import { confirmDialog } from "../notify";
-import { confirmDialog } from "../notify";
+import ImageUploadField from "./ImageUploadField";
+import AuditLog from "./AuditLog";
+import { confirmDialog, toastError, toastSuccess } from "../notify";
+import { authedFetch } from "../firebase";
 
 export interface GlobalSettings {
   restaurantName?: string;
   logoUrl?: string;
   businessEmail?: string;
   businessPhone?: string;
+  businessAddress?: string;
   serviceTaxPercent?: number;
   flatFeeETB?: number;
   enableCOD?: boolean;
@@ -38,13 +41,17 @@ interface GlobalSettingsPanelProps {
   can?: (key: string) => boolean;
   permissions?: PermissionMap;
   actor?: { email: string; role: string };
+  initialTab?: 'general' | 'checkout' | 'features' | 'dev' | 'privacy';
 }
 
-export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalSettingsPanelProps) {
+export default function GlobalSettingsPanel({ can, permissions, actor, initialTab }: GlobalSettingsPanelProps) {
   const canEdit = can ? can("settings.edit") : hasPermission(permissions, "settings.edit");
   const [settings, setSettings] = useState<GlobalSettings>({
     restaurantName: "Savory",
     logoUrl: "",
+    businessEmail: "",
+    businessPhone: "",
+    businessAddress: "",
     serviceTaxPercent: 15,
     flatFeeETB: 0,
     enableCOD: true,
@@ -62,7 +69,7 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
   const [loading, setLoading] = useState(false);
 
   // Tab state for categories
-  const [activeTab, setActiveTab] = useState<'general' | 'checkout' | 'features' | 'integrations'>('general');
+  const [activeTab, setActiveTab] = useState<'general' | 'checkout' | 'features' | 'dev' | 'privacy'>(initialTab || 'general');
 
   const [shipdayTestLoading, setShipdayTestLoading] = useState(false);
   const [mailchimpTestLoading, setMailchimpTestLoading] = useState(false);
@@ -70,6 +77,16 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
   const [mailchimpTestResult, setMailchimpTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+
+  // Privacy / data export + clear
+  const [exporting, setExporting] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [clearConfirmText, setClearConfirmText] = useState("");
+  const [lastExportAt, setLastExportAt] = useState<string | null>(null);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  const canExport = can ? can("data.export") : hasPermission(permissions, "data.export");
+  const canClear = can ? can("data.clear") : hasPermission(permissions, "data.clear");
 
   const originalSettings = React.useRef<GlobalSettings>({});
 
@@ -131,7 +148,7 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
 
       // Build a diff of changed settings fields for the audit log
       const diff: Record<string, any> = {};
-      const editableFields: (keyof GlobalSettings)[] = ["restaurantName", "logoUrl", "serviceTaxPercent", "flatFeeETB", "enableCOD", "isOpen", "scheduleEnabled", "openTime", "closeTime", "enableMarketing", "enableReservations", "enableChatbot", "prepTimeMinutes", "scheduledStepsMinutes"];
+      const editableFields: (keyof GlobalSettings)[] = ["restaurantName", "logoUrl", "businessEmail", "businessPhone", "businessAddress", "serviceTaxPercent", "flatFeeETB", "enableCOD", "isOpen", "scheduleEnabled", "openTime", "closeTime", "enableMarketing", "enableReservations", "enableChatbot", "prepTimeMinutes", "scheduledStepsMinutes"];
       editableFields.forEach(field => {
         if (String(settings[field] ?? "") !== String(originalSettings.current[field] ?? "")) {
           diff[field as string] = { from: originalSettings.current[field] ?? null, to: settings[field] ?? null };
@@ -145,7 +162,7 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
 
       originalSettings.current = payload;
       setSuccess(true);
-      setTimeout(() => setSuccess(false), 3000);
+      setTimeout(() => setSuccess(false), 4000);
     } catch (e: any) {
       setError(e.message || "Network error occurred");
     } finally {
@@ -199,6 +216,89 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
     }
   };
 
+  const downloadBusinessData = async () => {
+    if (!canExport) {
+      toastError("You do not have permission to download business data.");
+      return;
+    }
+    setExporting(true);
+    try {
+      const res = await authedFetch("/api/business/export");
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Export failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const fallbackName = `savory-business-data-${new Date().toISOString().slice(0, 10)}.json`;
+      const cd = res.headers.get("Content-Disposition") || "";
+      const m = /filename="?([^"]+)"?/i.exec(cd);
+      a.download = m?.[1] || fallbackName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setLastExportAt(new Date().toISOString());
+      toastSuccess("Business data downloaded.");
+      await logAudit(actor || { email: 'system', role: 'unknown' }, {
+        action: 'Downloaded business data export',
+        category: 'settings',
+        details: { source: 'api/business/export' }
+      });
+    } catch (e: any) {
+      toastError(e?.message || "Failed to download business data.");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const doClearBusinessData = async () => {
+    if (!canClear) {
+      toastError("You do not have permission to clear business data.");
+      return;
+    }
+    setClearing(true);
+    try {
+      await logAudit(actor || { email: 'system', role: 'unknown' }, {
+        action: 'Initiated business data clear',
+        category: 'settings',
+        details: { scope: 'full-nuclear' }
+      });
+      const res = await authedFetch("/api/business/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: "CLEAR MY DATA" })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || `Clear failed (${res.status})`);
+      }
+      const total = Object.values(data.counts || {}).reduce((a: number, b: any) => a + (Number(b) || 0), 0);
+      toastSuccess(`Cleared ${total} document(s) across the workspace.`);
+      setClearConfirmText("");
+      setShowClearConfirm(false);
+    } catch (e: any) {
+      toastError(e?.message || "Failed to clear business data.");
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const requestClearBusinessData = () => {
+    if (clearConfirmText.trim() !== "CLEAR MY DATA") {
+      toastError("Type 'CLEAR MY DATA' exactly to confirm.");
+      return;
+    }
+    confirmDialog(
+      "FINAL WARNING: This will permanently delete ALL business data — menu, categories, reservations, promos, orders, users, admins, roles, audit log, and settings. The site will return to a fresh state. This cannot be undone.\n\nAre you absolutely sure?",
+      () => { doClearBusinessData(); },
+      null,
+      "Yes, wipe everything"
+    );
+  };
+
   return (
     <div className="bg-white border border-stone-200 rounded-3xl shadow-sm overflow-hidden transition-all duration-300">
       <div className="bg-stone-50 border-b border-stone-200 px-6 py-4 flex items-center justify-between">
@@ -237,10 +337,19 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab('integrations')}
-          className={`px-6 py-3 text-xs font-bold uppercase tracking-wider whitespace-nowrap border-b-2 transition-colors ${activeTab === 'integrations' ? 'border-stone-900 text-stone-900' : 'border-transparent text-stone-400 hover:text-stone-600'}`}
+          onClick={() => setActiveTab('dev')}
+          className={`px-6 py-3 text-xs font-bold uppercase tracking-wider whitespace-nowrap border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'dev' ? 'border-stone-900 text-stone-900' : 'border-transparent text-stone-400 hover:text-stone-600'}`}
         >
-          Integrations
+          <Settings className="w-3.5 h-3.5" />
+          <span>Dev</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('privacy')}
+          className={`px-6 py-3 text-xs font-bold uppercase tracking-wider whitespace-nowrap border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'privacy' ? 'border-rose-600 text-rose-600' : 'border-transparent text-stone-400 hover:text-rose-500'}`}
+        >
+          <ShieldAlert className="w-3.5 h-3.5" />
+          <span>Privacy</span>
         </button>
       </div>
 
@@ -259,25 +368,65 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
                 className="w-full text-sm bg-stone-50/50 border border-stone-300 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 transition-all"
               />
             </div>
-            <div>
-              <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1.5">
-                Logo URL
-              </label>
-              <div className="flex space-x-4 items-start">
-                <input
-                  type="text"
-                  value={settings.logoUrl || ""}
-                  onChange={e => handleChange("logoUrl", e.target.value)}
-                  placeholder="https://example.com/logo.png"
-                  className="flex-1 text-sm bg-stone-50/50 border border-stone-300 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 transition-all"
-                />
-                {settings.logoUrl && (
-                  <div className="w-12 h-12 rounded-lg border border-stone-200 overflow-hidden shrink-0 flex items-center justify-center bg-stone-50">
-                    <img src={settings.logoUrl} alt="Logo Preview" className="w-full h-full object-contain" />
-                  </div>
-                )}
+
+            <ImageUploadField
+              label="Logo"
+              value={settings.logoUrl || ""}
+              onChange={(v) => handleChange("logoUrl", v)}
+            />
+
+            <div className="pt-2 border-t border-stone-100">
+              <p className="text-[10px] font-bold text-stone-500 uppercase tracking-widest mb-3">Business Contact</p>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1.5">
+                    <span className="inline-flex items-center space-x-1.5">
+                      <Mail className="w-3 h-3" />
+                      <span>Business Email</span>
+                    </span>
+                  </label>
+                  <input
+                    type="email"
+                    value={settings.businessEmail || ""}
+                    onChange={e => handleChange("businessEmail", e.target.value)}
+                    placeholder="contact@savory.com"
+                    className="w-full text-sm bg-stone-50/50 border border-stone-300 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 transition-all"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1.5">
+                    <span className="inline-flex items-center space-x-1.5">
+                      <Phone className="w-3 h-3" />
+                      <span>Business Phone</span>
+                    </span>
+                  </label>
+                  <input
+                    type="tel"
+                    value={settings.businessPhone || ""}
+                    onChange={e => handleChange("businessPhone", e.target.value)}
+                    placeholder="+251 11 234 5678"
+                    className="w-full text-sm bg-stone-50/50 border border-stone-300 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 transition-all"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1.5">
+                    <span className="inline-flex items-center space-x-1.5">
+                      <MapPin className="w-3 h-3" />
+                      <span>Business Location</span>
+                    </span>
+                  </label>
+                  <input
+                    type="text"
+                    value={settings.businessAddress || ""}
+                    onChange={e => handleChange("businessAddress", e.target.value)}
+                    placeholder="e.g. Bole Road, Addis Ababa, Ethiopia"
+                    className="w-full text-sm bg-stone-50/50 border border-stone-300 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 transition-all"
+                  />
+                </div>
               </div>
-              <p className="text-[10px] text-stone-400 mt-2">Leave blank to use the default logo.</p>
+              <p className="text-[10px] text-stone-400 mt-3">
+                Shown on the customer footer, the contact section, and on printed receipts.
+              </p>
             </div>
           </div>
         )}
@@ -519,8 +668,8 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
           </div>
         )}
 
-        {activeTab === 'integrations' && (
-          <div className="space-y-4 animate-in fade-in">
+        {activeTab === 'dev' && (
+          <div className="space-y-6 animate-in fade-in">
             <div className="flex flex-col space-y-3 p-4 bg-blue-50/30 rounded-2xl border border-blue-100">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2 text-blue-700">
@@ -584,6 +733,117 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
                 </div>
               )}
             </div>
+
+            <div className="pt-4 border-t border-stone-200">
+              <AuditLog can={can} permissions={permissions} />
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'privacy' && (
+          <div className="space-y-6 animate-in fade-in">
+            <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-start space-x-3">
+              <ShieldAlert className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-[11px] font-black text-amber-800 uppercase tracking-tight">Privacy & Data</p>
+                <p className="text-[10px] text-amber-700 leading-relaxed mt-1">
+                  Take a full backup before clearing anything. Both actions are logged to the audit log with your account.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-5 bg-white border border-stone-200 rounded-2xl">
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div className="flex-1 min-w-[200px]">
+                  <div className="flex items-center space-x-2 mb-1">
+                    <Download className="w-4 h-4 text-stone-700" />
+                    <h3 className="text-sm font-black text-stone-900 uppercase tracking-tight">Download my business data</h3>
+                  </div>
+                  <p className="text-[10px] text-stone-500 leading-relaxed">
+                    Export every collection in your workspace (menu, orders, reservations, promos, users, settings, audit log) as a single JSON file.
+                  </p>
+                  {lastExportAt && (
+                    <p className="text-[9px] text-emerald-600 mt-2 font-bold uppercase tracking-wide">
+                      Last download: {new Date(lastExportAt).toLocaleString()}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={downloadBusinessData}
+                  disabled={exporting || !canExport}
+                  className="flex items-center space-x-2 bg-stone-900 hover:bg-black text-white text-[10px] font-black uppercase tracking-widest px-5 py-3 rounded-xl shadow-sm transition-all disabled:opacity-50 cursor-pointer"
+                >
+                  {exporting ? <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                  <span>{exporting ? "Preparing..." : "Download JSON"}</span>
+                </button>
+              </div>
+              {!canExport && (
+                <p className="text-[9px] text-stone-400 mt-3 italic">Your role does not include the "data.export" permission.</p>
+              )}
+            </div>
+
+            <div className="p-5 bg-rose-50/40 border-2 border-rose-200 rounded-2xl">
+              <div className="flex items-start space-x-2 mb-2">
+                <Trash2 className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                <div>
+                  <h3 className="text-sm font-black text-rose-700 uppercase tracking-tight">Clear business data</h3>
+                  <p className="text-[10px] text-rose-700/80 leading-relaxed mt-1">
+                    Permanently deletes <span className="font-bold">ALL</span> data: menu, categories, reservations, promo codes, orders, users, admins, roles, audit log, and settings. The site returns to a fresh default state. This cannot be undone.
+                  </p>
+                </div>
+              </div>
+
+              {!showClearConfirm ? (
+                <button
+                  type="button"
+                  onClick={() => setShowClearConfirm(true)}
+                  disabled={!canClear}
+                  className="mt-3 flex items-center space-x-2 bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-black uppercase tracking-widest px-5 py-3 rounded-xl shadow-sm transition-all disabled:opacity-50 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>I want to clear everything</span>
+                </button>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-rose-700 uppercase tracking-wide mb-1.5">
+                      Type <span className="font-black bg-rose-100 px-1.5 py-0.5 rounded">CLEAR MY DATA</span> to confirm
+                    </label>
+                    <input
+                      type="text"
+                      value={clearConfirmText}
+                      onChange={e => setClearConfirmText(e.target.value)}
+                      placeholder="CLEAR MY DATA"
+                      autoComplete="off"
+                      className="w-full text-sm bg-white border-2 border-rose-300 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-rose-500/30 focus:border-rose-500 transition-all font-mono tracking-wider"
+                    />
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={requestClearBusinessData}
+                      disabled={clearing || clearConfirmText.trim() !== "CLEAR MY DATA"}
+                      className="flex items-center space-x-2 bg-rose-700 hover:bg-rose-800 text-white text-[10px] font-black uppercase tracking-widest px-5 py-3 rounded-xl shadow-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      {clearing ? <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                      <span>{clearing ? "Wiping..." : "Permanently wipe all data"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setShowClearConfirm(false); setClearConfirmText(""); }}
+                      disabled={clearing}
+                      className="text-[10px] font-bold uppercase tracking-widest text-stone-500 hover:text-stone-800 px-3 py-3 rounded-xl cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+              {!canClear && (
+                <p className="text-[9px] text-rose-700/70 mt-3 italic">Your role does not include the "data.clear" permission.</p>
+              )}
+            </div>
           </div>
         )}
 
@@ -603,14 +863,18 @@ export default function GlobalSettingsPanel({ can, permissions, actor }: GlobalS
             )}
           </div>
           {canEdit ? (
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full md:w-auto bg-stone-900 hover:bg-black text-white text-[11px] font-black uppercase tracking-widest px-10 py-4 rounded-2xl shadow-xl shadow-stone-900/10 transition-all hover:-translate-y-1 active:translate-y-0 disabled:opacity-50 disabled:translate-y-0 flex items-center justify-center space-x-2 cursor-pointer"
-            >
-              {loading ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Save className="w-4 h-4" />}
-              <span>Save</span>
-            </button>
+            activeTab === 'privacy' ? (
+              <span className="text-[11px] text-stone-400 font-medium">Privacy actions are applied immediately. There is nothing to save.</span>
+            ) : (
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full md:w-auto bg-stone-900 hover:bg-black text-white text-[11px] font-black uppercase tracking-widest px-10 py-4 rounded-2xl shadow-xl shadow-stone-900/10 transition-all hover:-translate-y-1 active:translate-y-0 disabled:opacity-50 disabled:translate-y-0 flex items-center justify-center space-x-2 cursor-pointer"
+              >
+                {loading ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Save className="w-4 h-4" />}
+                <span>Save</span>
+              </button>
+            )
           ) : (
             <span className="text-[11px] text-stone-400 font-medium">Read only — you need the "Edit restaurant settings" permission to save changes.</span>
           )}

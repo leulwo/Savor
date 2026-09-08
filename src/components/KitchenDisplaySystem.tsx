@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../firebase';
-import { collection, query, where, orderBy, onSnapshot, doc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, orderBy, onSnapshot } from 'firebase/firestore';
 import { toastError, confirmDialog } from '../notify';
 import { Order } from '../types';
+import { authedFetch } from '../firebase';
 import { ChefHat, CheckCircle, Clock, Flame } from 'lucide-react';
 import { hasPermission, PermissionMap } from '../permissions';
 
@@ -60,12 +61,24 @@ export default function KitchenDisplaySystem({ can, permissions }: KitchenDispla
       `Mark this order as "${newStatus.toUpperCase()}"?`,
       async () => {
         try {
-          await updateDoc(doc(db, 'orders', orderId), {
-            status: newStatus
+          // Use server PATCH so statusHistory is tracked and Shipday is NOT auto-triggered on ready.
+          const res = await authedFetch(`/api/orders/${orderId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: newStatus })
           });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            const msg = err.error || "Failed to update order status.";
+            console.error("Failed to update order status:", msg);
+            toastError("Failed to update order status: " + msg);
+          }
         } catch (error) {
           console.error("Failed to update order status:", error);
           toastError("Failed to update order status. If you are a staff member, make sure the " + newStatus + " permission is granted to your role.");
+          // surface the server error message if present
+          const body = (error as any)?.responseBody;
+          if (body) toastError(String(body));
         }
       },
       null,

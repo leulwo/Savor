@@ -1,6 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "default_agent": "security_lead",
+  "default_agent": "build",
+
   "mcp": {
     "ast-sast-semgrep": {
       "type": "local",
@@ -41,6 +42,26 @@
       "type": "local",
       "enabled": true,
       "command": ["npx", "-y", "firebase-tools@latest", "mcp", "--dir", "F:\\SAVORY"]
+    },
+    "shipday-delivery": {
+      "type": "remote",
+      "enabled": true,
+      "url": "https://mcp.pipedream.net/v2"
+    },
+    "browsermcp": {
+      "type": "local",
+      "command": ["npx", "-y", "@browsermcp/mcp@latest"],
+      "enabled": true
+    },
+        "chrome-devtools": {
+      "type": "local",
+      "enabled": true,
+      "command": [
+        "npx", 
+        "-y", 
+        "chrome-devtools-mcp@latest", 
+        "--browserUrl=http://127.0.0.1:9222"
+      ]
     }
   }
 }

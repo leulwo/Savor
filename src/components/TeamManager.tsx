@@ -29,6 +29,13 @@ export default function TeamManager({ currentUserEmail = '', userRole, can = () 
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+    // Auto-dismiss success messages after 4s; errors stay until the user closes them.
+    useEffect(() => {
+        if (!message || message.type !== 'success') return;
+        const t = setTimeout(() => setMessage(null), 4000);
+        return () => clearTimeout(t);
+    }, [message]);
+
     const canInvite = can("team.invite");
     const canRemove = can("team.remove");
 

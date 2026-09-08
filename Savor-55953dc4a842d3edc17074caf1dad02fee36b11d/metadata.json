@@ -1,0 +1,6 @@
+{
+  "name": "Restaurant Website with VPS Portal",
+  "description": "A full-stack restaurant website with integrated menu, ordering flow, secure Chapa payment gateway proxy, local database tracking, and a high-thinking Gemini AI chef.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

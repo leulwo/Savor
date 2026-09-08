@@ -33,6 +33,13 @@ export default function CustomerManager({
   const [selectedCustomer, setSelectedCustomer] = useState<UserProfile | null>(null);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+  // Auto-dismiss success messages after 4s; errors stay until the user closes them.
+  useEffect(() => {
+    if (!statusMessage || statusMessage.type !== 'success') return;
+    const t = setTimeout(() => setStatusMessage(null), 4000);
+    return () => clearTimeout(t);
+  }, [statusMessage]);
+
   useEffect(() => {
     if (!canView) {
       setLoading(false);

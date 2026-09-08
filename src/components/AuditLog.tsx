@@ -21,11 +21,20 @@ interface AuditLogProps {
 export default function AuditLog({ can, permissions }: AuditLogProps) {
   const canView = can ? can("audit.view") : hasPermission(permissions, "audit.view");
 
+  const PAGE_SIZE = 10;
+
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
+  // Reset the visible window whenever the user changes a filter, so the top of
+  // the list isn't hidden by a stale "page" from a previous query.
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [searchQuery, categoryFilter]);
 
   useEffect(() => {
     if (!canView) {
@@ -163,64 +172,91 @@ export default function AuditLog({ can, permissions }: AuditLogProps) {
             {searchQuery || categoryFilter !== 'all' ? "No audit records found matching your filters." : "No audit entries recorded yet."}
           </div>
         ) : (
-          <div className="divide-y divide-stone-100">
-            {filteredLogs.map(entry => {
-              const isExpanded = expandedLogId === entry.id;
-              const hasDetails = entry.details && Object.keys(entry.details).length > 0;
+          <>
+            <div className="divide-y divide-stone-100">
+              {filteredLogs.slice(0, visibleCount).map(entry => {
+                const isExpanded = expandedLogId === entry.id;
+                const hasDetails = entry.details && Object.keys(entry.details).length > 0;
 
-              return (
-                <div key={entry.id} className="p-4 hover:bg-amber-50/20 transition-colors">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    {/* Left: Category & Action */}
-                    <div className="flex items-start space-x-3">
-                      <div className="mt-0.5 shrink-0">
-                        {getCategoryBadge(entry.category || 'general')}
-                      </div>
-                      <div>
-                        <p className="text-xs font-bold text-stone-900 leading-snug">{entry.action}</p>
-                        <div className="flex items-center gap-2 text-[11px] text-stone-400 mt-0.5">
-                          <span className="font-medium text-stone-600">{entry.actorEmail || 'System'}</span>
-                          <span>•</span>
-                          <span className="font-mono uppercase text-[10px] bg-stone-100 px-1.5 py-0.5 rounded text-stone-500">{entry.actorRole || 'admin'}</span>
-                          {entry.targetId && (
-                            <>
-                              <span>•</span>
-                              <span className="font-mono text-[10px] text-stone-500">ID: {entry.targetId}</span>
-                            </>
-                          )}
+                return (
+                  <div key={entry.id} className="p-4 hover:bg-amber-50/20 transition-colors">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      {/* Left: Category & Action */}
+                      <div className="flex items-start space-x-3">
+                        <div className="mt-0.5 shrink-0">
+                          {getCategoryBadge(entry.category || 'general')}
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-stone-900 leading-snug">{entry.action}</p>
+                          <div className="flex items-center gap-2 text-[11px] text-stone-400 mt-0.5">
+                            <span className="font-medium text-stone-600">{entry.actorEmail || 'System'}</span>
+                            <span>•</span>
+                            <span className="font-mono uppercase text-[10px] bg-stone-100 px-1.5 py-0.5 rounded text-stone-500">{entry.actorRole || 'admin'}</span>
+                            {entry.targetId && (
+                              <>
+                                <span>•</span>
+                                <span className="font-mono text-[10px] text-stone-500">ID: {entry.targetId}</span>
+                              </>
+                            )}
+                          </div>
                         </div>
                       </div>
+
+                      {/* Right: Timestamp & Details Toggle */}
+                      <div className="flex items-center space-x-3 sm:self-center self-end">
+                        <span className="text-[11px] font-mono text-stone-400 whitespace-nowrap">
+                          {formatTimestamp(entry.createdAt)}
+                        </span>
+
+                        {hasDetails && (
+                          <button
+                            onClick={() => setExpandedLogId(isExpanded ? null : (entry.id || null))}
+                            className="p-1 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer rounded"
+                            title="View Details"
+                          >
+                            {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                          </button>
+                        )}
+                      </div>
                     </div>
 
-                    {/* Right: Timestamp & Details Toggle */}
-                    <div className="flex items-center space-x-3 sm:self-center self-end">
-                      <span className="text-[11px] font-mono text-stone-400 whitespace-nowrap">
-                        {formatTimestamp(entry.createdAt)}
-                      </span>
-
-                      {hasDetails && (
-                        <button
-                          onClick={() => setExpandedLogId(isExpanded ? null : (entry.id || null))}
-                          className="p-1 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer rounded"
-                          title="View Details"
-                        >
-                          {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                        </button>
-                      )}
-                    </div>
+                    {/* Expanded JSON Inspector */}
+                    {isExpanded && hasDetails && (
+                      <div className="mt-3 p-3 bg-stone-900 text-amber-400 font-mono text-[11px] rounded-xl overflow-x-auto shadow-inner">
+                        <p className="text-[10px] text-stone-400 uppercase font-bold mb-1">// Metadata Details</p>
+                        <pre>{JSON.stringify(entry.details, null, 2)}</pre>
+                      </div>
+                    )}
                   </div>
+                );
+              })}
+            </div>
 
-                  {/* Expanded JSON Inspector */}
-                  {isExpanded && hasDetails && (
-                    <div className="mt-3 p-3 bg-stone-900 text-amber-400 font-mono text-[11px] rounded-xl overflow-x-auto shadow-inner">
-                      <p className="text-[10px] text-stone-400 uppercase font-bold mb-1">// Metadata Details</p>
-                      <pre>{JSON.stringify(entry.details, null, 2)}</pre>
-                    </div>
-                  )}
+            {/* Pagination footer — keeps the Save button reachable when many entries are shown. */}
+            {filteredLogs.length > visibleCount && (
+              <div className="p-3 bg-stone-50/50 border-t border-stone-100 flex flex-col sm:flex-row items-center justify-between gap-2">
+                <p className="text-[10px] text-stone-500 font-mono uppercase tracking-wider">
+                  Showing {visibleCount} of {filteredLogs.length}
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setVisibleCount(c => Math.min(c + PAGE_SIZE, filteredLogs.length))}
+                    className="text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-700 hover:bg-stone-100 transition-colors cursor-pointer"
+                  >
+                    Show {Math.min(PAGE_SIZE, filteredLogs.length - visibleCount)} more
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVisibleCount(filteredLogs.length)}
+                    className="text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-black text-white transition-colors cursor-pointer"
+                  >
+                    Show all
+                  </button>
                 </div>
-              );
-            })}
-          </div>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

@@ -36,7 +36,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     group: "Orders",
     permissions: [
       { key: "orders.view", label: "View order list & details" },
-      { key: "orders.updateStatus", label: "Update cooking status (preparing / ready)" },
+      { key: "orders.updateStatus", label: "Update order status (preparing / ready / dispatch / delivered)" },
       { key: "orders.markPaid", label: "Update payment status (mark paid)" },
       { key: "orders.cancel", label: "Cancel orders" },
       { key: "orders.receipts", label: "View & print receipts" },
@@ -93,6 +93,8 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "settings.view", label: "View restaurant settings" },
       { key: "settings.edit", label: "Edit restaurant settings" },
       { key: "audit.view", label: "View activity audit logs" },
+      { key: "data.export", label: "Download business data" },
+      { key: "data.clear", label: "Clear business data" },
     ],
   },
 ];

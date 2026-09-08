@@ -14,9 +14,8 @@ import PromoManager from "./components/PromoManager";
 import TeamAndRoles from "./components/TeamAndRoles";
 import CustomerManager from "./components/CustomerManager";
 import ReportsManager from "./components/ReportsManager";
-import AuditLog from "./components/AuditLog";
 import CommandPalette from "./components/CommandPalette";
-import { Utensils, Settings, LogOut, LayoutDashboard, MessageSquare, CalendarDays, ChefHat, ShoppingBag, Percent, Users, FileText, History, Search, BarChart3 } from "lucide-react";
+import { Utensils, Settings, LogOut, LayoutDashboard, MessageSquare, CalendarDays, ChefHat, ShoppingBag, Percent, Users, FileText, Search, BarChart3 } from "lucide-react";
 import { db, auth, authedFetch, googleProvider } from "./firebase";
 import { collection, query, where, orderBy, onSnapshot, doc, getDoc } from "firebase/firestore";
 import { PermissionMap, hasPermission, getDefaultRole, seedDefaultRoles } from "./permissions";
@@ -98,7 +97,8 @@ export default function AdminPortal() {
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [customers, setCustomers] = useState<UserProfile[]>([]);
-  const [activeTab, setActiveTab] = useState<'overview' | 'analytics' | 'menu' | 'orders' | 'chat' | 'reservations' | 'kds' | 'marketing' | 'settings' | 'customers' | 'reports' | 'audit'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'analytics' | 'menu' | 'orders' | 'chat' | 'reservations' | 'kds' | 'marketing' | 'settings' | 'customers' | 'reports'>('overview');
+  const [settingsInitialTab, setSettingsInitialTab] = useState<'general' | 'checkout' | 'features' | 'dev' | 'privacy' | undefined>(undefined);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [totalUnread, setTotalUnread] = useState(0);
 
@@ -530,19 +530,9 @@ export default function AdminPortal() {
           )}
 
           {/* PLATFORM */}
-          {(can('audit.view') || can('team.view') || can('settings.view')) && (
+          {(can('team.view') || can('settings.view')) && (
             <div className="space-y-1">
               <p className="px-2 text-[10px] font-bold uppercase tracking-widest text-stone-400">Platform</p>
-              {can('audit.view') && (
-                <button
-                  onClick={() => setActiveTab('audit')}
-                  className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'audit' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
-                    }`}
-                >
-                  <History className="w-4 h-4" />
-                  <span>Audit Log</span>
-                </button>
-              )}
               {(can('team.view') || can('settings.view')) && (
                 <button
                   onClick={() => setActiveTab('settings')}
@@ -576,7 +566,7 @@ export default function AdminPortal() {
       <main className="flex-1 min-w-0 flex flex-col">
         <header className="bg-white border-b border-stone-200 px-8 py-5 flex justify-between items-center sticky top-0 z-10">
           <h1 className="text-2xl font-serif font-bold text-stone-900 capitalize">
-            {({ overview: 'Overview', menu: 'Menu', orders: 'Orders', chat: 'Inbox', reservations: 'Reservations', kds: 'Kitchen Display System', marketing: 'Marketing & Promos', settings: 'Team & Settings', customers: 'Customers', reports: 'Reports', audit: 'Audit Log' } as Record<string, string>)[activeTab] || activeTab}
+            {({ overview: 'Overview', menu: 'Menu', orders: 'Orders', chat: 'Inbox', reservations: 'Reservations', kds: 'Kitchen Display System', marketing: 'Marketing & Promos', settings: 'Team & Settings', customers: 'Customers', reports: 'Reports' } as Record<string, string>)[activeTab] || activeTab}
           </h1>
           <div className="flex items-center space-x-3">
             <button
@@ -615,7 +605,7 @@ export default function AdminPortal() {
                   />
                 )}
                 {can('settings.view') && (
-                  <GlobalSettingsPanel can={can} actor={actor} />
+                  <GlobalSettingsPanel can={can} actor={actor} initialTab={settingsInitialTab} />
                 )}
               </div>
             )}
@@ -637,12 +627,6 @@ export default function AdminPortal() {
                   menu={menu}
                   can={can}
                 />
-              </div>
-            )}
-
-            {activeTab === 'audit' && can('audit.view') && (
-              <div className="animate-fade-in max-w-5xl mx-auto">
-                <AuditLog can={can} />
               </div>
             )}
 
@@ -702,9 +686,12 @@ export default function AdminPortal() {
       <CommandPalette
         isOpen={commandPaletteOpen}
         onClose={() => setCommandPaletteOpen(false)}
-        onNavigate={(tab) => {
-          if (['overview', 'menu', 'orders', 'chat', 'reservations', 'kds', 'marketing', 'settings', 'customers', 'reports', 'audit'].includes(tab)) {
+        onNavigate={(tab, payload) => {
+          if (['overview', 'menu', 'orders', 'chat', 'reservations', 'kds', 'marketing', 'customers', 'reports'].includes(tab)) {
             setActiveTab(tab as any);
+          } else if (tab === 'settings') {
+            setSettingsInitialTab(payload?.subTab);
+            setActiveTab('settings');
           }
         }}
         orders={orders}

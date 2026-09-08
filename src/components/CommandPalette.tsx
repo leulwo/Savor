@@ -71,7 +71,7 @@ export default function CommandPalette({
     { label: "Live Customer Inbox", tab: "chat", icon: MessageSquare, category: "Navigation" },
     { label: "Table Reservations", tab: "reservations", icon: CalendarDays, category: "Navigation" },
     { label: "Marketing & Promos", tab: "marketing", icon: Percent, category: "Navigation" },
-    { label: "System Activity Audit Log", tab: "audit", icon: History, category: "Navigation" },
+    { label: "System Activity Audit Log", tab: "settings", subTab: "dev", icon: History, category: "Navigation" },
     { label: "Global Settings", tab: "settings", icon: Settings, category: "Navigation" },
   ];
 
@@ -118,7 +118,7 @@ export default function CommandPalette({
     if (!item) return;
 
     if (item.type === 'nav') {
-      onNavigate(item.data.tab);
+      onNavigate(item.data.tab, item.data.subTab ? { subTab: item.data.subTab } : undefined);
     } else if (item.type === 'order') {
       onNavigate('orders', item.data);
     } else if (item.type === 'menu') {

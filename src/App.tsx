@@ -21,6 +21,7 @@ import {
   Settings,
   Star,
   Search,
+  LogIn,
   LogOut,
   User,
   RotateCcw,
@@ -29,7 +30,10 @@ import {
   Heart,
   CalendarDays,
   Store,
-  ShoppingBag
+  ShoppingBag,
+  Mail,
+  Phone,
+  MapPin
 } from "lucide-react";
 import { db, auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged, authedFetch } from "./firebase";
 import { collection, onSnapshot, doc, query, where, setDoc, getDoc, updateDoc } from "firebase/firestore";
@@ -38,12 +42,31 @@ import GoogleMapsAddressInput from "./GoogleMapsAddressInput";
 import Chatbot from "./components/Chatbot";
 import ItemReviews from "./components/ItemReviews";
 import { confirmDialog, toastError, toastSuccess, toastInfo, toastWarning } from "./notify";
+import { NotificationCenter, pushNotification } from "./NotificationCenter";
 import { normalizeGalleryImages } from "./utils/galleries";
 import { parseHHMMToMinutes, scheduleAccepts, formatTimeHHMM } from "./utils/schedule";
 // @ts-ignore
 import chapaLogoImg from "./images.png";
 
 const API_KEY = process.env.GOOGLE_MAPS_PLATFORM_KEY || (import.meta as any).env?.VITE_GOOGLE_MAPS_PLATFORM_KEY || "";
+
+// Recursively removes undefined values so Firestore setDoc/updateDoc never rejects them.
+function sanitizeForFirestore<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map(v => sanitizeForFirestore(v)) as unknown as T;
+  }
+  if (value && typeof value === "object") {
+    const clean: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      const v = (value as Record<string, unknown>)[key];
+      if (v !== undefined) {
+        clean[key] = sanitizeForFirestore(v);
+      }
+    }
+    return clean as T;
+  }
+  return value;
+}
 
 // ---- Product variations (e.g. drink sizes) ----
 function itemVariations(item: MenuItem): MenuItemVariation[] {
@@ -79,7 +102,7 @@ const loadChapaScript = (): Promise<boolean> => {
     return Promise.resolve(true);
   }
   return new Promise((resolve) => {
-    const existing = document.querySelector('script[src="https://checkout.chapa.co/v1/inline.js"]');
+    const existing = document.querySelector('script[src="https://js.chapa.co/v1/inline.js"]');
     if (existing) {
       if ((window as any).ChapaCheckout) return resolve(true);
       existing.addEventListener("load", () => resolve(true));
@@ -88,7 +111,7 @@ const loadChapaScript = (): Promise<boolean> => {
       return;
     }
     const script = document.createElement("script");
-    script.src = "https://checkout.chapa.co/v1/inline.js";
+    script.src = "https://js.chapa.co/v1/inline.js";
     script.async = true;
     script.onload = () => resolve(true);
     script.onerror = () => resolve(false);
@@ -123,7 +146,7 @@ export const ChapaLogoSVG = ({ className = "w-6 h-6" }: { className?: string }) 
     <img
       src={chapaLogoImg}
       className={`${className} object-contain mix-blend-multiply`}
-      alt="Chapa"
+      alt="Online payment"
       referrerPolicy="no-referrer"
     />
   );
@@ -472,7 +495,7 @@ export function MainApp() {
     // 2. If user is logged in AND their cloud cart has been loaded/merged, sync to Firestore
     if (user && cartLoadedFromDb) {
       setDoc(doc(db, "carts", user.uid), {
-        items: cart,
+        items: sanitizeForFirestore(cart),
         updatedAt: new Date().toISOString()
       }, { merge: true })
         .catch(e => {
@@ -517,7 +540,7 @@ export function MainApp() {
 
     // Trigger backend verification to transition paymentStatus from pending -> completed
     setIsVerifying(true);
-    fetch(`/api/chapa/verify/${activeOrderId}`)
+    authedFetch(`/api/chapa/verify/${activeOrderId}`)
       .then(res => res.json())
       .then(data => {
         console.log("[CHAPA VERIFY] Verification result:", data);
@@ -536,6 +559,21 @@ export function MainApp() {
         if (orderData.paymentStatus === 'completed') {
           setChapaCheckoutUrl(null);
           localStorage.removeItem('chapaCheckoutUrl');
+          // Fire a persistent notification + browser push + toast
+          if (user?.uid) {
+            pushNotification({
+              uid: user.uid,
+              type: "order_paid",
+              title: "Payment successful!",
+              body: `Your order #${docSnap.id.slice(-8).toUpperCase()} for ${(orderData.total ?? 0).toFixed(2)} ETB is being prepared.`,
+              orderId: docSnap.id,
+              amount: orderData.total
+            }).catch(() => {});
+          }
+        } else if (orderData.paymentStatus === 'pending' && user?.uid) {
+          // First time we see the pending order in this session — notify too
+          // (only if we haven't already)
+          // (no-op here to avoid duplicates; the real notification is on completed)
         }
       } else {
         // Order not found, clear local storage
@@ -643,12 +681,12 @@ export function MainApp() {
   };
 
   const addToCart = (item: MenuItem, variation?: MenuItemVariation) => {
-    const variationId = variation ? String(variation.id) : undefined;
+    const variationId = variation ? String(variation.id) : null;
     const unitPrice = variation ? variationPrice(variation) : (Number(item.price) || 0);
     const snapshot: OrderItem["menuItem"] = {
       ...item,
       price: unitPrice,
-      variation: variation ? { id: String(variation.id), label: variation.label || "" } : undefined
+      ...(variation ? { variation: { id: String(variation.id), label: variation.label || "" } } : {})
     };
     setCart(prev => {
       const existing = prev.find(i => i.menuItem.id === item.id && (i.variationId ?? null) === (variationId ?? null));
@@ -736,7 +774,35 @@ export function MainApp() {
   const handleCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
     if (cart.length === 0) return;
+    if (!user) {
+      toastWarning("Please sign in with Google to place your order.");
+      handleLogin();
+      setCheckoutLoading(false);
+      return;
+    }
+    // Guard against slow network: pricing/tax/delivery fee must be loaded
+    if (!settingsLoaded) {
+      toastWarning("Pricing is still loading. Please wait a moment and try again.");
+      return;
+    }
+
+    const emailTrimmed = customerEmail.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTrimmed) || emailTrimmed.endsWith("@example.com")) {
+      toastWarning("Please provide a valid, real email address (e.g. yourname@gmail.com) for online payment.");
+      return;
+    }
+
     setCheckoutLoading(true);
+
+    // Client-side cap: if the server doesn't respond in 120s, surface a clear
+    // error and unlock the button. The server has its own 120s hard cap, but
+    // a slow DNS / TCP handshake can delay the request even longer.
+    const clientAbort = new AbortController();
+    const clientCap = setTimeout(() => {
+      try { clientAbort.abort(); } catch (_) { /* noop */ }
+      toastError("The payment server didn't respond in time. Please try again.");
+      setCheckoutLoading(false);
+    }, 120000);
 
     // Make delivery address strictly required ONLY for delivery fulfillment
     if (fulfillmentType === 'delivery' && !googleMapsAddress.trim()) {
@@ -786,9 +852,10 @@ export function MainApp() {
         const res = await authedFetch("/api/chapa/initialize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: clientAbort.signal,
           body: JSON.stringify({
             amount: finalTotal,
-            email: customerEmail.trim(),
+            email: emailTrimmed,
             first_name: firstName,
             last_name: lastName,
             phone_number: customerPhone.trim(),
@@ -799,7 +866,7 @@ export function MainApp() {
             specialInstructions,
             fulfillmentType,
             scheduledFor: finalScheduledFor,
-            userId: user.uid,
+            userId: user?.uid || "",
             serviceTax: taxAmount,
             flatFee: deliveryFee,
             promoCode: appliedPromo?.code || null,
@@ -808,8 +875,9 @@ export function MainApp() {
         });
 
         const data = await res.json();
+        clearTimeout(clientCap);
         if (!res.ok || !data.success) {
-          let errorText = "Failed to initialize Chapa checkout. Please try again.";
+          let errorText = "Failed to initialize the online payment. Please try again.";
           if (typeof data.error === "string") {
             errorText = data.error;
           } else if (data.error && typeof data.error === "object") {
@@ -825,10 +893,28 @@ export function MainApp() {
         localStorage.setItem('activeOrderId', data.txRef);
         setActiveOrderId(data.txRef);
 
-        if (data.mode === "hosted" && data.checkoutUrl) {
+        if (data.checkoutUrl) {
           localStorage.setItem('chapaCheckoutUrl', data.checkoutUrl);
           setChapaCheckoutUrl(data.checkoutUrl);
+
+          // CRITICAL: Clear cart synchronously BEFORE navigation.
+          // React's setCart([]) schedules a state update that runs AFTER render,
+          // but window.location.href triggers synchronous page unload — the effect
+          // never runs. So we must clear localStorage and Firestore cart directly.
           setCart([]);
+          localStorage.removeItem("gourmet_cart");
+          if (user) {
+            setDoc(doc(db, "carts", user.uid), { items: [], updatedAt: new Date().toISOString() }, { merge: true }).catch(() => {});
+            pushNotification({
+              uid: user.uid,
+              type: "order_placed",
+              title: "Order placed — complete payment",
+              body: `Order #${data.txRef.slice(-8).toUpperCase()} for ${finalTotal.toFixed(2)} ETB is awaiting payment.`,
+              orderId: data.txRef,
+              amount: finalTotal
+            }).catch(() => {});
+          }
+
           setIsCheckingOut(false);
           setIsCartOpen(false);
           setCheckoutLoading(false);
@@ -844,25 +930,56 @@ export function MainApp() {
         if (data.mode === "inline" || data.publicKey) {
           const loaded = await loadChapaScript();
           if (!loaded || !(window as any).ChapaCheckout) {
-            throw new Error("Unable to load Chapa checkout script. Please check your internet connection and try again.");
+            throw new Error("Unable to load the payment script. Please check your internet connection and try again.");
           }
 
-          (window as any).ChapaCheckout.init({
+          let container = document.getElementById("chapa-inline-form") as HTMLDivElement | null;
+          if (!container) {
+            container = document.createElement("div");
+            container.id = "chapa-inline-form";
+            container.style.position = "fixed";
+            container.style.inset = "0";
+            container.style.zIndex = "9999";
+            document.body.appendChild(container);
+          } else {
+            container.innerHTML = "";
+          }
+
+          const ChapaCheckout = (window as any).ChapaCheckout;
+          const chapa = new ChapaCheckout({
             publicKey: data.publicKey,
-            amount: finalTotal.toString(),
+            amount: finalTotal.toFixed(2),
             currency: "ETB",
-            email: customerEmail.trim(),
-            first_name: firstName,
-            last_name: lastName,
-            phone_number: customerPhone.trim(),
-            tx_ref: data.txRef,
-            callback_url: data.callbackUrl,
-            return_url: data.returnUrl,
-            customization: {
+            availablePaymentMethods: ['telebirr', 'cbebirr', 'ebirr', 'mpesa', 'chapa'],
+            customizations: {
+              buttonText: "Pay Online",
               title: "Savory Order",
               description: `Payment for ${cart.length || 1} items`
             },
-            onSuccess: () => {
+            callbackUrl: data.callbackUrl,
+            returnUrl: data.returnUrl,
+            showFlag: true,
+            showPaymentMethodsNames: true,
+            onSuccessfulPayment: async () => {
+              // Mark the order paid server-side. The inline flow has no server
+              // callback, so we hit /api/chapa/verify to ask Chapa to confirm
+              // the payment and update the Firestore order.
+              try {
+                const txRef = data.txRef;
+                const verifyRes = await authedFetch(`/api/chapa/verify/${encodeURIComponent(txRef)}`);
+                const verifyData = await verifyRes.json().catch(() => ({}));
+                if (verifyRes.ok && verifyData.status === "success") {
+                  // Surface the success view the user expects after hosted flow.
+                  const orderRef = { id: txRef, paymentStatus: "completed", status: "preparing", total: finalTotal };
+                  setPlacedOrder((prev: any) => prev && prev.id === txRef ? { ...prev, ...orderRef } : orderRef);
+                  toastSuccess("Payment received! Your order is now preparing.");
+                } else {
+                  toastWarning("Payment submitted but verification is still pending. We'll update your order shortly.");
+                }
+              } catch (e) {
+                console.warn("[INLINE CHAPA] verify call failed:", e);
+                toastWarning("Payment submitted but we couldn't verify it instantly. We'll update your order shortly.");
+              }
               setCart([]);
               setIsCheckingOut(false);
               setIsCartOpen(false);
@@ -872,11 +989,23 @@ export function MainApp() {
               setRoomNumber("");
               setScheduleEnabled(false);
               setScheduledFor("");
+              if (container && container.parentNode) container.parentNode.removeChild(container);
+            },
+            onPaymentFailure: () => {
+              toastError("Payment failed or was cancelled. Please try again.");
+              setCheckoutLoading(false);
+              if (container && container.parentNode) container.parentNode.removeChild(container);
             },
             onClose: () => {
               setCheckoutLoading(false);
+              if (container && container.parentNode) container.parentNode.removeChild(container);
             }
           });
+          try {
+            chapa.initialize("chapa-inline-form");
+          } catch (e: any) {
+            throw new Error("Failed to open the payment form: " + (e?.message || "unknown error"));
+          }
           return;
         }
       } else {
@@ -899,7 +1028,7 @@ export function MainApp() {
             paymentMethod: "cash",
             paymentStatus: "pending",
             status: "pending",
-            userId: user.uid,
+            userId: user?.uid || "",
             serviceTax: taxAmount,
             flatFee: deliveryFee,
             promoCode: appliedPromo?.code,
@@ -926,6 +1055,10 @@ export function MainApp() {
         }
       }
     } catch (err: any) {
+      clearTimeout(clientCap);
+      // AbortError from our own 22s cap is already toasted above; rethrow as a
+      // silent cancel so we don't double-toast.
+      if (err?.name === "AbortError") return;
       const msg = typeof err?.message === "string" ? err.message : (typeof err === "string" ? err : JSON.stringify(err));
       toastError(`Checkout failed: ${msg}`);
       setCheckoutLoading(false);
@@ -1127,6 +1260,8 @@ export function MainApp() {
                 </button>
               )}
 
+              <NotificationCenter uid={user?.uid || null} />
+
               <button
                 onClick={() => setIsCartOpen(true)}
                 className="relative p-2.5 border border-stone-200 hover:border-stone-400 bg-stone-50 hover:bg-stone-100 rounded-xl transition-all cursor-pointer flex items-center text-stone-800"
@@ -1226,12 +1361,11 @@ export function MainApp() {
                         </div>
                         <div className="space-y-6">
                           {group.items.map(dish => (
-                            <Link
-                              key={dish.id}
-                              to={`/food/${dish.id}`}
-                              className="group flex flex-col sm:flex-row justify-between items-baseline cursor-pointer hover:bg-stone-100/50 p-3 -mx-3 rounded transition-colors"
-                            >
-                              <div className="flex flex-1 min-w-0 items-start pr-4 w-full">
+                            <div key={dish.id} className="group flex flex-col sm:flex-row justify-between items-baseline hover:bg-stone-100/50 p-3 -mx-3 rounded transition-colors">
+                              <Link
+                                to={`/food/${dish.id}`}
+                                className="flex flex-1 min-w-0 items-start pr-4 w-full cursor-pointer"
+                              >
                                 <img
                                   src={dish.image}
                                   alt={dish.name}
@@ -1245,35 +1379,34 @@ export function MainApp() {
                                   <p className="text-xs md:text-sm text-stone-600 mt-1 font-serif italic line-clamp-2">{dish.description}</p>
                                   <div className="flex space-x-2 mt-2 font-sans items-center">
                                     {dish.popular && <span className="text-[10px] font-bold text-amber-700 uppercase tracking-widest">Popular</span>}
-                                    
+
                                     {dish.menuTiming && dish.menuTiming !== "All Day" && (
-                                      <span className="text-[10px] text-emerald-700 uppercase tracking-widest">• {dish.menuTiming}{dish.timingFrom && dish.timingTo ? ` (Available ${dish.timingFrom}–${dish.timingTo})` : ''}</span>
+                                      <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-widest">• {dish.menuTiming}{dish.timingFrom && dish.timingTo ? ` (Available ${dish.timingFrom}–${dish.timingTo})` : ''}</span>
                                     )}
                                   </div>
                                 </div>
-                              </div>
+                              </Link>
                               <div className="pl-0 sm:pl-4 mt-3 sm:mt-0 shrink-0 flex flex-row sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto">
                                 <span className="font-mono text-base md:text-lg font-bold text-stone-900 group-hover:text-amber-700 transition-colors">{menuDisplayPrice(dish)}</span>
                                 <button
                                   disabled={!isOpen}
-                                  onClick={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
+                                  onClick={() => {
                                     if (itemVariations(dish).length > 0) {
                                       navigate(`/food/${dish.id}`);
                                     } else {
                                       addToCart(dish);
+                                      toastSuccess(`Added ${dish.name} to your order`);
                                     }
                                   }}
                                   className={`mt-0 sm:mt-2 text-[10px] font-bold uppercase tracking-widest px-4 py-1.5 rounded transition-colors ${isOpen
-                                    ? 'bg-stone-200 text-stone-800 hover:bg-amber-600 hover:text-white'
+                                    ? 'bg-stone-200 text-stone-800 hover:bg-amber-600 hover:text-white cursor-pointer'
                                     : 'bg-stone-200 text-stone-400 cursor-not-allowed'
                                     }`}
                                 >
                                   {isOpen ? 'Add' : 'Closed'}
                                 </button>
                               </div>
-                            </Link>
+                            </div>
                           ))}
                         </div>
                       </div>
@@ -1286,12 +1419,11 @@ export function MainApp() {
                         </div>
                         <div className="space-y-6">
                           {uncategorizedItems.map(dish => (
-                            <Link
-                              key={dish.id}
-                              to={`/food/${dish.id}`}
-                              className="group flex flex-col sm:flex-row justify-between items-baseline cursor-pointer hover:bg-stone-100/50 p-3 -mx-3 rounded transition-colors"
-                            >
-                              <div className="flex flex-1 min-w-0 items-start pr-4 w-full">
+                            <div key={dish.id} className="group flex flex-col sm:flex-row justify-between items-baseline hover:bg-stone-100/50 p-3 -mx-3 rounded transition-colors">
+                              <Link
+                                to={`/food/${dish.id}`}
+                                className="flex flex-1 min-w-0 items-start pr-4 w-full cursor-pointer"
+                              >
                                 <img
                                   src={dish.image}
                                   alt={dish.name}
@@ -1305,35 +1437,34 @@ export function MainApp() {
                                   <p className="text-xs md:text-sm text-stone-600 mt-1 font-serif italic line-clamp-2">{dish.description}</p>
                                   <div className="flex space-x-2 mt-2 font-sans items-center">
                                     {dish.popular && <span className="text-[10px] font-bold text-amber-700 uppercase tracking-widest">Popular</span>}
-                                    
+
                                     {dish.menuTiming && dish.menuTiming !== "All Day" && (
-                                      <span className="text-[10px] text-emerald-700 uppercase tracking-widest">• {dish.menuTiming}{dish.timingFrom && dish.timingTo ? ` (Available ${dish.timingFrom}–${dish.timingTo})` : ''}</span>
+                                      <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-widest">• {dish.menuTiming}{dish.timingFrom && dish.timingTo ? ` (Available ${dish.timingFrom}–${dish.timingTo})` : ''}</span>
                                     )}
                                   </div>
                                 </div>
-                              </div>
+                              </Link>
                               <div className="pl-0 sm:pl-4 mt-3 sm:mt-0 shrink-0 flex flex-row sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto">
                                 <span className="font-mono text-base md:text-lg font-bold text-stone-900 group-hover:text-amber-700 transition-colors">{menuDisplayPrice(dish)}</span>
                                 <button
                                   disabled={!isOpen}
-                                  onClick={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
+                                  onClick={() => {
                                     if (itemVariations(dish).length > 0) {
                                       navigate(`/food/${dish.id}`);
                                     } else {
                                       addToCart(dish);
+                                      toastSuccess(`Added ${dish.name} to your order`);
                                     }
                                   }}
                                   className={`mt-0 sm:mt-2 text-[10px] font-bold uppercase tracking-widest px-4 py-1.5 rounded transition-colors ${isOpen
-                                    ? 'bg-stone-200 text-stone-800 hover:bg-amber-600 hover:text-white'
+                                    ? 'bg-stone-200 text-stone-800 hover:bg-amber-600 hover:text-white cursor-pointer'
                                     : 'bg-stone-200 text-stone-400 cursor-not-allowed'
                                     }`}
                                 >
                                   {isOpen ? 'Add' : 'Closed'}
                                 </button>
                               </div>
-                            </Link>
+                            </div>
                           ))}
                         </div>
                       </div>
@@ -1588,7 +1719,7 @@ export function MainApp() {
                             required
                             value={customerEmail}
                             onChange={e => setCustomerEmail(e.target.value)}
-                            placeholder="name@example.com"
+                            placeholder="yourname@gmail.com"
                             className="w-full text-xs border border-stone-350 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 bg-stone-50/50"
                           />
                         </div>
@@ -1648,7 +1779,7 @@ export function MainApp() {
                                 <div className="bg-white p-0.5 rounded-md flex items-center justify-center shadow-2xs">
                                   <ChapaLogoSVG className="w-5 h-5 flex-shrink-0" />
                                 </div>
-                                <span className="text-[10px]">Chapa Pay</span>
+                                <span className="text-[10px]">Online Pay</span>
                               </div>
                               <span className="text-[8px] opacity-75">Telebirr / Cards</span>
                             </button>
@@ -1723,24 +1854,33 @@ export function MainApp() {
                       <span>Subtotal</span>
                       <span className="font-mono">{cartTotal.toFixed(2)} ETB</span>
                     </div>
-                    {checkoutSettings.serviceTaxPercent > 0 && (
-                      <div className="flex justify-between">
-                        <span>Service Tax ({checkoutSettings.serviceTaxPercent}%)</span>
-                        <span className="font-mono">+{taxAmount.toFixed(2)} ETB</span>
+                    {!settingsLoaded ? (
+                      <div className="flex justify-between text-stone-400">
+                        <span>Service Tax & Delivery Fee</span>
+                        <span className="font-mono animate-pulse">Loading...</span>
                       </div>
+                    ) : (
+                      <>
+                        {checkoutSettings.serviceTaxPercent > 0 && (
+                          <div className="flex justify-between">
+                            <span>Service Tax ({checkoutSettings.serviceTaxPercent}%)</span>
+                            <span className="font-mono">+{taxAmount.toFixed(2)} ETB</span>
+                          </div>
+                        )}
+                        <div className="flex justify-between">
+                          <span>{fulfillmentType === 'delivery' ? 'Delivery Fee' : 'Fulfillment'}</span>
+                          {fulfillmentType === 'delivery' ? (
+                            deliveryFee > 0 ? (
+                              <span className="font-mono">+{deliveryFee.toFixed(2)} ETB</span>
+                            ) : (
+                              <span className="text-emerald-700 font-bold">FREE</span>
+                            )
+                          ) : (
+                            <span className="text-emerald-700 font-bold">No delivery fee</span>
+                          )}
+                        </div>
+                      </>
                     )}
-                    <div className="flex justify-between">
-                      <span>{fulfillmentType === 'delivery' ? 'Delivery Fee' : 'Fulfillment'}</span>
-                      {fulfillmentType === 'delivery' ? (
-                        deliveryFee > 0 ? (
-                          <span className="font-mono">+{deliveryFee.toFixed(2)} ETB</span>
-                        ) : (
-                          <span className="text-emerald-700 font-bold">FREE</span>
-                        )
-                      ) : (
-                        <span className="text-emerald-700 font-bold">No delivery fee</span>
-                      )}
-                    </div>
                     {appliedPromo && (
                       <div className="flex justify-between text-emerald-700 font-semibold">
                         <span>Promo ({appliedPromo.code})</span>
@@ -1749,14 +1889,41 @@ export function MainApp() {
                     )}
                     <div className="flex justify-between text-stone-900 font-bold text-sm pt-2 border-t border-stone-200">
                       <span>Total Bill:</span>
-                      <span className="font-mono text-amber-700">{finalTotal.toFixed(2)} ETB</span>
+                      {!settingsLoaded ? (
+                        <span className="font-mono text-stone-400 animate-pulse">Loading...</span>
+                      ) : (
+                        <span className="font-mono text-amber-700">{finalTotal.toFixed(2)} ETB</span>
+                      )}
                     </div>
                   </div>
 
+                  {!user && (
+                    <div className="mb-3 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl flex items-center justify-between text-xs animate-fade-in">
+                      <div className="pr-2">
+                        <p className="font-bold text-stone-900">Sign in to complete order</p>
+                        <p className="text-[11px] text-stone-500">Sign in with Google to pay & track delivery</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleLogin}
+                        disabled={loginLoading}
+                        className="bg-stone-900 hover:bg-stone-800 text-white font-bold px-3.5 py-2 rounded-xl text-xs transition cursor-pointer flex items-center space-x-1.5 shadow-sm shrink-0"
+                      >
+                        <LogIn className="w-3.5 h-3.5" />
+                        <span>Sign In</span>
+                      </button>
+                    </div>
+                  )}
+
                   {!isCheckingOut ? (
                     <button
-                      disabled={!isOpen}
+                      disabled={!isOpen || !settingsLoaded}
                       onClick={() => {
+                        if (!user) {
+                          toastWarning("Please sign in with Google to proceed with your order.");
+                          handleLogin();
+                          return;
+                        }
                         setIsCheckingOut(true);
                         if (!customerName) setCustomerName(localStorage.getItem("lastCheckoutName") || "");
                         if (!customerEmail) setCustomerEmail(localStorage.getItem("lastCheckoutEmail") || "");
@@ -1769,11 +1936,11 @@ export function MainApp() {
                           setUseGoogleMaps(savedUseGoogleMaps === "true");
                         }
                       }}
-                      className={`w-full font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-all flex items-center justify-center ${isOpen ? 'bg-stone-900 hover:bg-amber-600 text-white cursor-pointer' : 'bg-stone-300 text-stone-500 cursor-not-allowed'
+                      className={`w-full font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-all flex items-center justify-center ${isOpen && settingsLoaded ? 'bg-stone-900 hover:bg-amber-600 text-white cursor-pointer' : 'bg-stone-300 text-stone-500 cursor-not-allowed'
                         }`}
                     >
-                      <span>{isOpen ? (fulfillmentType === 'delivery' ? 'Proceed to Delivery details' : 'Proceed to Checkout') : 'Currently Closed'}</span>
-                      {isOpen && <ChevronRight className="w-4 h-4 ml-1" />}
+                      <span>{!settingsLoaded ? 'Loading pricing...' : !user ? 'Sign In with Google to Order' : isOpen ? (fulfillmentType === 'delivery' ? 'Proceed to Delivery details' : 'Proceed to Checkout') : 'Currently Closed'}</span>
+                      {isOpen && settingsLoaded && <ChevronRight className="w-4 h-4 ml-1" />}
                     </button>
                   ) : (
                     <div className="flex space-x-2">
@@ -1782,7 +1949,7 @@ export function MainApp() {
                           const trigger = document.getElementById("hidden-submit-trigger");
                           trigger?.click();
                         }}
-                        disabled={checkoutLoading}
+                        disabled={checkoutLoading || !settingsLoaded}
                         className={`flex-1 font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-all flex items-center justify-center cursor-pointer disabled:opacity-50 ${paymentMethod === 'chapa'
                           ? 'bg-[#071224] hover:bg-[#0c1e3a] text-white space-x-1.5'
                           : 'bg-amber-600 hover:bg-amber-700 text-white'
@@ -1794,7 +1961,7 @@ export function MainApp() {
                               <div className="bg-white p-0.5 rounded-md flex items-center justify-center shadow-2xs">
                                 <ChapaLogoSVG className="w-4.5 h-4.5 flex-shrink-0" />
                               </div>
-                              <span>Pay with Chapa</span>
+                              <span>Pay Online</span>
                             </span>
                           ) : 'Confirm Order'
                         )}
@@ -1841,16 +2008,16 @@ export function MainApp() {
                     <span className="font-mono text-stone-900">{selectedReceiptOrder.id}</span>
                   </div>
                   <div className="flex justify-between text-[11px]">
-                    <span className="text-stone-500">Chapa ID:</span>
+                    <span className="text-stone-500">Transaction ID:</span>
                     <span className="font-mono text-stone-900 text-right max-w-[180px] truncate">{selectedReceiptOrder.receipt?.transactionId || `chapa-sim-${selectedReceiptOrder.id}`}</span>
                   </div>
                   <div className="flex justify-between text-[11px]">
                     <span className="text-stone-500">Method:</span>
-                    <span className="font-semibold text-emerald-800 font-sans uppercase">{selectedReceiptOrder.receipt?.paymentMethod || "Chapa (CBE/Telebirr)"}</span>
+                    <span className="font-semibold text-emerald-800 font-sans uppercase">{selectedReceiptOrder.receipt?.paymentMethod || "Online (CBE/Telebirr)"}</span>
                   </div>
                   {selectedReceiptOrder.paymentMethod === "chapa" && (
                     <div className="flex justify-between items-center text-[11px] pt-1.5 mt-1.5 border-t border-stone-200/40">
-                      <span className="text-stone-500 font-medium">Chapa Receipt:</span>
+                      <span className="text-stone-500 font-medium">Receipt:</span>
                       <a
                         href={`https://chapa.link/payment-receipt/${selectedReceiptOrder.receipt?.reference || selectedReceiptOrder.id}`}
                         target="_blank"
@@ -1941,7 +2108,7 @@ export function MainApp() {
                             name: selectedReceiptOrder.customerName,
                             total: `${selectedReceiptOrder.total.toFixed(2)} ETB`,
                             date: selectedReceiptOrder.receipt?.date || selectedReceiptOrder.createdAt,
-                            payment: selectedReceiptOrder.receipt?.paymentMethod || "Chapa"
+                            payment: selectedReceiptOrder.receipt?.paymentMethod || "Online"
                           })
                         )}`}
                         alt="Order QR Code"
@@ -1954,6 +2121,14 @@ export function MainApp() {
                   <div className="space-y-1">
                     <p className="text-[11px] font-serif font-bold italic text-stone-950">Thank you for ordering!</p>
                     <p className="text-[10px] text-stone-400">Enjoy your gourmet meal.</p>
+                    {(globalSettings?.businessEmail || globalSettings?.businessPhone || globalSettings?.businessAddress) && (
+                      <div className="pt-3 mt-2 border-t border-dashed border-stone-200 space-y-0.5 text-[9px] text-stone-500 font-sans">
+                        <p className="font-bold text-stone-700 uppercase tracking-widest text-[8px]">{globalSettings?.restaurantName || "Savory"}</p>
+                        {globalSettings?.businessAddress && <p>{globalSettings.businessAddress}</p>}
+                        {globalSettings?.businessPhone && <p>Tel: {globalSettings.businessPhone}</p>}
+                        {globalSettings?.businessEmail && <p className="break-all">{globalSettings.businessEmail}</p>}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -2039,7 +2214,7 @@ export function MainApp() {
                             if (data.success && data.status === "completed") {
                               console.log("[CHAPA MANUAL VERIFY] Success!");
                             } else {
-                              toastInfo("Status is still processing on Chapa's side. If you have already completed the payment, it will update shortly. Current state: " + (data.status || "pending"));
+                              toastInfo("Payment is still processing. If you have already completed the payment, it will update shortly. Current state: " + (data.status || "pending"));
                             }
                           } catch (e) {
                             console.error("[CHAPA MANUAL VERIFY] Error:", e);
@@ -2318,7 +2493,7 @@ export function MainApp() {
                 <h3 className="font-serif text-lg font-bold text-stone-900">Manage Order</h3>
                 <p className="font-mono text-xs text-stone-500 mt-1">Order ID: {orderActionModal.id}</p>
                 <p className="text-xs text-stone-600 mt-2 leading-relaxed">
-                  This order is waiting for payment. Would you like to pay now via Chapa or cancel this order?
+                  This order is waiting for payment. Would you like to pay online now or cancel this order?
                 </p>
               </div>
 
@@ -2339,7 +2514,7 @@ export function MainApp() {
                   <div className="bg-white p-0.5 rounded-md flex items-center justify-center shadow-2xs">
                     <ChapaLogoSVG className="w-4 h-4 flex-shrink-0" />
                   </div>
-                  <span>Pay Now via Chapa</span>
+                  <span>Pay Now</span>
                 </button>
 
                 <button
@@ -2564,15 +2739,41 @@ export function MainApp() {
             </div>
             <div className="space-y-2">
               <h4 className="text-xs font-bold uppercase tracking-widest text-white">CONTACT US</h4>
-              <p className="text-xs leading-relaxed">
-                {/* contact us info */}
-              </p>
+              <div className="text-xs leading-relaxed space-y-1.5">
+                {globalSettings?.businessEmail && (
+                  <div className="flex items-center space-x-2">
+                    <Mail className="w-3 h-3 text-amber-500 flex-shrink-0" />
+                    <a href={`mailto:${globalSettings.businessEmail}`} className="hover:text-white transition-colors break-all">
+                      {globalSettings.businessEmail}
+                    </a>
+                  </div>
+                )}
+                {globalSettings?.businessPhone && (
+                  <div className="flex items-center space-x-2">
+                    <Phone className="w-3 h-3 text-amber-500 flex-shrink-0" />
+                    <a href={`tel:${globalSettings.businessPhone}`} className="hover:text-white transition-colors">
+                      {globalSettings.businessPhone}
+                    </a>
+                  </div>
+                )}
+                {!globalSettings?.businessEmail && !globalSettings?.businessPhone && (
+                  <p className="text-stone-500 italic">Add contact info in admin settings.</p>
+                )}
+              </div>
             </div>
             <div className="space-y-2">
               <h4 className="text-xs font-bold uppercase tracking-widest text-white">Location</h4>
-              <p className="text-xs leading-relaxed font-sans">
-                {/*add location info */}
-              </p>
+              <div className="text-xs leading-relaxed font-sans flex items-start space-x-2">
+                {globalSettings?.businessAddress && (
+                  <>
+                    <MapPin className="w-3 h-3 text-amber-500 flex-shrink-0 mt-0.5" />
+                    <span>{globalSettings.businessAddress}</span>
+                  </>
+                )}
+                {!globalSettings?.businessAddress && (
+                  <p className="text-stone-500 italic">Add your address in admin settings.</p>
+                )}
+              </div>
             </div>
             <div className="space-y-3 md:col-span-1">
               <h4 className="text-xs font-bold uppercase tracking-widest text-white">Newsletter</h4>

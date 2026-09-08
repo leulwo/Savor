@@ -152,6 +152,10 @@ service cloud.firestore {
       allow read: if ownsUserDocument(userId) || isAdmin() || can('customers.view');
       allow create, delete: if ownsUserDocument(userId) || isAdmin();
       allow update: if ownsUserDocument(userId) || isAdmin();
+
+      match /notifications/{notificationId} {
+        allow read, create, update, delete: if ownsUserDocument(userId);
+      }
     }
 
     match /carts/{userId} {
@@ -197,7 +201,7 @@ service cloud.firestore {
     }
 
     match /settings/{settingId} {
-      allow get: if settingId == 'global' || isAdmin() || can('settings.view');
+      allow get: if settingId == 'global' || settingId == 'checkout' || isAdmin() || can('settings.view');
       allow list: if isAdmin() || can('settings.view');
       allow write: if isAdmin() || can('settings.edit');
     }

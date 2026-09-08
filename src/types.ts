@@ -55,7 +55,7 @@ export interface OrderItem {
 export interface Order {
   id: string;
   items: OrderItem[];
-  status: 'pending' | 'preparing' | 'ready' | 'delivered' | 'cancelled';
+  status: 'pending' | 'preparing' | 'ready' | 'dispatched' | 'delivered' | 'cancelled';
   total: number;
   customerName: string;
   customerEmail: string;

@@ -14,6 +14,13 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
   const [loading, setLoading] = useState(true);
   const [expandedRole, setExpandedRole] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Auto-dismiss success messages after 4s; errors stay until the user closes them.
+  useEffect(() => {
+    if (!message || message.type !== 'success') return;
+    const t = setTimeout(() => setMessage(null), 4000);
+    return () => clearTimeout(t);
+  }, [message]);
   const [newRoleName, setNewRoleName] = useState("");
   // Staged permission changes: roleId -> desired permission map. NOT written to
   // Firestore until "Save Configuration" is confirmed.

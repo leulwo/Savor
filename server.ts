@@ -224,6 +224,11 @@ async function triggerShipday(orderId: string, db: any, deliveryMinutes?: number
 
     const orderData = docSnap.data();
 
+    if (orderData.shipdayOrderId) {
+      console.log(`[SHIPDAY] Skip: order ${orderId} already has shipdayOrderId ${orderData.shipdayOrderId} (already dispatched).`);
+      return;
+    }
+
     console.log(`[SHIPDAY] Triggering order ${orderId} (Delivery: ${deliveryMinutes || 'auto'}, Pickup Lead: ${pickupLeadTime})...`);
 
     const payload: any = {
@@ -630,6 +635,12 @@ app.patch("/api/orders/:id", requireStaffAuth, async (req, res) => {
       } else if (from === "preparing" && to === "ready") {
         allowed = staffHas(permCtx, "orders.updateStatus") || staffHas(permCtx, "kds.markReady");
         permLabel = "mark orders ready";
+      } else if (from === "ready" && to === "dispatched") {
+        allowed = staffHas(permCtx, "orders.updateStatus");
+        permLabel = "dispatch order to Shipday";
+      } else if (from === "dispatched" && to === "delivered") {
+        allowed = staffHas(permCtx, "orders.updateStatus");
+        permLabel = "mark order delivered";
       } else {
         allowed = staffHas(permCtx, "orders.updateStatus");
         permLabel = "update order status";
@@ -664,12 +675,14 @@ app.patch("/api/orders/:id", requireStaffAuth, async (req, res) => {
     if (Object.keys(updates).length > 0) {
       await existingRef.update(updates);
 
-      // Trigger Shipday ONLY when status becomes 'ready' AND order is delivery fulfillment
-      if (status === "ready" && existingData.fulfillmentType !== 'pickup' && existingData.fulfillmentType !== 'dineIn') {
-        console.log(`[SHIPDAY] Status for ${id} changed to ready. Syncing...`);
-        triggerShipday(id, db, deliveryMinutes);
+      // Trigger Shipday ONLY when status becomes 'dispatched' (manual dispatch) AND order is delivery fulfillment
+      if (status === "dispatched" && existingData.fulfillmentType !== 'pickup' && existingData.fulfillmentType !== 'dineIn') {
+        console.log(`[SHIPDAY] Status for ${id} changed to dispatched. Syncing...`);
+        await triggerShipday(id, db, deliveryMinutes);
+      } else if (status === "dispatched") {
+        console.log(`[SHIPDAY] Order ${id} is ${existingData.fulfillmentType || 'delivery'} fulfillment; holding at dispatched (no Shipday dispatch).`);
       } else if (status === "ready") {
-        console.log(`[SHIPDAY] Order ${id} is ${existingData.fulfillmentType || 'delivery'} fulfillment; holding at ready (no Shipday dispatch).`);
+        console.log(`[SHIPDAY] Order ${id} marked ready; holding for manual dispatch (no Shipday sync).`);
       }
     }
 
@@ -926,21 +939,30 @@ app.get("/api/chapa/callback", async (req, res) => {
 });
 
 // Chapa Initialize
-app.post("/api/chapa/initialize", requireCustomerAuth, async (req, res) => {
+app.post("/api/chapa/initialize", async (req, res) => {
   try {
-    dotenv.config({ override: true });
     const { amount, email, first_name, last_name, phone_number, items } = req.body;
 
     if (!amount || !email || !first_name || !last_name) {
-      return res.status(400).json({ error: "Missing required Chapa initiation parameters." });
+      return res.status(400).json({ error: "Missing required Chapa initiation parameters (amount, email, first name, last name)." });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(String(email).trim()) || String(email).trim().endsWith("@example.com")) {
+      return res.status(400).json({ error: "Please provide a valid, real email address (e.g. your Gmail or work email)." });
     }
 
     const tx_ref = `tx-savory-${Date.now()}`;
     const rawKey = (process.env.CHAPA_SECRET_KEY || "").trim();
-    const rawPublicKey = (process.env.VITE_CHAPA_PUBLIC_KEY || process.env.CHAPA_PUBLIC_KEY || "").trim();
-
     const secretKey = (rawKey.startsWith("CHASECK_") || rawKey.startsWith("CHAPASECKEY-")) ? rawKey : "";
-    const publicKey = rawPublicKey || (rawKey.startsWith("CHAPUBK_") ? rawKey : "");
+
+    if (!secretKey || secretKey === "MY_CHAPA_SECRET_KEY" || secretKey.startsWith("CHAPASECKEY-xxxx")) {
+      console.warn("[CHAPA INITIALIZE] CHAPA_SECRET_KEY missing or placeholder in .env");
+      return res.status(400).json({
+        success: false,
+        error: "Missing or invalid CHAPA_SECRET_KEY in backend environment (.env)."
+      });
+    }
 
     // Dynamically detect the base URL of the request
     const requestHost = req.headers.host || "localhost:3000";
@@ -954,13 +976,35 @@ app.post("/api/chapa/initialize", requireCustomerAuth, async (req, res) => {
 
     console.log(`[CHAPA INITIALIZE] Base URL resolved to: ${baseUrl} (Host: ${requestHost}, Proto: ${requestProto})`);
 
+    const chapaPayload: any = {
+      amount: (parseFloat(amount) || 0).toFixed(2),
+      currency: "ETB",
+      email: String(email).trim(),
+      first_name: String(first_name).trim(),
+      last_name: String(last_name).trim(),
+      tx_ref: tx_ref,
+      callback_url: `${baseUrl}/api/chapa/webhook`,
+      return_url: `${baseUrl}/?status=success&tx_ref=${tx_ref}`,
+      customization: {
+        title: "Savory Order",
+        description: `Payment for ${items?.length || 1} items`
+      }
+    };
+    if (phone_number && String(phone_number).trim().length > 0) {
+      chapaPayload.phone_number = String(phone_number).trim();
+    }
+
+    // Authenticated user if token provided, otherwise guest checkout
+    const decodedToken = await verifyFirebaseToken(req);
+    const userId = decodedToken?.uid || req.body.userId || null;
+
     const newOrder = {
       id: tx_ref,
       items: items || [],
       status: "pending",
-      total: parseFloat(amount),
-      customerName: `${first_name} ${last_name}`,
-      customerEmail: email,
+      total: parseFloat(amount) || 0,
+      customerName: `${first_name} ${last_name}`.trim(),
+      customerEmail: String(email).trim(),
       customerPhone: phone_number || "",
       blockNumber: req.body.blockNumber || "",
       roomNumber: req.body.roomNumber || "",
@@ -968,108 +1012,92 @@ app.post("/api/chapa/initialize", requireCustomerAuth, async (req, res) => {
       specialInstructions: req.body.specialInstructions || "",
       paymentMethod: "chapa",
       paymentStatus: "pending",
-      fulfillmentType: ['delivery', 'pickup', 'dineIn'].includes(req.body.fulfillmentType) ? req.body.fulfillmentType : 'delivery',
-      scheduledFor: await (async () => {
-        const cfg = await getCheckoutSettings(db);
-        return normalizeScheduledFor(req.body.scheduledFor, cfg.prepTimeMinutes || 30);
-      })(),
+      fulfillmentType: req.body.fulfillmentType || "delivery",
+      scheduledFor: req.body.scheduledFor || null,
       transactionRef: tx_ref,
       createdAt: new Date().toISOString(),
-      userId: res.locals.uid,
+      userId: userId,
       serviceTax: req.body.serviceTax || 0,
       flatFee: req.body.flatFee || 0,
       promoCode: req.body.promoCode || null,
       discountAmount: req.body.discountAmount || 0
     };
 
-    await db.collection("orders").doc(tx_ref).set(newOrder);
+    console.log(`[CHAPA] Initiating payment for reference ${tx_ref} (amount: ${chapaPayload.amount} ETB)`);
 
-    // 1. If Secret Key is available, initialize via Chapa's official REST API (Hosted Checkout)
-    if (secretKey && secretKey !== "MY_CHAPA_SECRET_KEY") {
-      console.log(`[CHAPA] Attempting server-to-server hosted payment initiation for reference ${tx_ref}`);
-      try {
-        const chapaPayload: any = {
-          amount: amount.toString(),
-          currency: "ETB",
-          email: email.trim(),
-          first_name: first_name.trim(),
-          last_name: last_name.trim(),
-          tx_ref: tx_ref,
-          callback_url: `${baseUrl}/api/chapa/callback`,
-          return_url: `${baseUrl}/?status=success&tx_ref=${tx_ref}`,
-          customization: {
-            title: "Savory Order",
-            description: `Payment for ${items?.length || 1} items`
-          }
-        };
-        if (phone_number && phone_number.trim().length > 0) {
-          chapaPayload.phone_number = phone_number.trim();
-        }
-
-        const response = await fetch("https://api.chapa.co/v1/transaction/initialize", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${secretKey}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(chapaPayload)
-        });
-
-        const rawText = await response.text();
-        let chapaData: any = {};
-        try {
-          chapaData = JSON.parse(rawText);
-        } catch (e) {
-          console.error("[CHAPA INITIALIZE] Invalid JSON from Chapa API:", rawText);
-          return res.status(502).json({ success: false, error: "Chapa API returned non-JSON response", raw: rawText.slice(0, 200) });
-        }
-
-        console.log(`[CHAPA INITIALIZE] Response status: ${response.status}`, chapaData);
-
-        if (chapaData.status === "success" && chapaData.data?.checkout_url) {
-          await db.collection("orders").doc(tx_ref).update({ chapaCheckoutUrl: chapaData.data.checkout_url });
-          return res.json({ success: true, mode: "hosted", checkoutUrl: chapaData.data.checkout_url, txRef: tx_ref });
-        } else {
-          let errorMsg = "Chapa API initialization failed";
-          if (typeof chapaData.message === "string") {
-            errorMsg = chapaData.message;
-          } else if (typeof chapaData.message === "object" && chapaData.message !== null) {
-            errorMsg = Object.entries(chapaData.message)
-              .map(([field, errs]) => `${field}: ${Array.isArray(errs) ? errs.join(", ") : errs}`)
-              .join(" | ");
-          } else if (typeof chapaData.error === "string") {
-            errorMsg = chapaData.error;
-          } else if (typeof chapaData.errors === "object" && chapaData.errors !== null) {
-            errorMsg = Object.entries(chapaData.errors)
-              .map(([field, errs]) => `${field}: ${Array.isArray(errs) ? errs.join(", ") : errs}`)
-              .join(" | ");
-          }
-          return res.status(400).json({ success: false, error: errorMsg, details: chapaData });
-        }
-      } catch (err: any) {
-        console.error("[CHAPA INITIALIZE] Fetch error:", err);
-        return res.status(500).json({ success: false, error: "Chapa connection failed: " + err.message });
-      }
+    // Step 1: Save order to Firestore BEFORE calling Chapa.
+    // On slow networks, Firestore writes can take a long time (60s+ per retry).
+    // We use a race with a 25s timeout so the user isn't blocked indefinitely.
+    // If the write times out or fails, we still proceed to Chapa (best-effort) —
+    // the verify endpoint will create the order doc as a safety net.
+    let orderSaved = false;
+    try {
+      await Promise.race([
+        db.collection("orders").doc(tx_ref).set(newOrder),
+        new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error("Firestore write timed out (25s)")), 25000)
+        )
+      ]);
+      orderSaved = true;
+      console.log(`[CHAPA INITIALIZE] Order ${tx_ref} saved to Firestore.`);
+    } catch (err: any) {
+      console.error(`[CHAPA INITIALIZE] Firestore order save failed (continuing to Chapa):`, err?.message || err);
+      // Fire-and-forget: the write may still complete in the background via SDK retries.
+      // The verify endpoint will create the doc if it's still missing when the user returns.
+      db.collection("orders").doc(tx_ref).set(newOrder).catch(() => {});
     }
 
-    // 2. If Public Key is available, initialize via Chapa Inline Popup
-    if (publicKey) {
-      console.log(`[CHAPA] Returning inline public key checkout mode for reference ${tx_ref}`);
+    // Step 2: Call Chapa API to get the hosted checkout URL
+    let chapaResponse: Response;
+    try {
+      chapaResponse = await fetch("https://api.chapa.co/v1/transaction/initialize", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${secretKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(chapaPayload)
+      });
+    } catch (fetchErr: any) {
+      console.error("[CHAPA INITIALIZE] Chapa API network error:", fetchErr?.message);
+      return res.status(502).json({ success: false, error: "Could not reach Chapa payment service. Please try again." });
+    }
+
+    const rawText = await chapaResponse.text();
+    let chapaData: any = {};
+    try {
+      chapaData = JSON.parse(rawText);
+    } catch (e) {
+      console.error("[CHAPA INITIALIZE] Invalid JSON from Chapa API:", rawText);
+      return res.status(502).json({ success: false, error: "Chapa API returned non-JSON response", raw: rawText.slice(0, 200) });
+    }
+
+    console.log(`[CHAPA INITIALIZE] Response status: ${chapaResponse.status}`, chapaData);
+
+    if (chapaData.status === "success" && chapaData.data?.checkout_url) {
+      // Best-effort: update the order doc with the checkout URL (may not exist yet if write timed out)
+      db.collection("orders").doc(tx_ref).update({ chapaCheckoutUrl: chapaData.data.checkout_url }).catch(() => {});
       return res.json({
         success: true,
-        mode: "inline",
-        publicKey: publicKey,
-        txRef: tx_ref,
-        callbackUrl: `${baseUrl}/api/chapa/callback`,
-        returnUrl: `${baseUrl}/?status=success&tx_ref=${tx_ref}`
+        mode: "hosted",
+        checkoutUrl: chapaData.data.checkout_url,
+        txRef: tx_ref
+      });
+    } else {
+      const errorMsg = chapaData.message || (typeof chapaData.error === 'string' ? chapaData.error : "Chapa initialization failed");
+      console.error("[CHAPA INITIALIZE] Chapa initialization failed:", errorMsg, chapaData);
+      // Clean up the pending order doc if Chapa rejected the payment
+      if (orderSaved) {
+        db.collection("orders").doc(tx_ref).delete().catch(() => {});
+      }
+      return res.status(400).json({
+        success: false,
+        error: errorMsg,
+        details: chapaData
       });
     }
-
-    return res.status(400).json({
-      success: false,
-      error: "Missing CHAPA credentials in .env. Please provide either CHAPA_SECRET_KEY (starts with CHASECK_) or public key (starts with CHAPUBK_)."
-    });
   } catch (error: any) {
+    console.error("[CHAPA INITIALIZE] Server error:", error?.message || error);
     res.status(500).json({ error: "Failed to initialize payment", details: error.message });
   }
 });
@@ -1079,23 +1107,24 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
   console.log(`[CHAPA VERIFY] Verification request received for txRef: ${req.params.txRef}`);
   void sweepStaleOrdersLazy();
   try {
-    dotenv.config({ override: true });
     const { txRef } = req.params;
     const rawKey = (process.env.CHAPA_SECRET_KEY || "").trim();
     const chapaKey = (rawKey.startsWith("CHASECK_") || rawKey.startsWith("CHAPASECKEY-")) ? rawKey : "";
 
     const orderRef = db.collection("orders").doc(txRef);
-    const docSnap = await orderRef.get();
-
-    if (!docSnap.exists) {
-      console.warn(`[CHAPA VERIFY] Order with txRef: ${txRef} not found in Firestore`);
-      return res.status(404).json({ error: "Order or transaction reference not found" });
+    let docSnap: any = null;
+    try {
+      docSnap = await orderRef.get();
+    } catch (e: any) {
+      console.warn(`[CHAPA VERIFY] Firestore read warning:`, e?.message);
     }
 
-    console.log(`[CHAPA VERIFY] Order found. Current payment status: ${docSnap.data()?.paymentStatus}`);
+    // Extract userId from auth token (client should use authedFetch for verify calls)
+    const decodedToken = await verifyFirebaseToken(req);
+    const userId = decodedToken?.uid || null;
 
     if (chapaKey && chapaKey !== "MY_CHAPA_SECRET_KEY" && !chapaKey.startsWith("CHAPASECKEY-xxxx")) {
-      console.log(`[CHAPA VERIFY] Real Chapa Secret Key detected. Fetching verification from Chapa API...`);
+      console.log(`[CHAPA VERIFY] Real Chapa Secret Key detected. Fetching verification from Chapa API for ${txRef}...`);
       try {
         const response = await fetch(`https://api.chapa.co/v1/transaction/verify/${txRef}`, {
           method: "GET",
@@ -1109,7 +1138,7 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
         if (chapaData.status === "success" && chapaData.data?.status === "success") {
           console.log(`[CHAPA VERIFY] Payment verified successfully! Updating Firestore to completed.`);
           const rawData = chapaData.data;
-          const orderData = docSnap.data();
+          const orderData = docSnap?.exists ? docSnap.data() : {};
           const receiptInfo = {
             transactionId: rawData.reference || txRef,
             reference: rawData.reference || txRef,
@@ -1123,14 +1152,59 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
             simulated: false
           };
 
-          await orderRef.update({
+          // If the order doc is missing (Firestore write failed during initialize),
+          // CREATE a complete order from Chapa data so the user can see it in My Orders.
+          if (!docSnap?.exists) {
+            console.warn(`[CHAPA VERIFY] Order doc ${txRef} missing — creating from Chapa verify data.`);
+            const reconstructedOrder = {
+              id: txRef,
+              items: orderData?.items || [],
+              status: orderData?.status || "pending",
+              total: receiptInfo.amount,
+              customerName: receiptInfo.fullName,
+              customerEmail: receiptInfo.email,
+              customerPhone: orderData?.customerPhone || "",
+              blockNumber: orderData?.blockNumber || "",
+              roomNumber: orderData?.roomNumber || "",
+              googleMapsAddress: orderData?.googleMapsAddress || "",
+              specialInstructions: orderData?.specialInstructions || "",
+              paymentMethod: "chapa",
+              paymentStatus: "pending",
+              fulfillmentType: orderData?.fulfillmentType || "delivery",
+              scheduledFor: orderData?.scheduledFor || null,
+              transactionRef: txRef,
+              createdAt: orderData?.createdAt || new Date().toISOString(),
+              userId: userId || orderData?.userId || null,
+              serviceTax: orderData?.serviceTax || 0,
+              flatFee: orderData?.flatFee || 0,
+              promoCode: orderData?.promoCode || null,
+              discountAmount: orderData?.discountAmount || 0
+            };
+            await orderRef.set(reconstructedOrder, { merge: true });
+          }
+
+          const updatePayload: any = {
+            id: txRef,
+            transactionRef: txRef,
             paymentStatus: "completed",
-            status: "pending",
-            receipt: receiptInfo
-          });
-          if (orderData.paymentStatus !== "completed") { await applyPromo(orderData, db); }
-          if (!orderData.paymentHistory || !Array.isArray(orderData.paymentHistory)) {
-            await orderRef.update({ paymentHistory: [{ paymentStatus: "completed", at: new Date().toISOString() }] });
+            status: orderData?.status || "pending",
+            receipt: receiptInfo,
+            total: receiptInfo.amount,
+            customerName: receiptInfo.fullName,
+            customerEmail: receiptInfo.email,
+            updatedAt: new Date().toISOString()
+          };
+          if (!orderData?.createdAt) {
+            updatePayload.createdAt = new Date().toISOString();
+          }
+          // Ensure userId is set on the order (critical for My Orders query)
+          if (userId && !orderData?.userId) {
+            updatePayload.userId = userId;
+          }
+          await orderRef.set(updatePayload, { merge: true });
+
+          if (orderData?.paymentStatus !== "completed" && docSnap?.exists) {
+            await applyPromo(orderData, db);
           }
 
           const updatedDoc = await orderRef.get();
@@ -1144,6 +1218,9 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
         return res.status(500).json({ success: false, error: "Network error during verification" });
       }
     } else {
+      if (!docSnap?.exists) {
+        return res.status(404).json({ error: "Order or transaction reference not found" });
+      }
       console.warn(`[CHAPA VERIFY] No real Chapa Secret Key configured; refusing to grant value (fail closed).`);
       return res.status(503).json({
         success: false,
@@ -1165,6 +1242,11 @@ app.get("/api/settings", async (req, res) => {
     if (docSnap.exists) {
       const data = docSnap.data();
       res.json({
+        restaurantName: data.restaurantName ?? "Savory",
+        logoUrl: data.logoUrl ?? "",
+        businessEmail: data.businessEmail ?? "",
+        businessPhone: data.businessPhone ?? "",
+        businessAddress: data.businessAddress ?? "",
         serviceTaxPercent: data.serviceTaxPercent ?? 15,
         flatFeeETB: data.flatFeeETB ?? 0,
         shipdayDeliveryMinutes: data.shipdayDeliveryMinutes ?? 20,
@@ -1177,7 +1259,22 @@ app.get("/api/settings", async (req, res) => {
         scheduledStepsMinutes: data.scheduledStepsMinutes ?? 15
       });
     } else {
-      res.json({ serviceTaxPercent: 15, flatFeeETB: 0, shipdayDeliveryMinutes: 20, isOpen: true, scheduleEnabled: false, openTime: "09:00", closeTime: "22:00", prepTimeMinutes: 30, scheduledStepsMinutes: 15 });
+      res.json({
+        restaurantName: "Savory",
+        logoUrl: "",
+        businessEmail: "",
+        businessPhone: "",
+        businessAddress: "",
+        serviceTaxPercent: 15,
+        flatFeeETB: 0,
+        shipdayDeliveryMinutes: 20,
+        isOpen: true,
+        scheduleEnabled: false,
+        openTime: "09:00",
+        closeTime: "22:00",
+        prepTimeMinutes: 30,
+        scheduledStepsMinutes: 15
+      });
     }
   } catch (error: any) {
     res.status(500).json({ error: "Failed to fetch checkout settings", details: error.message });
@@ -1205,6 +1302,137 @@ app.post("/api/settings", requireStaffAuth, async (req, res) => {
     res.json({ success: true, settings });
   } catch (error: any) {
     res.status(500).json({ error: "Failed to save checkout settings", details: error.message });
+  }
+});
+
+// Business Data Export & Clear
+// Collects every business-relevant collection into a single JSON object so the
+// owner can take a full snapshot before wiping. The /clear route is the
+// destructive counterpart and requires the typed "CLEAR MY DATA" confirmation.
+const BUSINESS_COLLECTIONS = [
+  "settings",
+  "categories",
+  "menu",
+  "orders",
+  "reservations",
+  "promos",
+  "users",
+  "admins",
+  "roles",
+  "audit_log"
+];
+
+async function dumpBusinessData(): Promise<Record<string, any[]>> {
+  const out: Record<string, any[]> = {};
+  for (const name of BUSINESS_COLLECTIONS) {
+    try {
+      const snap = await db.collection(name).get();
+      out[name] = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    } catch (err: any) {
+      console.warn(`[BUSINESS EXPORT] Failed to read ${name}:`, err?.message);
+      out[name] = [];
+    }
+  }
+  return out;
+}
+
+app.get("/api/business/export", requireStaffAuth, async (req, res) => {
+  try {
+    const email = res.locals?.token?.email;
+    const permCtx = await resolveStaffPermissions(email);
+    if (!staffHas(permCtx, "data.export")) {
+      return res.status(403).json({ error: "Forbidden: Your role does not have permission to download business data." });
+    }
+    const payload = await dumpBusinessData();
+    const body = {
+      exportedAt: new Date().toISOString(),
+      exportedBy: email || "unknown",
+      source: "savory",
+      collections: payload
+    };
+    const filename = `savory-business-data-${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(JSON.stringify(body, null, 2));
+  } catch (error: any) {
+    res.status(500).json({ error: "Failed to export business data", details: error.message });
+  }
+});
+
+app.post("/api/business/clear", requireStaffAuth, async (req, res) => {
+  try {
+    const email = res.locals?.token?.email;
+    const permCtx = await resolveStaffPermissions(email);
+    if (!staffHas(permCtx, "data.clear")) {
+      return res.status(403).json({ error: "Forbidden: Your role does not have permission to clear business data." });
+    }
+    const confirmText = String(req.body?.confirm || "").trim();
+    if (confirmText !== "CLEAR MY DATA") {
+      return res.status(400).json({ error: "Confirmation phrase is incorrect. Type 'CLEAR MY DATA' exactly." });
+    }
+
+    // 1) Pre-log a final audit entry FIRST so there is a record of the wipe.
+    try {
+      await db.collection("audit_log").add({
+        actorEmail: email || "unknown",
+        actorRole: permCtx?.role || "unknown",
+        action: "Cleared business data",
+        category: "settings",
+        targetId: null,
+        details: { scope: "full-nuclear", initiatedBy: email || "unknown" },
+        createdAt: new Date().toISOString()
+      });
+    } catch (e: any) {
+      console.warn("[BUSINESS CLEAR] Could not pre-write audit entry:", e?.message);
+    }
+
+    // 2) Delete every business collection in 500-doc batches.
+    const counts: Record<string, number> = {};
+    for (const name of BUSINESS_COLLECTIONS) {
+      let removed = 0;
+      try {
+        const snap = await db.collection(name).get();
+        const docs = snap.docs;
+        for (let i = 0; i < docs.length; i += 500) {
+          const batch = db.batch();
+          docs.slice(i, i + 500).forEach(d => batch.delete(d.ref));
+          await batch.commit();
+        }
+        removed = docs.length;
+      } catch (err: any) {
+        console.warn(`[BUSINESS CLEAR] Failed to clear ${name}:`, err?.message);
+      }
+      counts[name] = removed;
+    }
+
+    // 3) Reset settings documents to a sensible default so the site keeps
+    //    booting instead of throwing on a missing document.
+    const defaultSettings = {
+      restaurantName: "Savory",
+      logoUrl: "",
+      businessEmail: "",
+      businessPhone: "",
+      businessAddress: "",
+      serviceTaxPercent: 15,
+      flatFeeETB: 0,
+      enableCOD: true,
+      isOpen: true,
+      scheduleEnabled: false,
+      openTime: "09:00",
+      closeTime: "22:00",
+      enableMarketing: true,
+      enableReservations: true,
+      enableChatbot: true,
+      prepTimeMinutes: 30,
+      scheduledStepsMinutes: 15,
+      updatedAt: new Date().toISOString()
+    };
+    try { await db.collection("settings").doc("global").set(defaultSettings); } catch (e: any) { console.warn("[BUSINESS CLEAR] Could not reset settings/global:", e?.message); }
+    try { await db.collection("settings").doc("checkout").set(defaultSettings); } catch (e: any) { console.warn("[BUSINESS CLEAR] Could not reset settings/checkout:", e?.message); }
+
+    res.json({ success: true, counts, clearedAt: new Date().toISOString() });
+  } catch (error: any) {
+    res.status(500).json({ error: "Failed to clear business data", details: error.message });
   }
 });
 
@@ -1479,7 +1707,7 @@ app.post("/api/shipday/webhook", async (req, res) => {
         console.log(`[SHIPDAY WEBHOOK] Mapping ${normalizedStatus} to cancelled for ${orderId}`);
       } else if (activeStatuses.includes(normalizedStatus)) {
         // Only update to preparing if it's currently pending
-        // We want to avoid downgrading 'ready' or 'delivered'
+        // We want to avoid downgrading 'ready', 'dispatched' or 'delivered'
         try {
           const currentSnap = await orderRef.get();
           if (currentSnap.exists) {

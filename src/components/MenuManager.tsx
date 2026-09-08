@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect } from "react";
 import { MenuItem, MenuItemVariation } from "../types";
-import { Plus, Edit2, Trash2, Save, X, Tag, Layers, Star } from "lucide-react";
+import { Plus, Edit2, Trash2, Save, X, Tag, Layers, Star, GripVertical } from "lucide-react";
 import { db } from "../firebase";
 import { doc, setDoc, updateDoc, deleteDoc, collection, getDocs } from "firebase/firestore";
 import { confirmDialog } from "../notify";
@@ -13,6 +13,23 @@ import { hasPermission, PermissionMap } from "../permissions";
 import { logAudit } from "../utils/auditLogger";
 import { normalizeGalleryImages } from "../utils/galleries";
 import SquareImageCropper from "./SquareImageCropper";
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 interface MenuManagerProps {
   onMenuUpdated: () => void;
@@ -23,11 +40,128 @@ interface MenuManagerProps {
   actor?: { email: string; role: string };
 }
 
+interface SortableVariationRowProps {
+  v: MenuItemVariation;
+  idx: number;
+  isDef: boolean;
+  isContentLocked: boolean;
+  priceEditable: boolean;
+  onUpdate: (patch: Partial<MenuItemVariation>) => void;
+  onRemove: () => void;
+}
+
+function SortableVariationRow({
+  v,
+  idx,
+  isDef,
+  isContentLocked,
+  priceEditable,
+  onUpdate,
+  onRemove
+}: SortableVariationRowProps & { key?: React.Key }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging
+  } = useSortable({ id: String(v.id) });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+    zIndex: isDragging ? 10 : "auto"
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`grid grid-cols-[auto_1fr_90px_auto] gap-2 items-start bg-white p-2.5 border rounded-xl ${
+        isDef ? "border-amber-400 ring-1 ring-amber-400/30" : "border-stone-200"
+      } ${isDragging ? "shadow-lg" : ""}`}
+    >
+      <div className="flex flex-col items-center justify-center gap-1 pt-4 pr-0.5">
+        <button
+          type="button"
+          {...attributes}
+          {...listeners}
+          disabled={isContentLocked}
+          className="text-stone-300 hover:text-stone-600 cursor-grab active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-30 p-0.5"
+          title="Drag to reorder — top row becomes the main variation"
+          aria-label="Drag variation to reorder"
+        >
+          <GripVertical className="w-4 h-4" />
+        </button>
+        {isDef ? (
+          <span className="text-[8px] font-extrabold text-amber-700 uppercase tracking-wide">Main</span>
+        ) : (
+          <span className="text-[8px] font-extrabold text-stone-400 uppercase tracking-wide">{idx + 1}</span>
+        )}
+      </div>
+      <div>
+        <label className="block text-[9px] font-bold text-stone-500 uppercase tracking-wide mb-1">Label *</label>
+        <input
+          type="text"
+          disabled={isContentLocked}
+          value={v.label}
+          onChange={e => onUpdate({ label: e.target.value })}
+          placeholder="e.g. Small / 250ml"
+          className={`w-full text-xs bg-white border border-stone-300 rounded-lg px-2.5 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500 ${isContentLocked ? 'opacity-60 cursor-not-allowed bg-stone-100' : ''}`}
+        />
+      </div>
+      <div>
+        <label className="block text-[9px] font-bold text-stone-500 uppercase tracking-wide mb-1">Price (ETB)</label>
+        <input
+          type="number"
+          step="0.01"
+          min="0"
+          disabled={isContentLocked || !priceEditable}
+          value={String(v.price ?? 0)}
+          onChange={e => onUpdate({ price: parseFloat(e.target.value) || 0 })}
+          placeholder="0.00"
+          className={`w-full text-xs border border-stone-300 rounded-lg px-2.5 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500 ${isContentLocked || !priceEditable ? 'bg-stone-100 text-stone-500 cursor-not-allowed' : 'bg-white'}`}
+        />
+      </div>
+      <div className="flex flex-col items-end gap-1.5 pt-4">
+        <label className="flex items-center space-x-1.5 text-[10px] font-semibold text-stone-600 select-none cursor-pointer">
+          <input
+            type="checkbox"
+            disabled={isContentLocked}
+            checked={v.isAvailable !== false}
+            onChange={e => onUpdate({ isAvailable: e.target.checked })}
+            className="w-3.5 h-3.5 text-emerald-600 border-stone-300 rounded focus:ring-emerald-500 cursor-pointer"
+          />
+          Available
+        </label>
+        <button
+          type="button"
+          disabled={isContentLocked}
+          onClick={onRemove}
+          title="Remove this variation"
+          className="p-1 text-stone-400 hover:text-rose-600 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function MenuManager({ menu = [], onMenuUpdated, userRole, can, permissions, actor }: MenuManagerProps) {
   const [selectedItem, setSelectedItem] = useState<MenuItem | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+
+  // Auto-dismiss success messages after 4s; errors stay until the user closes them.
+  useEffect(() => {
+    if (!message || message.type !== 'success') return;
+    const t = setTimeout(() => setMessage(null), 4000);
+    return () => clearTimeout(t);
+  }, [message]);
 
   const canCreate = can ? can("menu.create") : hasPermission(permissions, "menu.create");
   const canEdit = can ? can("menu.edit") : hasPermission(permissions, "menu.edit");
@@ -96,12 +230,34 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole, can, p
   const [searchQuery, setSearchQuery] = useState("");
   const [variations, setVariations] = useState<MenuItemVariation[]>([]);
 
+  const variationSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
+
+  const handleVariationDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setVariations(prev => {
+      const oldIndex = prev.findIndex(v => String(v.id) === String(active.id));
+      const newIndex = prev.findIndex(v => String(v.id) === String(over.id));
+      if (oldIndex < 0 || newIndex < 0) return prev;
+      return reorderAndPromoteTop(arrayMove(prev, oldIndex, newIndex));
+    });
+  };
+
   const updateVariation = (index: number, patch: Partial<MenuItemVariation>) => {
     setVariations(prev => prev.map((v, i) => (i === index ? { ...v, ...patch } : v)));
   };
 
   const setDefaultVariation = (index: number) => {
     setVariations(prev => prev.map((v, i) => ({ ...v, isDefault: i === index })));
+  };
+
+  // After a drag-reorder, the new top row becomes the main variation.
+  const reorderAndPromoteTop = (ordered: MenuItemVariation[]) => {
+    if (ordered.length === 0) return ordered;
+    return ordered.map((v, i) => ({ ...v, isDefault: i === 0 }));
   };
 
   const addVariation = () => {
@@ -768,79 +924,35 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole, can, p
                       Add Variation
                     </button>
                   </div>
+                  {variations.length > 0 && !isContentLocked && (
+                    <p className="text-[9px] text-stone-400 italic">Drag rows to reorder — the top row becomes the main variation.</p>
+                  )}
                   {variations.length === 0 ? (
                     <p className="text-[11px] text-stone-400">
-                      
+
                     </p>
                   ) : (
-                    <div className="space-y-2">
-                      {variations.map((v, idx) => {
-                        const isDef = !!v.isDefault;
-                        return (
-                          <div key={v.id || idx} className={`grid grid-cols-[auto_1fr_90px_auto] gap-2 items-start bg-white p-2.5 border rounded-xl ${isDef ? 'border-amber-400 ring-1 ring-amber-400/30' : 'border-stone-200'}`}>
-                            <div className="flex flex-col items-center justify-center gap-1 pt-4 pr-0.5">
-                              <input
-                                type="radio"
-                                name="main-variation"
-                                disabled={isContentLocked}
-                                checked={isDef}
-                                onChange={() => setDefaultVariation(idx)}
-                                title="Mark as the main (default) variation"
-                                className="w-3.5 h-3.5 text-amber-600 border-stone-300 focus:ring-amber-500 cursor-pointer disabled:cursor-not-allowed"
+                    <DndContext sensors={variationSensors} collisionDetection={closestCenter} onDragEnd={handleVariationDragEnd}>
+                      <SortableContext items={variations.map(v => String(v.id))} strategy={verticalListSortingStrategy}>
+                        <div className="space-y-2">
+                          {variations.map((v, idx) => {
+                            const isDef = idx === 0;
+                            return (
+                              <SortableVariationRow
+                                key={String(v.id || idx)}
+                                v={v}
+                                idx={idx}
+                                isDef={isDef}
+                                isContentLocked={isContentLocked}
+                                priceEditable={priceEditable}
+                                onUpdate={(patch) => updateVariation(idx, patch)}
+                                onRemove={() => removeVariation(idx)}
                               />
-                              {isDef && (
-                                <span className="text-[8px] font-extrabold text-amber-700 uppercase tracking-wide">Main</span>
-                              )}
-                            </div>
-                            <div>
-                              <label className="block text-[9px] font-bold text-stone-500 uppercase tracking-wide mb-1">Label *</label>
-                              <input
-                                type="text"
-                                disabled={isContentLocked}
-                                value={v.label}
-                                onChange={e => updateVariation(idx, { label: e.target.value })}
-                                placeholder="e.g. Small / 250ml"
-                                className={`w-full text-xs bg-white border border-stone-300 rounded-lg px-2.5 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500 ${isContentLocked ? 'opacity-60 cursor-not-allowed bg-stone-100' : ''}`}
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[9px] font-bold text-stone-500 uppercase tracking-wide mb-1">Price (ETB)</label>
-                              <input
-                                type="number"
-                                step="0.01"
-                                min="0"
-                                disabled={isContentLocked || !priceEditable}
-                                value={String(v.price ?? 0)}
-                                onChange={e => updateVariation(idx, { price: parseFloat(e.target.value) || 0 })}
-                                placeholder="0.00"
-                                className={`w-full text-xs border border-stone-300 rounded-lg px-2.5 py-2 focus:outline-none focus:ring-1 focus:ring-amber-500 ${isContentLocked || !priceEditable ? 'bg-stone-100 text-stone-500 cursor-not-allowed' : 'bg-white'}`}
-                              />
-                            </div>
-                            <div className="flex flex-col items-end gap-1.5 pt-4">
-                              <label className="flex items-center space-x-1.5 text-[10px] font-semibold text-stone-600 select-none cursor-pointer">
-                                <input
-                                  type="checkbox"
-                                  disabled={isContentLocked}
-                                  checked={v.isAvailable !== false}
-                                  onChange={e => updateVariation(idx, { isAvailable: e.target.checked })}
-                                  className="w-3.5 h-3.5 text-emerald-600 border-stone-300 rounded focus:ring-emerald-500 cursor-pointer"
-                                />
-                                Available
-                              </label>
-                              <button
-                                type="button"
-                                disabled={isContentLocked}
-                                onClick={() => removeVariation(idx)}
-                                title="Remove this variation"
-                                className="p-1 text-stone-400 hover:text-rose-600 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
+                            );
+                          })}
+                        </div>
+                      </SortableContext>
+                    </DndContext>
                   )}
                 </div>
 

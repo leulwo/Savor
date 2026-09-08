@@ -1,14 +1,98 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import { Category } from "../types";
 import { Plus, Trash2, Tag, GripVertical, Save } from "lucide-react";
 import { db } from "../firebase";
 import { collection, getDocs, doc, setDoc, deleteDoc } from "firebase/firestore";
 import { hasPermission, PermissionMap } from "../permissions";
 import { confirmDialog } from "../notify";
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 interface CategoryManagerProps {
   can?: (key: string) => boolean;
   permissions?: PermissionMap;
+}
+
+interface SortableCategoryRowProps {
+  cat: Category;
+  index: number;
+  canManage: boolean;
+  onDelete: (id: string) => void;
+}
+
+function SortableCategoryRow({
+  cat,
+  index,
+  canManage,
+  onDelete
+}: SortableCategoryRowProps & { key?: React.Key }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging
+  } = useSortable({ id: cat.id });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+    zIndex: isDragging ? 10 : "auto"
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`flex justify-between items-center bg-stone-50 border rounded-lg p-2.5 transition-all ${
+        isDragging ? "border-amber-400 shadow-lg" : "border-stone-100"
+      }`}
+    >
+      <div className="flex items-center space-x-2 min-w-0">
+        {canManage && (
+          <button
+            type="button"
+            {...attributes}
+            {...listeners}
+            className="text-stone-300 hover:text-stone-500 cursor-grab active:cursor-grabbing shrink-0 p-0.5 -ml-1"
+            title="Drag to reorder"
+            aria-label="Drag to reorder"
+          >
+            <GripVertical className="w-4 h-4" />
+          </button>
+        )}
+        <span className="text-xs font-semibold text-stone-700 capitalize truncate">
+          {index + 1}. {cat.name}
+        </span>
+      </div>
+      {canManage && (
+        <button
+          onClick={() => onDelete(cat.id)}
+          className="text-stone-400 hover:text-red-600 transition-colors cursor-pointer ml-1"
+          title="Delete Category"
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
+      )}
+    </div>
+  );
 }
 
 export default function CategoryManager({ can, permissions }: CategoryManagerProps) {
@@ -17,13 +101,15 @@ export default function CategoryManager({ can, permissions }: CategoryManagerPro
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [name, setName] = useState("");
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [overIndex, setOverIndex] = useState<number | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
 
   const canManage = can ? can("menu.categories") : hasPermission(permissions, "menu.categories");
 
   const dirty = draft.length > 0 && JSON.stringify(draft.map(c => c.id)) !== JSON.stringify(saved.map(c => c.id));
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
 
   const fetchCategories = async () => {
     try {
@@ -61,7 +147,7 @@ export default function CategoryManager({ can, permissions }: CategoryManagerPro
     }, null, "Add");
   };
 
-  const handleDeleteCategory = async (id: string) => {
+  const handleDeleteCategory = (id: string) => {
     confirmDialog("Are you sure you want to delete this category?", async () => {
       setLoading(true);
       try {
@@ -75,18 +161,15 @@ export default function CategoryManager({ can, permissions }: CategoryManagerPro
     }, null, "Delete");
   };
 
-  const handleDrop = (targetIndex: number) => {
-    if (dragIndex === null || dragIndex === targetIndex) {
-      setDragIndex(null);
-      setOverIndex(null);
-      return;
-    }
-    const next = [...draft];
-    const [moved] = next.splice(dragIndex, 1);
-    next.splice(targetIndex, 0, moved);
-    setDraft(next);
-    setDragIndex(null);
-    setOverIndex(null);
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setDraft(items => {
+      const oldIndex = items.findIndex(c => c.id === active.id);
+      const newIndex = items.findIndex(c => c.id === over.id);
+      if (oldIndex < 0 || newIndex < 0) return items;
+      return arrayMove(items, oldIndex, newIndex);
+    });
   };
 
   const saveOrder = async () => {
@@ -105,8 +188,6 @@ export default function CategoryManager({ can, permissions }: CategoryManagerPro
 
   const discard = () => {
     setDraft(saved);
-    setDragIndex(null);
-    setOverIndex(null);
   };
 
   return (
@@ -172,59 +253,24 @@ export default function CategoryManager({ can, permissions }: CategoryManagerPro
           <p className="text-[11px] text-stone-400">Read only — you need the "Manage categories" permission to add or delete categories.</p>
         )}
 
-        <div ref={containerRef} className="space-y-2 max-h-60 overflow-y-auto">
-          {draft.map((cat, index) => (
-            <div
-              key={cat.id}
-              draggable={canManage}
-              onDragStart={(e) => {
-                setDragIndex(index);
-                e.dataTransfer.effectAllowed = "move";
-                e.dataTransfer.setData("text/plain", cat.id);
-              }}
-              onDragOver={(e) => {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "move";
-                if (overIndex !== index) setOverIndex(index);
-              }}
-              onDragLeave={() => {
-                if (overIndex === index) setOverIndex(null);
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                handleDrop(index);
-              }}
-              onDragEnd={() => {
-                setDragIndex(null);
-                setOverIndex(null);
-              }}
-              className={`flex justify-between items-center bg-stone-50 border rounded-lg p-2.5 transition-all ${
-                overIndex === index ? "border-amber-500 ring-2 ring-amber-500/30" : "border-stone-100"
-              } ${dragIndex === index ? "opacity-50 border-amber-400" : ""}`}
-            >
-              <div className="flex items-center space-x-2 min-w-0">
-                {canManage && (
-                  <GripVertical className="w-4 h-4 text-stone-300 cursor-grab active:cursor-grabbing shrink-0" />
-                )}
-                <span className="text-xs font-semibold text-stone-700 capitalize truncate">
-                  {index + 1}. {cat.name}
-                </span>
-              </div>
-              {canManage && (
-                <button
-                  onClick={() => handleDeleteCategory(cat.id)}
-                  className="text-stone-400 hover:text-red-600 transition-colors cursor-pointer ml-1"
-                  title="Delete Category"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={draft.map(c => c.id)} strategy={verticalListSortingStrategy}>
+            <div className="space-y-2 max-h-60 overflow-y-auto">
+              {draft.map((cat, index) => (
+                <SortableCategoryRow
+                  key={cat.id}
+                  cat={cat}
+                  index={index}
+                  canManage={canManage}
+                  onDelete={handleDeleteCategory}
+                />
+              ))}
+              {(!draft || draft.length === 0) && (
+                <p className="text-xs text-stone-500 text-center py-4">No categories added yet.</p>
               )}
             </div>
-          ))}
-          {(!draft || draft.length === 0) && (
-            <p className="text-xs text-stone-500 text-center py-4">No categories added yet.</p>
-          )}
-        </div>
+          </SortableContext>
+        </DndContext>
       </div>
     </div>
   );

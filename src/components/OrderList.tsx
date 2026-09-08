@@ -27,6 +27,7 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
   const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<Order | null>(null);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   const [defaultDeliveryMinutes, setDefaultDeliveryMinutes] = useState<number>(20);
+  const [receiptSettings, setReceiptSettings] = useState<{ businessEmail?: string; businessPhone?: string; businessAddress?: string; restaurantName?: string } | null>(null);
 
   const canUpdateStatus = can ? can("orders.updateStatus") : hasPermission(permissions, "orders.updateStatus");
   const canMarkPaid = can ? can("orders.markPaid") : hasPermission(permissions, "orders.markPaid");
@@ -44,6 +45,14 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
         const data = await res.json();
         if (data && data.shipdayDeliveryMinutes) {
           setDefaultDeliveryMinutes(data.shipdayDeliveryMinutes);
+        }
+        if (data) {
+          setReceiptSettings({
+            businessEmail: data.businessEmail,
+            businessPhone: data.businessPhone,
+            businessAddress: data.businessAddress,
+            restaurantName: data.restaurantName
+          });
         }
       } catch (e) {
         console.error("Failed to load settings in OrderList", e);
@@ -90,13 +99,13 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
       `Mark this order as "${nextStatus.toUpperCase()}" (currently ${currentStatus.toUpperCase()})?`,
       () => {
         let deliveryMinutes = 0;
-        if (nextStatus === "ready") {
+        if (nextStatus === "dispatched") {
           deliveryMinutes = defaultDeliveryMinutes;
         }
         updateStatus(orderId, nextStatus, undefined, deliveryMinutes);
       },
       null,
-      nextStatus === "ready" ? "Mark Ready" : "Confirm"
+      nextStatus === "ready" ? "Mark Ready" : nextStatus === "dispatched" ? "Dispatch to Shipday" : nextStatus === "delivered" ? "Mark Delivered" : "Confirm"
     );
   };
 
@@ -104,7 +113,8 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
     switch (status) {
       case "pending": return "bg-amber-100 text-amber-800 border-amber-200";
       case "preparing": return "bg-indigo-100 text-indigo-800 border-indigo-200";
-      case "ready": return "bg-blue-100 text-blue-800 border-blue-200";
+      case "ready": return "bg-sky-100 text-sky-800 border-sky-200";
+      case "dispatched": return "bg-blue-100 text-blue-800 border-blue-200";
       case "delivered": return "bg-emerald-100 text-emerald-800 border-emerald-200";
       case "cancelled": return "bg-stone-100 text-stone-700 border-stone-200";
     }
@@ -264,7 +274,7 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
                           {order.paymentMethod === "chapa" ? (
                             <>
                               <Shield className="w-3.5 h-3.5 text-emerald-600 mr-1" />
-                              Chapa Secure (ETB)
+                              Online (ETB)
                             </>
                           ) : (
                             "Cash On Delivery"
@@ -311,11 +321,44 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
                             Mark Paid
                           </button>
                         )}
-                        {(order.status === "ready" || (order.shipdayOrderId && order.status === "preparing")) && (
+                        {(order.status === "ready" || (order.status === "dispatched") || (order.shipdayOrderId && order.status === "preparing")) && (
                           <div className="flex items-center space-x-1.5 text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-1.5 rounded-lg border border-blue-100">
                             <Truck className="w-3 h-3" />
                             <span>DISPATCHED TO SHIPDAY</span>
                           </div>
+                        )}
+                        {order.status === "ready" && !order.shipdayOrderId && canAct && (
+                          order.fulfillmentType === 'delivery' ? (
+                            <button
+                              onClick={() => handleStatusChange(order.id, "ready", "dispatched")}
+                              disabled={loadingId === order.id}
+                              className="bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1.5 rounded-lg font-medium cursor-pointer transition-colors flex items-center"
+                            >
+                              <Truck className="w-3.5 h-3.5 mr-1.5" />
+                              Dispatch to Shipday
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => handleStatusChange(order.id, "ready", "delivered")}
+                              disabled={loadingId === order.id}
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-3 py-1.5 rounded-lg font-medium cursor-pointer transition-colors flex items-center"
+                            >
+                              <CheckCircle className="w-3.5 h-3.5 mr-1.5" />
+                              Mark as Delivered
+                            </button>
+                          )
+                        )}
+                        {(order.status === "dispatched" || (order.status === "ready" && !!order.shipdayOrderId)) && canAct && (
+                          <button
+                            onClick={() => {
+                              const from = order.status === "dispatched" ? "dispatched" : "ready";
+                              handleStatusChange(order.id, from as Order['status'], "delivered");
+                            }}
+                            disabled={loadingId === order.id}
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-3 py-1.5 rounded-lg font-medium cursor-pointer transition-colors"
+                          >
+                            Mark Delivered
+                          </button>
                         )}
                         {order.status === "delivered" && (
                           <div className="flex items-center space-x-1.5 text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1.5 rounded-lg border border-emerald-100">
@@ -431,16 +474,16 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
                   <span className="font-mono text-stone-900">{selectedReceiptOrder.id}</span>
                 </div>
                 <div className="flex justify-between text-[11px]">
-                  <span className="text-stone-500">Chapa ID:</span>
+                  <span className="text-stone-500">Transaction ID:</span>
                   <span className="font-mono text-stone-900 text-right max-w-[180px] truncate">{selectedReceiptOrder.receipt?.transactionId || `chapa-sim-${selectedReceiptOrder.id}`}</span>
                 </div>
                 <div className="flex justify-between text-[11px]">
                   <span className="text-stone-500">Method:</span>
-                  <span className="font-semibold text-emerald-800 font-sans uppercase">{selectedReceiptOrder.receipt?.paymentMethod || "Chapa (CBE/Telebirr)"}</span>
+                  <span className="font-semibold text-emerald-800 font-sans uppercase">{selectedReceiptOrder.receipt?.paymentMethod || "Online (CBE/Telebirr)"}</span>
                 </div>
                 {selectedReceiptOrder.paymentMethod === "chapa" && (
                   <div className="flex justify-between items-center text-[11px] pt-1.5 mt-1.5 border-t border-stone-200/40">
-                    <span className="text-stone-500 font-medium">Chapa Receipt:</span>
+                    <span className="text-stone-500 font-medium">Receipt:</span>
                     <a
                       href={`https://chapa.link/payment-receipt/${selectedReceiptOrder.receipt?.reference || selectedReceiptOrder.id}`}
                       target="_blank"
@@ -521,7 +564,7 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
                           name: selectedReceiptOrder.customerName,
                           total: `${selectedReceiptOrder.total.toFixed(2)} ETB`,
                           date: selectedReceiptOrder.receipt?.date || selectedReceiptOrder.createdAt,
-                          payment: selectedReceiptOrder.receipt?.paymentMethod || "Chapa"
+                            payment: selectedReceiptOrder.receipt?.paymentMethod || "Online"
                         })
                       )}`}
                       alt="Order QR Code"
@@ -534,6 +577,14 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
                 <div className="space-y-1">
                   <p className="text-[11px] font-serif font-bold italic text-stone-950">Thank you for ordering!</p>
                   <p className="text-[10px] text-stone-400">Enjoy your gourmet meal.</p>
+                  {(receiptSettings?.businessEmail || receiptSettings?.businessPhone || receiptSettings?.businessAddress) && (
+                    <div className="pt-3 mt-2 border-t border-dashed border-stone-200 space-y-0.5 text-[9px] text-stone-500 font-sans">
+                      <p className="font-bold text-stone-700 uppercase tracking-widest text-[8px]">{receiptSettings?.restaurantName || "Savory"}</p>
+                      {receiptSettings?.businessAddress && <p>{receiptSettings.businessAddress}</p>}
+                      {receiptSettings?.businessPhone && <p>Tel: {receiptSettings.businessPhone}</p>}
+                      {receiptSettings?.businessEmail && <p className="break-all">{receiptSettings.businessEmail}</p>}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

@@ -1,0 +1,86 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function adminDocument(email) {
+      return /databases/$(database)/documents/admins/$(email);
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.email != null
+        && exists(adminDocument(request.auth.token.email))
+        && get(adminDocument(request.auth.token.email)).data.role == 'admin';
+    }
+
+    function ownsUserDocument(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    match /menu/{documentId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /categories/{documentId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /promoCodes/{documentId} {
+      allow get: if true;
+      allow list: if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /admins/{email} {
+      allow get: if isAdmin() || (signedIn() && request.auth.token.email == email);
+      allow list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read, create, update, delete: if ownsUserDocument(userId) || isAdmin();
+    }
+
+    match /carts/{userId} {
+      allow read, create, update, delete: if ownsUserDocument(userId);
+    }
+
+    match /orders/{orderId} {
+      allow get, list: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    match /reservations/{reservationId} {
+      allow read: if isAdmin();
+      allow create: if signedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    match /chat_messages/{messageId} {
+      allow read, write: if isAdmin();
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+    }
+
+    match /settings/{settingId} {
+      allow get: if settingId == 'global' || isAdmin();
+      allow list: if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
