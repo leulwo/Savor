@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { Routes, Route, useNavigate, useParams, Link, useLocation } from "react-router-dom";
 import { MenuItem, MenuItemVariation, Order, OrderItem } from "./types";
 
@@ -36,7 +36,7 @@ import {
   MapPin
 } from "lucide-react";
 import { db, auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged, authedFetch } from "./firebase";
-import { collection, onSnapshot, doc, query, where, setDoc, getDoc, updateDoc } from "firebase/firestore";
+import { collection, onSnapshot, doc, query, where, setDoc, getDoc, updateDoc, orderBy, limit } from "firebase/firestore";
 import { APIProvider } from "@vis.gl/react-google-maps";
 import GoogleMapsAddressInput from "./GoogleMapsAddressInput";
 import Chatbot from "./components/Chatbot";
@@ -264,6 +264,7 @@ export function MainApp() {
   const [placedOrder, setPlacedOrder] = useState<Order | null>(null);
   const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<Order | null>(null);
   const [chapaCheckoutUrl, setChapaCheckoutUrl] = useState<string | null>(() => localStorage.getItem('chapaCheckoutUrl'));
+  const [hasShownOrderModal, setHasShownOrderModal] = useState<string | null>(() => localStorage.getItem('shownOrderModalId'));
   const [checkoutSettings, setCheckoutSettings] = useState({
     serviceTaxPercent: 15,
     flatFeeETB: 0,
@@ -306,52 +307,20 @@ export function MainApp() {
   };
 
   useEffect(() => {
-    const match = location.pathname.match(/^\/food\/(.+)/);
     let cancelled = false;
 
-    fetch("/api/settings")
-      .then(res => {
-        if (!res.ok) throw new Error(`Settings request failed (${res.status})`);
-        return res.json();
-      })
-      .then(data => {
-        if (!cancelled) {
-          // The fetch is only schedule-authoritative when the server actually
-          // includes the schedule fields. Older server builds omit them, so we
-          // don't downgrade/flag-loaded then — the live checkout listener
-          // (admins) or the next fetch will provide them. This prevents the
-          // "closed for a few seconds after refresh" flash.
-          const hasSchedule = Object.prototype.hasOwnProperty.call(data, "scheduleEnabled");
-          setCheckoutSettings(prev => ({
-            ...prev,
-            serviceTaxPercent: data.serviceTaxPercent ?? prev.serviceTaxPercent ?? 15,
-            flatFeeETB: data.flatFeeETB ?? prev.flatFeeETB ?? 0,
-            isOpen: data.isOpen ?? prev.isOpen ?? true,
-            enableCOD: data.enableCOD ?? prev.enableCOD ?? true,
-            prepTimeMinutes: data.prepTimeMinutes ?? prev.prepTimeMinutes ?? 30,
-            scheduledStepsMinutes: data.scheduledStepsMinutes ?? prev.scheduledStepsMinutes ?? 15,
-            ...(hasSchedule ? {
-              scheduleEnabled: data.scheduleEnabled ?? prev.scheduleEnabled ?? false,
-              openTime: data.openTime ?? prev.openTime ?? "09:00",
-              closeTime: data.closeTime ?? prev.closeTime ?? "22:00"
-            } : {})
-          }));
-          if (hasSchedule) setSettingsLoaded(true);
-        }
-      })
-      .catch(error => console.error("Failed to fetch checkout settings", error));
-
+    // Instant local listener for global restaurant branding settings
     const unsubscribeGlobal = onSnapshot(doc(db, "settings", "global"), (docSnap) => {
-      if (docSnap.exists()) {
+      if (!cancelled && docSnap.exists()) {
         setGlobalSettings(docSnap.data());
       }
     }, (error) => {
-      console.error("Failed to subscribe to global settings", error);
+      console.warn("Global settings listener note:", error?.message);
     });
 
-    // Live checkout settings (reflects admin changes immediately, incl. scheduling interval)
+    // Instant local listener for checkout & operating schedule settings (No slow /api/settings fetch!)
     const unsubscribeCheckout = onSnapshot(doc(db, "settings", "checkout"), (docSnap) => {
-      if (docSnap.exists()) {
+      if (!cancelled && docSnap.exists()) {
         const data = docSnap.data();
         setCheckoutSettings({
           serviceTaxPercent: data.serviceTaxPercent ?? 15,
@@ -365,9 +334,12 @@ export function MainApp() {
           scheduledStepsMinutes: data.scheduledStepsMinutes ?? 15
         });
         setSettingsLoaded(true);
+      } else if (!cancelled && !settingsLoaded) {
+        setSettingsLoaded(true);
       }
     }, (error) => {
-      console.error("Failed to subscribe to checkout settings", error);
+      console.warn("Checkout settings listener note:", error?.message);
+      if (!cancelled && !settingsLoaded) setSettingsLoaded(true);
     });
 
     return () => {
@@ -397,6 +369,8 @@ export function MainApp() {
     return localStorage.getItem('activeOrderId');
   });
   const [isVerifying, setIsVerifying] = useState(false);
+  const [isWaitingForPayment, setIsWaitingForPayment] = useState(false);
+  const [paymentVerificationResult, setPaymentVerificationResult] = useState<'verifying' | 'success' | 'failed' | 'pending' | null>(null);
 
   useEffect(() => {
     // Auth Listener
@@ -459,7 +433,7 @@ export function MainApp() {
       }
     });
 
-    // Real-time Categories Listener
+    // Real-time Categories Listener (client-side sort ensures fast load with no index requirements)
     const unsubscribeCategories = onSnapshot(collection(db, "categories"), (snapshot) => {
       const catData = snapshot.docs
         .map(doc => ({ id: doc.id, ...doc.data() } as { id: string, name: string, sortOrder?: number }))
@@ -469,7 +443,7 @@ export function MainApp() {
       console.error("Failed to sync categories", error);
     });
 
-    // Real-time Menu Listener
+    // Real-time Menu Listener (all items fetched instantly, client filters active/variations)
     const unsubscribeMenu = onSnapshot(collection(db, "menu"), (snapshot) => {
       const menuData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as MenuItem));
       setMenu(menuData);
@@ -510,7 +484,7 @@ export function MainApp() {
       return;
     }
 
-    // Listen to user's orders
+    // Listen to user's orders (fetch simply by userId and sort in JS, avoiding missing index errors)
     const q = query(
       collection(db, "orders"),
       where("userId", "==", user.uid)
@@ -518,16 +492,10 @@ export function MainApp() {
 
     const unsubscribeMyOrders = onSnapshot(q, (snapshot) => {
       const userOrders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Order));
-
-      // NOTE (SEC-009): Client-side auto-cleanup (deleteDoc) of old orders is
-      // intentionally removed. Firestore rules only allow admins to delete order
-      // documents, so the client delete loop always failed. Order retention /
-      // cleanup is handled server-side instead; all orders the user owns stay
-      // visible in "My Orders".
-
-      // Sort descending by createdAt
       userOrders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       setMyOrders(userOrders);
+    }, (err) => {
+      console.warn("My orders listener note:", err?.message);
     });
     return () => unsubscribeMyOrders();
   }, [user]);
@@ -538,12 +506,31 @@ export function MainApp() {
       return;
     }
 
-    // Trigger backend verification to transition paymentStatus from pending -> completed
+    // Check if user is returning from Chapa (has tx_ref in URL or status query)
+    const params = new URLSearchParams(window.location.search);
+    const hasTxRefInUrl = params.has('tx_ref');
+    const urlStatus = params.get('status');
+
+    if (hasTxRefInUrl || urlStatus) {
+      setIsWaitingForPayment(true);
+      setPaymentVerificationResult('verifying');
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
+    // Trigger backend verification to transition paymentStatus
     setIsVerifying(true);
-    authedFetch(`/api/chapa/verify/${activeOrderId}`)
+    authedFetch(`/api/chapa/verify/${encodeURIComponent(activeOrderId)}`)
       .then(res => res.json())
       .then(data => {
         console.log("[CHAPA VERIFY] Verification result:", data);
+        if (data.status === "completed" || data.status === "success") {
+          setPaymentVerificationResult('success');
+        } else if (data.status === "failed" || data.status === "cancelled") {
+          setPaymentVerificationResult('failed');
+          setPlacedOrder(prev => prev ? { ...prev, paymentStatus: 'failed', failureReason: data.failureReason } : ({ id: activeOrderId, paymentStatus: 'failed', failureReason: data.failureReason } as any));
+        } else {
+          setPaymentVerificationResult('pending');
+        }
       })
       .catch(err => {
         console.error("[CHAPA VERIFY] Verification call failed:", err);
@@ -556,39 +543,49 @@ export function MainApp() {
       if (docSnap.exists()) {
         const orderData = { id: docSnap.id, ...docSnap.data() } as Order;
         setPlacedOrder(orderData);
+        
         if (orderData.paymentStatus === 'completed') {
+          setPaymentVerificationResult('success');
           setChapaCheckoutUrl(null);
           localStorage.removeItem('chapaCheckoutUrl');
-          // Fire a persistent notification + browser push + toast
           if (user?.uid) {
+            const receiptUrl = orderData.receipt?.reference 
+              ? `https://chapa.link/payment-receipt/${orderData.receipt.reference}`
+              : undefined;
             pushNotification({
               uid: user.uid,
               type: "order_paid",
               title: "Payment successful!",
               body: `Your order #${docSnap.id.slice(-8).toUpperCase()} for ${(orderData.total ?? 0).toFixed(2)} ETB is being prepared.`,
               orderId: docSnap.id,
-              amount: orderData.total
+              amount: orderData.total,
+              receiptUrl: receiptUrl
             }).catch(() => {});
           }
-        } else if (orderData.paymentStatus === 'pending' && user?.uid) {
-          // First time we see the pending order in this session — notify too
-          // (only if we haven't already)
-          // (no-op here to avoid duplicates; the real notification is on completed)
+        } else if (orderData.paymentStatus === 'failed') {
+          setPaymentVerificationResult('failed');
+          if (user?.uid) {
+            pushNotification({
+              uid: user.uid,
+              type: "order_failed",
+              title: "Payment failed",
+              body: `Your order #${docSnap.id.slice(-8).toUpperCase()} could not be completed. ${orderData.failureReason || 'Please try again or contact support.'}`,
+              orderId: docSnap.id,
+              amount: orderData.total,
+              failureReason: orderData.failureReason
+            }).catch(() => {});
+          }
         }
       } else {
-        // Order not found, clear local storage
         localStorage.removeItem('activeOrderId');
         localStorage.removeItem('chapaCheckoutUrl');
         setActiveOrderId(null);
         setChapaCheckoutUrl(null);
+        setIsWaitingForPayment(false);
+        setPaymentVerificationResult(null);
       }
     });
 
-    // Clean up URL so it doesn't stay forever, but we already have the listener going!
-    const params = new URLSearchParams(window.location.search);
-    if (params.has('tx_ref')) {
-      window.history.replaceState({}, document.title, window.location.pathname);
-    }
     return () => unsubscribeOrder();
   }, [activeOrderId]);
 
@@ -718,23 +715,23 @@ export function MainApp() {
     setCart(prev => prev.filter(i => !(i.menuItem.id === itemId && (i.variationId ?? null) === (variationId ?? null))));
   };
 
-  const cartTotal = cart.reduce((acc, item) => acc + (item.menuItem.price * item.quantity), 0);
-  const taxAmount = cartTotal * (checkoutSettings.serviceTaxPercent / 100);
+  const cartTotal = useMemo(() => cart.reduce((acc, item) => acc + (item.menuItem.price * item.quantity), 0), [cart]);
+  const taxAmount = useMemo(() => cartTotal * (checkoutSettings.serviceTaxPercent / 100), [cartTotal, checkoutSettings.serviceTaxPercent]);
 
-  let discountAmount = 0;
-  if (appliedPromo) {
+  const discountAmount = useMemo(() => {
+    if (!appliedPromo) return 0;
     if (appliedPromo.type === 'percentage') {
-      discountAmount = cartTotal * (appliedPromo.value / 100);
+      let disc = cartTotal * (appliedPromo.value / 100);
       if (appliedPromo.maxDiscount) {
-        discountAmount = Math.min(discountAmount, appliedPromo.maxDiscount);
+        disc = Math.min(disc, appliedPromo.maxDiscount);
       }
-    } else {
-      discountAmount = appliedPromo.value;
+      return disc;
     }
-  }
+    return appliedPromo.value;
+  }, [appliedPromo, cartTotal]);
 
-  const deliveryFee = fulfillmentType === 'delivery' ? checkoutSettings.flatFeeETB : 0;
-  const finalTotal = Math.max(0, cartTotal + taxAmount + deliveryFee - discountAmount);
+  const deliveryFee = useMemo(() => fulfillmentType === 'delivery' ? checkoutSettings.flatFeeETB : 0, [fulfillmentType, checkoutSettings.flatFeeETB]);
+  const finalTotal = useMemo(() => Math.max(0, cartTotal + taxAmount + deliveryFee - discountAmount), [cartTotal, taxAmount, deliveryFee, discountAmount]);
 
   const handleApplyPromo = async () => {
     if (!promoCodeInput) return;
@@ -893,6 +890,38 @@ export function MainApp() {
         localStorage.setItem('activeOrderId', data.txRef);
         setActiveOrderId(data.txRef);
 
+        // Instantly write the pending order document directly from client SDK (takes ~50ms)
+        try {
+          const clientOrderDoc = {
+            id: data.txRef,
+            items: cart,
+            status: "pending",
+            total: finalTotal,
+            customerName: `${firstName} ${lastName}`.trim(),
+            customerEmail: emailTrimmed,
+            customerPhone: customerPhone.trim(),
+            blockNumber: fulfillmentType === 'delivery' ? blockNumber : "",
+            roomNumber: fulfillmentType === 'delivery' ? roomNumber : "",
+            googleMapsAddress: fulfillmentType === 'delivery' ? googleMapsAddress : "",
+            specialInstructions,
+            paymentMethod: "chapa",
+            paymentStatus: "pending",
+            fulfillmentType,
+            scheduledFor: finalScheduledFor,
+            transactionRef: data.txRef,
+            chapaCheckoutUrl: data.checkoutUrl || null,
+            createdAt: new Date().toISOString(),
+            userId: user?.uid || null,
+            serviceTax: taxAmount,
+            flatFee: deliveryFee,
+            promoCode: appliedPromo?.code || null,
+            discountAmount
+          };
+          setDoc(doc(db, "orders", data.txRef), sanitizeForFirestore(clientOrderDoc), { merge: true }).catch(() => {});
+        } catch (e) {
+          console.warn("[CHECKOUT] Client order pre-write note:", e);
+        }
+
         if (data.checkoutUrl) {
           localStorage.setItem('chapaCheckoutUrl', data.checkoutUrl);
           setChapaCheckoutUrl(data.checkoutUrl);
@@ -923,6 +952,7 @@ export function MainApp() {
           setRoomNumber("");
           setScheduleEnabled(false);
           setScheduledFor("");
+          setIsWaitingForPayment(true);
           window.location.href = data.checkoutUrl;
           return;
         }
@@ -1084,7 +1114,7 @@ export function MainApp() {
     return nowMin >= from || nowMin <= to;
   };
 
-  const filteredMenu = menu.filter(item => {
+  const filteredMenu = useMemo(() => menu.filter(item => {
     const matchesCategory = selectedCategory === 'all' ||
       item.category === selectedCategory ||
       (item.categories && item.categories.includes(selectedCategory));
@@ -1097,18 +1127,20 @@ export function MainApp() {
       ? itemVariations(item).some(v => isVariationAvailable(v))
       : item.isActive !== false;
     return matchesCategory && matchesSearch && isCurrentlyActive && isItemCurrentlyAvailable(item);
-  });
+  }), [menu, selectedCategory, searchQuery, now]);
 
   // Group the filtered menu by category while preserving the categories order.
-  const itemCategoryIds = (item: MenuItem) =>
-    item.categories && item.categories.length > 0 ? item.categories : (item.category ? [item.category] : []);
-  const categoryGroups = categories
+  const itemCategoryIds = useCallback((item: MenuItem) =>
+    item.categories && item.categories.length > 0 ? item.categories : (item.category ? [item.category] : []), []);
+    
+  const categoryGroups = useMemo(() => categories
     .map(cat => ({ ...cat, items: filteredMenu.filter(item => itemCategoryIds(item).includes(cat.id)) }))
-    .filter(group => group.items.length > 0);
-  const uncategorizedItems = filteredMenu.filter(item => {
+    .filter(group => group.items.length > 0), [categories, filteredMenu, itemCategoryIds]);
+    
+  const uncategorizedItems = useMemo(() => filteredMenu.filter(item => {
     const ids = itemCategoryIds(item);
     return ids.length === 0 || !ids.some(id => categories.some(c => c.id === id));
-  });
+  }), [filteredMenu, itemCategoryIds, categories]);
 
   if (authLoading) {
     return (
@@ -1980,6 +2012,181 @@ export function MainApp() {
           </div>
         )}
 
+        {/* Full-screen Payment Waiting/Result Modal */}
+        {isWaitingForPayment && (
+          <div className="fixed inset-0 bg-black/80 z-[999] flex items-center justify-center backdrop-blur-sm animate-fade-in">
+            <div className="bg-white rounded-3xl max-w-md w-full mx-4 p-10 text-center shadow-2xl animate-scale-up">
+              {paymentVerificationResult === 'verifying' && (
+                <>
+                  <div className="relative w-24 h-24 mx-auto mb-6">
+                    <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
+                      <circle cx="50" cy="50" r="45" fill="none" stroke="#e5e7eb" strokeWidth="8" />
+                      <circle
+                        cx="50"
+                        cy="50"
+                        r="45"
+                        fill="none"
+                        stroke="#f59e0b"
+                        strokeWidth="8"
+                        strokeDasharray="283"
+                        strokeDashoffset="0"
+                        strokeLinecap="round"
+                        className="animate-spin"
+                        style={{ animationDuration: '1.2s', animationTimingFunction: 'linear' }}
+                      />
+                    </svg>
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="bg-amber-100 rounded-full p-3">
+                        <div className="w-8 h-8 bg-amber-600 rounded-full animate-pulse" />
+                      </div>
+                    </div>
+                  </div>
+                  <h3 className="font-serif text-xl font-bold text-stone-950 mb-2">Verifying Payment</h3>
+                  <p className="text-stone-600 mb-1">Please wait while we confirm your payment...</p>
+                  <p className="text-xs text-stone-400">This may take a few seconds</p>
+                  <div className="mt-6 flex items-center justify-center space-x-2 text-xs text-stone-400">
+                    <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                  </div>
+                </>
+              )}
+              
+              {paymentVerificationResult === 'success' && (
+                <>
+                  <div className="w-24 h-24 mx-auto mb-6 bg-emerald-100 rounded-full flex items-center justify-center">
+                    <CheckCircle className="w-12 h-12 text-emerald-600" />
+                  </div>
+                  <h3 className="font-serif text-xl font-bold text-stone-950 mb-2">
+                    Thanks for ordering in {globalSettings?.restaurantName || "Savory"}!
+                  </h3>
+                  <p className="text-stone-600 mb-1">Your payment was successful and your order is being prepared.</p>
+                  <div className="mt-6 flex space-x-3 justify-center">
+                    <button
+                      onClick={() => {
+                        setIsWaitingForPayment(false);
+                        setPaymentVerificationResult(null);
+                        setPlacedOrder(null);
+                        localStorage.removeItem('activeOrderId');
+                        localStorage.removeItem('shownOrderModalId');
+                        setActiveOrderId(null);
+                        setHasShownOrderModal(null);
+                      }}
+                      className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                    >
+                      Continue Shopping
+                    </button>
+                    <button
+                      onClick={() => setSelectedReceiptOrder(placedOrder)}
+                      className="flex-1 bg-stone-200 hover:bg-stone-300 text-stone-700 font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                    >
+                      View Receipt
+                    </button>
+                  </div>
+                </>
+              )}
+              
+              {paymentVerificationResult === 'failed' && (
+                <>
+                  <div className="w-24 h-24 mx-auto mb-6 bg-rose-100 rounded-full flex items-center justify-center">
+                    <X className="w-12 h-12 text-rose-600" />
+                  </div>
+                  <h3 className="font-serif text-xl font-bold text-stone-950 mb-2">Payment Failed</h3>
+                  <p className="text-stone-600 mb-1">Your payment could not be completed.</p>
+                  {placedOrder?.failureReason && (
+                    <p className="text-xs text-rose-600 mb-4 bg-rose-50 px-3 py-2 rounded-lg font-mono">{placedOrder.failureReason}</p>
+                  )}
+                  <div className="mt-6 flex space-x-3 justify-center">
+                    <button
+                      onClick={() => {
+                        setIsWaitingForPayment(false);
+                        setPaymentVerificationResult(null);
+                      }}
+                      className="flex-1 bg-stone-200 hover:bg-stone-300 text-stone-700 font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                    >
+                      Continue Shopping
+                    </button>
+                    <button
+                      onClick={async () => {
+                        if (placedOrder) {
+                          try {
+                            await updateDoc(doc(db, "orders", placedOrder.id), { status: "cancelled" });
+                            setPlacedOrder(null);
+                            localStorage.removeItem('activeOrderId');
+                            localStorage.removeItem('shownOrderModalId');
+                            setActiveOrderId(null);
+                            setHasShownOrderModal(null);
+                          } catch (err) {
+                            toastError("Failed to cancel order.");
+                          }
+                        }
+                      }}
+                      className="flex-1 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                    >
+                      Cancel Order
+                    </button>
+                  </div>
+                </>
+              )}
+              
+              {paymentVerificationResult === 'pending' && (
+                <>
+                  <div className="relative w-24 h-24 mx-auto mb-6">
+                    <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
+                      <circle cx="50" cy="50" r="45" fill="none" stroke="#e5e7eb" strokeWidth="8" />
+                      <circle
+                        cx="50"
+                        cy="50"
+                        r="45"
+                        fill="none"
+                        stroke="#f59e0b"
+                        strokeWidth="8"
+                        strokeDasharray="283"
+                        strokeDashoffset="0"
+                        strokeLinecap="round"
+                        className="animate-spin"
+                        style={{ animationDuration: '1.2s', animationTimingFunction: 'linear' }}
+                      />
+                    </svg>
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="bg-amber-100 rounded-full p-3">
+                        <div className="w-8 h-8 bg-amber-600 rounded-full animate-pulse" />
+                      </div>
+                    </div>
+                  </div>
+                  <h3 className="font-serif text-xl font-bold text-stone-950 mb-2">Payment Still Processing</h3>
+                  <p className="text-stone-600 mb-1">Your payment is being processed. This may take a moment.</p>
+                  <p className="text-xs text-stone-400 mb-4">We'll update you shortly.</p>
+                  <div className="flex space-x-3 justify-center">
+                    <button
+                      onClick={() => {
+                        setIsWaitingForPayment(false);
+                        setPaymentVerificationResult(null);
+                      }}
+                      className="flex-1 bg-stone-200 hover:bg-stone-300 text-stone-700 font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                    >
+                      Continue Shopping
+                    </button>
+                    <button
+                      onClick={() => {
+                        setPaymentVerificationResult('verifying');
+                        authedFetch(`/api/chapa/verify/${activeOrderId}`)
+                          .then(res => res.json())
+                          .then(data => {
+                            console.log("[MANUAL VERIFY] Result:", data);
+                          });
+                      }}
+                      className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                    >
+                      Check Again
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Chapa Transaction Receipt Modal Overlay */}
         {selectedReceiptOrder && (
           <div id="receipt-modal" className="fixed inset-0 bg-black/70 z-[100] flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in" onClick={() => setSelectedReceiptOrder(null)}>
@@ -2290,7 +2497,9 @@ export function MainApp() {
                   onClick={() => {
                     setPlacedOrder(null);
                     localStorage.removeItem('activeOrderId');
+                    localStorage.removeItem('shownOrderModalId');
                     setActiveOrderId(null);
+                    setHasShownOrderModal(null);
                   }}
                   className="flex-grow bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl text-xs uppercase tracking-wider cursor-pointer transition-colors"
                 >

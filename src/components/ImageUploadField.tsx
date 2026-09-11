@@ -15,6 +15,8 @@ interface ImageUploadFieldProps {
   label?: string;
   accept?: string;
   maxSizeMB?: number;
+  maxDimension?: number;
+  quality?: number;
   className?: string;
 }
 
@@ -24,6 +26,8 @@ export default function ImageUploadField({
   label = "Image",
   accept = "image/*",
   maxSizeMB = 4,
+  maxDimension = 1200,
+  quality = 0.85,
   className = ""
 }: ImageUploadFieldProps) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -111,6 +115,8 @@ export default function ImageUploadField({
             onChange(dataUrl);
             setPendingFile(null);
           }}
+          maxDimension={maxDimension}
+          quality={quality}
         />
       )}
     </div>

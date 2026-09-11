@@ -17,7 +17,7 @@ import ReportsManager from "./components/ReportsManager";
 import CommandPalette from "./components/CommandPalette";
 import { Utensils, Settings, LogOut, LayoutDashboard, MessageSquare, CalendarDays, ChefHat, ShoppingBag, Percent, Users, FileText, Search, BarChart3 } from "lucide-react";
 import { db, auth, authedFetch, googleProvider } from "./firebase";
-import { collection, query, where, orderBy, onSnapshot, doc, getDoc } from "firebase/firestore";
+import { collection, query, where, orderBy, onSnapshot, doc, getDoc, getDocs } from "firebase/firestore";
 import { PermissionMap, hasPermission, getDefaultRole, seedDefaultRoles } from "./permissions";
 import { onAuthStateChanged, signOut, signInWithPopup } from "firebase/auth";
 
@@ -300,8 +300,8 @@ export default function AdminPortal() {
 
   const fetchMenu = async () => {
     try {
-      const menuRes = await authedFetch("/api/menu");
-      const menuData = await menuRes.json();
+      const snap = await getDocs(collection(db, "menu"));
+      const menuData = snap.docs.map(d => ({ id: d.id, ...d.data() } as MenuItem));
       setMenu(menuData);
     } catch (e) {
       console.error("Failed to sync menu state", e);
@@ -309,21 +309,31 @@ export default function AdminPortal() {
   };
 
   useEffect(() => {
-    fetchMenu();
+    // Real-time direct client listener for menu - instantaneous!
+    const unsubMenu = onSnapshot(collection(db, "menu"), (snap) => {
+      const menuData = snap.docs.map(d => ({ id: d.id, ...d.data() } as MenuItem));
+      setMenu(menuData);
+    }, (err) => {
+      console.warn("Direct menu listener error:", err);
+    });
 
     const q = query(collection(db, "orders"), orderBy("createdAt", "desc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const unsubscribeOrders = onSnapshot(q, (snapshot) => {
       const updatedOrders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Order[];
       setOrders(updatedOrders);
     }, (err) => {
       console.warn("Orders query error, falling back to simple collection listener:", err);
       onSnapshot(collection(db, "orders"), (snapshot) => {
         const updatedOrders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Order[];
+        updatedOrders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
         setOrders(updatedOrders);
       }, () => { });
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubMenu();
+      unsubscribeOrders();
+    };
   }, []);
 
   // Listen for customer accounts (used by CustomerManager + Command Palette).

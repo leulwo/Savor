@@ -150,6 +150,49 @@ function SortableVariationRow({
   );
 }
 
+
+// Compress image file to max dimension and quality
+async function compressImageFile(file: File, maxDimension: number, quality: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        let { width, height } = img;
+        
+        if (width > height) {
+          if (width > maxDimension) {
+            height = (height * maxDimension) / width;
+            width = maxDimension;
+          }
+        } else {
+          if (height > maxDimension) {
+            width = (width * maxDimension) / height;
+            height = maxDimension;
+          }
+        }
+        
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("Canvas not supported"));
+          return;
+        }
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = () => reject(new Error("Could not load image"));
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = () => reject(new Error("Could not read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function MenuManager({ menu = [], onMenuUpdated, userRole, can, permissions, actor }: MenuManagerProps) {
   const [selectedItem, setSelectedItem] = useState<MenuItem | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -782,12 +825,9 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole, can, p
                             const newUrls: string[] = [];
                             for (let i = 0; i < files.length; i++) {
                               const file = files[i];
-                              const reader = new FileReader();
-                              const dataUrl = await new Promise<string>((resolve) => {
-                                reader.onloadend = () => resolve(reader.result as string);
-                                reader.readAsDataURL(file);
-                              });
-                              newUrls.push(dataUrl);
+                              // Compress image before storing
+                              const compressedDataUrl = await compressImageFile(file, 1200, 0.85);
+                              newUrls.push(compressedDataUrl);
                             }
                             setGalleryImages(prev => prev ? `${prev}, ${newUrls.join(', ')}` : newUrls.join(', '));
                           }
@@ -1023,6 +1063,8 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole, can, p
             setImage(dataUrl);
             setCropFile(null);
           }}
+          maxDimension={1200}
+          quality={0.85}
         />
       )}
     </div>

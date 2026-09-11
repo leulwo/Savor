@@ -7,6 +7,8 @@ interface SquareImageCropperProps {
   file: File;
   onCancel: () => void;
   onConfirm: (dataUrl: string, file: File) => void;
+  maxDimension?: number;
+  quality?: number;
 }
 
 interface Area {
@@ -17,7 +19,7 @@ interface Area {
 }
 
 // Draw the cropped square region onto a canvas and return a data URL.
-function cropCanvas(source: HTMLImageElement, pixelCrop: Area, outputSize = 512): string {
+function cropCanvas(source: HTMLImageElement, pixelCrop: Area, outputSize = 512, quality = 0.92): string {
   const canvas = document.createElement("canvas");
   canvas.width = outputSize;
   canvas.height = outputSize;
@@ -36,10 +38,37 @@ function cropCanvas(source: HTMLImageElement, pixelCrop: Area, outputSize = 512)
     outputSize,
     outputSize
   );
-  return canvas.toDataURL("image/jpeg", 0.92);
+  return canvas.toDataURL("image/jpeg", quality);
 }
 
-export default function SquareImageCropper({ file, onCancel, onConfirm }: SquareImageCropperProps) {
+// Resize image to max dimension while maintaining aspect ratio
+function resizeImage(source: HTMLImageElement, maxDimension: number, quality: number): string {
+  const canvas = document.createElement("canvas");
+  let { width, height } = source;
+  
+  if (width > height) {
+    if (width > maxDimension) {
+      height = (height * maxDimension) / width;
+      width = maxDimension;
+    }
+  } else {
+    if (height > maxDimension) {
+      width = (width * maxDimension) / height;
+      height = maxDimension;
+    }
+  }
+  
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas not supported");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(source, 0, 0, width, height);
+  return canvas.toDataURL("image/jpeg", quality);
+}
+
+export default function SquareImageCropper({ file, onCancel, onConfirm, maxDimension = 1200, quality = 0.85 }: SquareImageCropperProps) {
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [crop, setCrop] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
@@ -67,8 +96,20 @@ export default function SquareImageCropper({ file, onCancel, onConfirm }: Square
         img.onload = () => resolve();
         img.onerror = () => reject(new Error("Could not load image"));
       });
-      const dataUrl = cropCanvas(img, croppedAreaPixels);
-      onConfirm(dataUrl, file);
+      
+      // First crop to square, then resize if needed
+      const croppedDataUrl = cropCanvas(img, croppedAreaPixels, Math.min(maxDimension, 512), quality);
+      
+      // If the cropped image is still larger than maxDimension, resize it
+      const finalImg = new Image();
+      finalImg.src = croppedDataUrl;
+      await new Promise<void>((resolve, reject) => {
+        finalImg.onload = () => resolve();
+        finalImg.onerror = () => reject(new Error("Could not load cropped image"));
+      });
+      
+      const finalDataUrl = resizeImage(finalImg, maxDimension, quality);
+      onConfirm(finalDataUrl, file);
     } catch (err) {
       console.error("Crop failed", err);
     } finally {

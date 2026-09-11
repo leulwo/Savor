@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 
 type ToastType = "success" | "error" | "info" | "warning";
 
@@ -95,30 +95,75 @@ const STYLES: Record<ToastType, string> = {
 
 export function NotifyHost() {
   const [state, setState] = useState(getSnapshot());
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const [swipingId, setSwipingId] = useState<number | null>(null);
+  const [dragOffset, setDragOffset] = useState<Record<number, number>>({});
 
   useEffect(() => subscribe(() => setState(getSnapshot())), []);
+
+  const handleToastTouchStart = (e: React.TouchEvent, id: number) => {
+    touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    setSwipingId(id);
+  };
+
+  const handleToastTouchMove = (e: React.TouchEvent, toastId: number) => {
+    if (!touchStartRef.current) return;
+    const touch = e.touches[0];
+    const deltaX = touch.clientX - touchStartRef.current.x;
+    const deltaY = touch.clientY - touchStartRef.current.y;
+    
+    if (Math.abs(deltaX) > Math.abs(deltaY)) {
+      setDragOffset(prev => ({ ...prev, [toastId]: deltaX }));
+    }
+  };
+
+  const handleToastTouchEnd = (toastId: number) => {
+    const currentOffset = dragOffset[toastId] || 0;
+    if (Math.abs(currentOffset) > 80) {
+      toasts = toasts.filter(x => x.id !== toastId);
+      emit();
+    }
+    setDragOffset(prev => {
+      const next = { ...prev };
+      delete next[toastId];
+      return next;
+    });
+    setSwipingId(null);
+    touchStartRef.current = null;
+  };
 
   return (
     <>
       <div className="fixed top-4 right-4 z-[9999] flex flex-col gap-2 pointer-events-none">
-        {state.toasts.map(t => (
-          <div
-            key={t.id}
-            className={`${STYLES[t.type]} flex items-center gap-2 pl-3 pr-4 py-2.5 rounded-xl shadow-lg text-sm font-medium backdrop-blur-xs animate-[fadeInDown_.2s_ease-out]`}
-          >
-            <span className="w-4 h-4 flex items-center justify-center text-xs rounded-full bg-black/20 flex-shrink-0">{ICONS[t.type]}</span>
-            <span>{t.message}</span>
-            <button
-              onClick={() => {
-                toasts = toasts.filter(x => x.id !== t.id);
-                emit();
+        {state.toasts.map(t => {
+          const offset = dragOffset[t.id] || 0;
+          return (
+            <div
+              key={t.id}
+              onTouchStart={(e) => handleToastTouchStart(e, t.id)}
+              onTouchMove={(e) => handleToastTouchMove(e, t.id)}
+              onTouchEnd={() => handleToastTouchEnd(t.id)}
+              style={{
+                transform: `translateX(${offset}px)`,
+                transition: swipingId === t.id ? 'none' : 'transform 0.2s ease-out',
+                opacity: Math.max(0.2, 1 - Math.abs(offset) / 200)
               }}
-              className="ml-2 opacity-50 hover:opacity-100 text-xs font-bold cursor-pointer flex-shrink-0"
+              className={`${STYLES[t.type]} pointer-events-auto flex items-center gap-2 pl-3 pr-4 py-2.5 rounded-xl shadow-lg text-sm font-medium backdrop-blur-xs animate-[fadeInDown_.2s_ease-out] select-none cursor-grab active:cursor-grabbing`}
             >
-              ✕
-            </button>
-          </div>
-        ))}
+              <span className="w-4 h-4 flex items-center justify-center text-xs rounded-full bg-black/20 flex-shrink-0">{ICONS[t.type]}</span>
+              <span className="flex-1">{t.message}</span>
+              <button
+                onClick={() => {
+                  toasts = toasts.filter(x => x.id !== t.id);
+                  emit();
+                }}
+                className="ml-2 opacity-50 hover:opacity-100 text-xs font-bold cursor-pointer flex-shrink-0"
+              >
+                ✕
+              </button>
+            </div>
+          );
+        })}
       </div>
       {state.confirm && (
         <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">

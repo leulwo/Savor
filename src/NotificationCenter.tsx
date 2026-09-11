@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import type { TouchEvent, MouseEvent as ReactMouseEvent } from "react";
 import { db } from "./firebase";
-import { collection, query, orderBy, onSnapshot, doc, updateDoc, addDoc, writeBatch, limit } from "firebase/firestore";
-import { Bell, X, Receipt, Clock, AlertCircle, Sparkles } from "lucide-react";
+import { collection, query, orderBy, onSnapshot, doc, updateDoc, addDoc, deleteDoc, writeBatch, limit } from "firebase/firestore";
+import { Bell, X, Receipt, Clock, AlertCircle, Sparkles, Trash2 } from "lucide-react";
 import { toastSuccess } from "./notify";
 
 export interface AppNotification {
@@ -13,6 +14,8 @@ export interface AppNotification {
   createdAt: number;
   orderId?: string;
   amount?: number;
+  receiptUrl?: string;
+  failureReason?: string;
 }
 
 function requestPushPermission(): void {
@@ -44,6 +47,8 @@ export async function pushNotification(opts: {
   body: string;
   orderId?: string;
   amount?: number;
+  receiptUrl?: string;
+  failureReason?: string;
 }): Promise<void> {
   try {
     await addDoc(collection(db, "users", opts.uid, "notifications"), {
@@ -53,15 +58,148 @@ export async function pushNotification(opts: {
       read: false,
       createdAt: Date.now(),
       orderId: opts.orderId || null,
-      amount: opts.amount || null
+      amount: opts.amount || null,
+      receiptUrl: opts.receiptUrl || null,
+      failureReason: opts.failureReason || null
     });
   } catch (e) {
     console.error("[notifications] failed to persist:", e);
   }
   // Always try to fire a browser push for instant feedback
   sendBrowserNotification(opts.title, opts.body);
-  // And a corner toast
-  toastSuccess(opts.title);
+  // And a corner toast (use toastError for failed, toastSuccess for others)
+  if (opts.type === "order_failed") {
+    const { toastError } = await import("./notify");
+    toastError(opts.title);
+  } else {
+    toastSuccess(opts.title);
+  }
+}
+
+function NotificationRow({
+  n,
+  uid,
+  onRead,
+  onDismiss
+}: {
+  n: AppNotification;
+  uid: string;
+  onRead: (id: string) => void;
+  onDismiss: (id: string) => void;
+  key?: string;
+}) {
+  const [offsetX, setOffsetX] = useState(0);
+  const [isSwiping, setIsSwiping] = useState(false);
+  const startXRef = useRef(0);
+  const startYRef = useRef(0);
+  const isHorizontalSwipe = useRef<boolean | null>(null);
+
+  const handleTouchStart = (e: TouchEvent) => {
+    startXRef.current = e.touches[0].clientX;
+    startYRef.current = e.touches[0].clientY;
+    isHorizontalSwipe.current = null;
+    setIsSwiping(true);
+  };
+
+  const handleTouchMove = (e: TouchEvent) => {
+    const currentX = e.touches[0].clientX;
+    const currentY = e.touches[0].clientY;
+    const dx = currentX - startXRef.current;
+    const dy = currentY - startYRef.current;
+
+    if (isHorizontalSwipe.current === null) {
+      if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+        isHorizontalSwipe.current = Math.abs(dx) > Math.abs(dy);
+      }
+    }
+
+    if (isHorizontalSwipe.current) {
+      setOffsetX(dx);
+    }
+  };
+
+  const handleTouchEnd = () => {
+    setIsSwiping(false);
+    if (Math.abs(offsetX) > 90) {
+      onDismiss(n.id);
+    } else {
+      setOffsetX(0);
+    }
+    isHorizontalSwipe.current = null;
+  };
+
+  return (
+    <div className="relative overflow-hidden border-b border-stone-100 bg-rose-50 select-none">
+      {/* Background trash action shown during swipe */}
+      <div className="absolute inset-0 flex items-center justify-between px-4 text-rose-600">
+        <Trash2 className="w-4 h-4" />
+        <Trash2 className="w-4 h-4" />
+      </div>
+
+      {/* Swipeable Notification Item Card */}
+      <div
+        style={{
+          transform: `translateX(${offsetX}px)`,
+          transition: isSwiping ? 'none' : 'transform 0.2s ease-out'
+        }}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onClick={(e) => {
+          if (!(e.target as HTMLElement).closest('a')) {
+            onRead(n.id);
+          }
+        }}
+        className={`relative z-10 w-full text-left px-4 py-3 bg-white hover:bg-stone-50 transition-colors flex gap-3 cursor-pointer ${
+          !n.read ? "bg-amber-50/40" : ""
+        }`}
+      >
+        <div className="shrink-0 mt-0.5">
+          {n.type === "order_paid" && <Receipt className="w-5 h-5 text-emerald-600" />}
+          {n.type === "order_placed" && <Clock className="w-5 h-5 text-amber-600" />}
+          {n.type === "order_failed" && <AlertCircle className="w-5 h-5 text-rose-600" />}
+          {n.type === "promo" && <Sparkles className="w-5 h-5 text-purple-600" />}
+          {n.type === "system" && <Bell className="w-5 h-5 text-stone-500" />}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between gap-2">
+            <p className="font-bold text-stone-900 text-sm truncate">{n.title}</p>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {!n.read && <span className="w-2 h-2 rounded-full bg-amber-500" />}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDismiss(n.id);
+                }}
+                className="text-stone-300 hover:text-rose-500 p-0.5 transition-colors"
+                title="Dismiss"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+          <p className="text-xs text-stone-500 mt-0.5 line-clamp-2">{n.body}</p>
+          {n.type === "order_paid" && n.receiptUrl && (
+            <a
+              href={n.receiptUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 hover:text-emerald-800 underline mt-1.5 cursor-pointer"
+            >
+              <Receipt className="w-3 h-3" />
+              View Receipt ↗
+            </a>
+          )}
+          {n.type === "order_failed" && n.failureReason && (
+            <p className="text-[10px] text-rose-600 mt-1 font-mono font-medium">{n.failureReason}</p>
+          )}
+          <p className="text-[10px] text-stone-400 mt-1 font-mono">{timeAgo(n.createdAt)}</p>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function NotificationCenter({ uid }: { uid: string | null }) {
@@ -121,6 +259,16 @@ export function NotificationCenter({ uid }: { uid: string | null }) {
     try { await updateDoc(doc(db, "users", uid, "notifications", id), { read: true }); } catch {}
   };
 
+  const dismissNotification = async (id: string) => {
+    if (!uid) return;
+    try {
+      await deleteDoc(doc(db, "users", uid, "notifications", id));
+      setItems(prev => prev.filter(item => item.id !== id));
+    } catch (e) {
+      console.warn("Failed to delete notification doc:", e);
+    }
+  };
+
   if (!uid) return null;
 
   return (
@@ -146,9 +294,12 @@ export function NotificationCenter({ uid }: { uid: string | null }) {
               <Sparkles className="w-4 h-4 text-amber-600" />
               <span className="font-bold text-stone-900 text-sm">Notifications</span>
             </div>
-            <button onClick={() => setOpen(false)} className="text-stone-400 hover:text-stone-700 p-1 rounded cursor-pointer">
-              <X className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-stone-400">Swipe to dismiss</span>
+              <button onClick={() => setOpen(false)} className="text-stone-400 hover:text-stone-700 p-1 rounded cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
           <div className="max-h-96 overflow-y-auto">
@@ -159,27 +310,13 @@ export function NotificationCenter({ uid }: { uid: string | null }) {
               </div>
             ) : (
               items.map(n => (
-                <button
+                <NotificationRow
                   key={n.id}
-                  onClick={() => markRead(n.id)}
-                  className={`w-full text-left px-4 py-3 border-b border-stone-50 hover:bg-stone-50 transition-colors flex gap-3 ${!n.read ? "bg-amber-50/40" : ""}`}
-                >
-                  <div className="shrink-0 mt-0.5">
-                    {n.type === "order_paid" && <Receipt className="w-5 h-5 text-emerald-600" />}
-                    {n.type === "order_placed" && <Clock className="w-5 h-5 text-amber-600" />}
-                    {n.type === "order_failed" && <AlertCircle className="w-5 h-5 text-rose-600" />}
-                    {n.type === "promo" && <Sparkles className="w-5 h-5 text-purple-600" />}
-                    {n.type === "system" && <Bell className="w-5 h-5 text-stone-500" />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <p className="font-bold text-stone-900 text-sm truncate">{n.title}</p>
-                      {!n.read && <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />}
-                    </div>
-                    <p className="text-xs text-stone-500 mt-0.5 line-clamp-2">{n.body}</p>
-                    <p className="text-[10px] text-stone-400 mt-1 font-mono">{timeAgo(n.createdAt)}</p>
-                  </div>
-                </button>
+                  n={n}
+                  uid={uid}
+                  onRead={markRead}
+                  onDismiss={dismissNotification}
+                />
               ))
             )}
           </div>

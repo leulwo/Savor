@@ -96,6 +96,7 @@ export interface Order {
   };
   promoCode?: string;
   discountAmount?: number;
+  failureReason?: string;
 }
 
 export interface VpsStats {

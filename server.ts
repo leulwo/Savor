@@ -814,6 +814,7 @@ app.post("/api/chapa/webhook", async (req: any, res) => {
       if (orderData.paymentStatus !== "failed") {
         await orderRef.update({
           paymentStatus: "failed",
+          failureReason: event.failure_reason || event.failureReason || "Payment failed or was cancelled",
           updatedAt: new Date().toISOString(),
           paymentHistory: Array.isArray(orderData.paymentHistory) ? [...orderData.paymentHistory, { paymentStatus: "failed", at: new Date().toISOString() }] : undefined
         });
@@ -927,8 +928,24 @@ app.get("/api/chapa/callback", async (req, res) => {
         console.warn(`[CHAPA CALLBACK] No real CHAPA_SECRET_KEY configured; refusing to complete order ${txRef} (fail closed).`);
         return res.redirect(`/?status=pending&tx_ref=${txRef}&error=verification_disabled`);
       }
+    } else if (status === "failed" || status === "cancelled" || status === "failed/cancelled") {
+      // Handle failed/cancelled callback - update order to failed
+      const orderData = docSnap.data();
+      const failureReason = req.query.failure_reason || req.query.failureReason || "Payment failed or was cancelled";
+      
+      if (orderData.paymentStatus !== "failed") {
+        await orderRef.update({
+          paymentStatus: "failed",
+          failureReason: failureReason,
+          updatedAt: new Date().toISOString(),
+          paymentHistory: Array.isArray(orderData.paymentHistory) ? [...orderData.paymentHistory, { paymentStatus: "failed", at: new Date().toISOString() }] : undefined
+        });
+        console.log(`[CHAPA CALLBACK] Order ${txRef} marked failed via callback (reason: ${failureReason}).`);
+      } else {
+        console.log(`[CHAPA CALLBACK] Order ${txRef} already failed; skipping duplicate callback.`);
+      }
     } else {
-      console.warn(`[CHAPA CALLBACK] Non-success callback status: ${status}`);
+      console.warn(`[CHAPA CALLBACK] Unhandled callback status: ${status}`);
     }
 
     return res.redirect(`/?status=${status || "pending"}&tx_ref=${txRef}`);
@@ -983,7 +1000,7 @@ app.post("/api/chapa/initialize", async (req, res) => {
       first_name: String(first_name).trim(),
       last_name: String(last_name).trim(),
       tx_ref: tx_ref,
-      callback_url: `${baseUrl}/api/chapa/webhook`,
+      callback_url: `${baseUrl}/api/chapa/callback`,
       return_url: `${baseUrl}/?status=success&tx_ref=${tx_ref}`,
       customization: {
         title: "Savory Order",
@@ -1025,29 +1042,12 @@ app.post("/api/chapa/initialize", async (req, res) => {
 
     console.log(`[CHAPA] Initiating payment for reference ${tx_ref} (amount: ${chapaPayload.amount} ETB)`);
 
-    // Step 1: Save order to Firestore BEFORE calling Chapa.
-    // On slow networks, Firestore writes can take a long time (60s+ per retry).
-    // We use a race with a 25s timeout so the user isn't blocked indefinitely.
-    // If the write times out or fails, we still proceed to Chapa (best-effort) —
-    // the verify endpoint will create the order doc as a safety net.
-    let orderSaved = false;
-    try {
-      await Promise.race([
-        db.collection("orders").doc(tx_ref).set(newOrder),
-        new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error("Firestore write timed out (25s)")), 25000)
-        )
-      ]);
-      orderSaved = true;
-      console.log(`[CHAPA INITIALIZE] Order ${tx_ref} saved to Firestore.`);
-    } catch (err: any) {
-      console.error(`[CHAPA INITIALIZE] Firestore order save failed (continuing to Chapa):`, err?.message || err);
-      // Fire-and-forget: the write may still complete in the background via SDK retries.
-      // The verify endpoint will create the doc if it's still missing when the user returns.
-      db.collection("orders").doc(tx_ref).set(newOrder).catch(() => {});
-    }
+    // Non-blocking fire-and-forget save in background (the client SDK also writes directly to Firestore in 50ms)
+    db.collection("orders").doc(tx_ref).set(newOrder).catch((err: any) => {
+      console.warn("[CHAPA INITIALIZE] Background Firestore write notice:", err?.message || err);
+    });
 
-    // Step 2: Call Chapa API to get the hosted checkout URL
+    // Step 2: Call Chapa API to get the hosted checkout URL immediately
     let chapaResponse: Response;
     try {
       chapaResponse = await fetch("https://api.chapa.co/v1/transaction/initialize", {
@@ -1087,9 +1087,7 @@ app.post("/api/chapa/initialize", async (req, res) => {
       const errorMsg = chapaData.message || (typeof chapaData.error === 'string' ? chapaData.error : "Chapa initialization failed");
       console.error("[CHAPA INITIALIZE] Chapa initialization failed:", errorMsg, chapaData);
       // Clean up the pending order doc if Chapa rejected the payment
-      if (orderSaved) {
-        db.collection("orders").doc(tx_ref).delete().catch(() => {});
-      }
+      db.collection("orders").doc(tx_ref).delete().catch(() => {});
       return res.status(400).json({
         success: false,
         error: errorMsg,
@@ -1210,8 +1208,26 @@ app.get("/api/chapa/verify/:txRef", async (req, res) => {
           const updatedDoc = await orderRef.get();
           return res.json({ success: true, status: "completed", order: { id: updatedDoc.id, ...updatedDoc.data() } });
         } else {
-          console.warn(`[CHAPA VERIFY] Chapa API verification returned non-success structure or status. Data status: ${chapaData.data?.status}`);
-          return res.status(400).json({ success: false, status: "pending", error: "Payment not completed yet" });
+          const rawStatus = String(chapaData.data?.status || chapaData.status || "failed").toLowerCase();
+          const failureReason = chapaData.data?.failure_reason || chapaData.message || "Payment cancelled or failed on gateway.";
+          console.warn(`[CHAPA VERIFY] Chapa API status: '${rawStatus}'. Updating order ${txRef} accordingly. Reason: ${failureReason}`);
+          
+          const isDefiniteFailure = rawStatus.includes("fail") || rawStatus.includes("cancel");
+          if (isDefiniteFailure && docSnap?.exists) {
+            await orderRef.set({
+              paymentStatus: "failed",
+              status: "cancelled",
+              failureReason: failureReason,
+              updatedAt: new Date().toISOString()
+            }, { merge: true });
+          }
+
+          return res.json({
+            success: false,
+            status: isDefiniteFailure ? "failed" : "pending",
+            failureReason: failureReason,
+            error: isDefiniteFailure ? "Payment failed or cancelled." : "Payment not completed yet."
+          });
         }
       } catch (err: any) {
         console.error("[CHAPA VERIFY] Verification network/JSON error:", err.message);
