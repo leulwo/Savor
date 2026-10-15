@@ -6,3 +6,19 @@ coverage/
 *.log
 .env*
 !.env.example
+
+backend/server.js
+backend/server.js.map
+backend/db-cli.js
+backend/db-cli.js.map
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+
+# Private credentials must stay outside source control.
+*.pem
+*.key
+*service-account*.json
+*-firebase-adminsdk-*.json
