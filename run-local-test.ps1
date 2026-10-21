@@ -23,7 +23,6 @@ $LocalOrigin = "http://127.0.0.1:$AppPort"
 $EnvPath = Join-Path $ProjectRoot '.env'
 $StatePath = Join-Path $ProjectRoot 'data\local-test-session.json'
 $LogRoot = Join-Path $ProjectRoot 'data\local-test-logs'
-$ManagedEnvKeys = @('APP_URL')
 
 function Invoke-ZrokCommand {
   param(
@@ -69,41 +68,6 @@ function Invoke-ZrokCommand {
     Output = $output
     Text = $text
   }
-}
-
-function Read-EnvValue {
-  param([string]$Content, [string]$Name)
-  $pattern = "(?m)^\s*(?:export\s+)?$([regex]::Escape($Name))\s*=\s*(.*)\s*$"
-  $matches = [regex]::Matches($Content, $pattern)
-  if ($matches.Count -eq 0) { return @{ Exists = $false; Value = '' } }
-  $value = $matches[$matches.Count - 1].Groups[1].Value.Trim()
-  if ($value.Length -ge 2 -and (($value[0] -eq '"' -and $value[$value.Length - 1] -eq '"') -or ($value[0] -eq "'" -and $value[$value.Length - 1] -eq "'"))) {
-    $value = $value.Substring(1, $value.Length - 2)
-  }
-  return @{ Exists = $true; Value = $value }
-}
-
-function Set-EnvValue {
-  param([string]$Content, [string]$Name, [AllowEmptyString()][string]$Value)
-  $pattern = "(?m)^\s*(?:export\s+)?$([regex]::Escape($Name))\s*=.*(?:\r?\n|$)"
-  $replacement = "$Name=$Value`r`n"
-  $updated = [regex]::Replace($Content, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $replacement })
-  if ($updated -eq $Content -and $Content -notmatch "(?m)^\s*(?:export\s+)?$([regex]::Escape($Name))\s*=") {
-    if ($updated.Length -gt 0 -and !$updated.EndsWith("`n")) { $updated += "`r`n" }
-    $updated += $replacement
-  }
-  return $updated
-}
-
-function Remove-EnvValue {
-  param([string]$Content, [string]$Name)
-  $pattern = "(?m)^\s*(?:export\s+)?$([regex]::Escape($Name))\s*=.*(?:\r?\n|$)"
-  return [regex]::Replace($Content, $pattern, '')
-}
-
-function Write-EnvFile {
-  param([string]$Content)
-  [System.IO.File]::WriteAllText($EnvPath, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
 function Get-ManagedProcess {
@@ -155,18 +119,6 @@ function Stop-ManagedRecord {
   }
 }
 
-function Restore-PreviousAppUrl {
-  param($State)
-  if (!(Test-Path -LiteralPath $EnvPath)) { return }
-  $content = [System.IO.File]::ReadAllText($EnvPath)
-  if ($State.PreviousAppUrl.Exists) {
-    $content = Set-EnvValue -Content $content -Name 'APP_URL' -Value $State.PreviousAppUrl.Value
-  } else {
-    $content = Remove-EnvValue -Content $content -Name 'APP_URL'
-  }
-  Write-EnvFile $content
-}
-
 function Read-State {
   if (!(Test-Path -LiteralPath $StatePath)) { return $null }
   try { return Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json }
@@ -187,16 +139,8 @@ if ($Action -eq 'Stop') {
   if (!$state) { Write-Host 'No managed local test session was found; no processes were stopped.'; exit 0 }
   Stop-ManagedRecord $state.Tunnel
   Stop-ManagedRecord $state.Site
-  $stateProvider = [string]$state.Tunnel.Provider
-  if (!$stateProvider) { $stateProvider = 'cloudflare' }
-  if ($stateProvider -eq 'cloudflare' -or !$state.PublicUrl) {
-    Restore-PreviousAppUrl $state
-    $appUrlMessage = 'restored the previous APP_URL'
-  } else {
-    $appUrlMessage = "kept APP_URL at the reserved URL $($state.PublicUrl)"
-  }
   Remove-Item -LiteralPath $StatePath -Force -ErrorAction SilentlyContinue
-  Write-Host "Stopped the managed site and tunnel, and $appUrlMessage."
+  Write-Host 'Stopped the managed site and tunnel.'
   exit 0
 }
 
@@ -229,19 +173,37 @@ $siteOut = Join-Path $LogRoot "site-$stamp.out.log"
 $siteErr = Join-Path $LogRoot "site-$stamp.err.log"
 $tunnelOut = Join-Path $LogRoot "$($TunnelProvider.ToLowerInvariant())-$stamp.out.log"
 $tunnelErr = Join-Path $LogRoot "$($TunnelProvider.ToLowerInvariant())-$stamp.err.log"
-$envContent = [System.IO.File]::ReadAllText($EnvPath)
-$previousAppUrl = Read-EnvValue -Content $envContent -Name 'APP_URL'
 $state = [ordered]@{
   StartedAt = (Get-Date).ToString('o')
   LocalUrl = $LocalOrigin
   PublicUrl = ''
-  PreviousAppUrl = $previousAppUrl
   Site = $null
   Tunnel = $null
   Logs = @{ Site = $siteOut; SiteError = $siteErr; Tunnel = $tunnelOut; TunnelError = $tunnelErr }
 }
 
 try {
+  # Start Savory and confirm the local origin responds before exposing it via zrok.
+  $siteEntry = Join-Path $ProjectRoot 'backend\dev.cjs'
+  $site = Start-Process -FilePath $node.Source -ArgumentList @($siteEntry) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $siteOut -RedirectStandardError $siteErr
+  $state.Site = @{ Kind = 'site'; Pid = $site.Id }
+  $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath -Encoding utf8
+
+  $ready = $false
+  $lastHealthError = 'No successful response was received.'
+  for ($i = 0; $i -lt 90; $i++) {
+    if ($site.HasExited) { throw "Savory exited during startup. See $siteErr" }
+    try {
+      $response = Invoke-WebRequest -Uri "$LocalOrigin/health" -UseBasicParsing -TimeoutSec 2
+      if ($response.StatusCode -eq 200) { $ready = $true; break }
+      $lastHealthError = "HTTP status $($response.StatusCode)."
+    } catch {
+      $lastHealthError = $_.Exception.Message
+    }
+    Start-Sleep -Seconds 1
+  }
+  if (!$ready) { throw "Savory did not become ready at $LocalOrigin/health. Last probe: $lastHealthError See $siteOut and $siteErr" }
+
   $publicUrl = $null
   $tunnel = $null
   $state.Tunnel = @{ Kind = 'tunnel'; Provider = $TunnelProvider.ToLowerInvariant(); Pid = 0 }
@@ -379,53 +341,18 @@ try {
   }
 
   $state.PublicUrl = $publicUrl
-  $firebaseHost = ([uri]$publicUrl).Host
-  $envContent = [System.IO.File]::ReadAllText($EnvPath)
-  Write-EnvFile (Set-EnvValue -Content $envContent -Name 'APP_URL' -Value $publicUrl)
   $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath -Encoding utf8
-
-  $siteEntry = Join-Path $ProjectRoot 'backend\dev.cjs'
-  $site = Start-Process -FilePath $node.Source -ArgumentList @($siteEntry) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $siteOut -RedirectStandardError $siteErr
-  $state.Site = @{ Kind = 'site'; Pid = $site.Id }
-  $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath -Encoding utf8
-
-  $ready = $false
-  $lastHealthError = 'No successful response was received.'
-  for ($i = 0; $i -lt 90; $i++) {
-    if ($site.HasExited) { throw "Savory exited during startup. See $siteErr" }
-    try {
-      $response = Invoke-WebRequest -Uri "$LocalOrigin/health" -UseBasicParsing -TimeoutSec 2
-      if ($response.StatusCode -eq 200) { $ready = $true; break }
-      $lastHealthError = "HTTP status $($response.StatusCode)."
-    } catch {
-      $lastHealthError = $_.Exception.Message
-    }
-    Start-Sleep -Seconds 1
-  }
-  if (!$ready) { throw "Savory did not become ready at $LocalOrigin/health. Last probe: $lastHealthError See $siteOut and $siteErr" }
 
   Write-Host ''
-  Write-Host 'Savory test site is running.' -ForegroundColor Green
+  Write-Host 'Savory test site and zrok share are up.' -ForegroundColor Green
   Write-Host "Local:  $LocalOrigin"
   Write-Host "Public: $publicUrl"
-  Write-Host "APP_URL in .env was updated to $publicUrl"
-  Write-Host "Chapa webhook URL for this run: $publicUrl/api/chapa/webhook"
-  Write-Host "If Google sign-in requires it, add $firebaseHost to Firebase Authentication > Settings > Authorized domains."
-  if ($TunnelProvider -eq 'Cloudflare') { Write-Host "The Quick Tunnel URL changes on the next start, so update Chapa's webhook URL for each run." }
-  else { Write-Host 'This zrok URL is reserved and stays the same between runs. Set the Firebase authorized domain and Chapa webhook URL once.' }
   Write-Host "Logs: $LogRoot"
   Write-Host 'Stop both with: .\run-local-test.ps1 -Action Stop'
 } catch {
   $cleanupFailed = $false
   if ($state.Tunnel) { try { Stop-ManagedRecord $state.Tunnel } catch { $cleanupFailed = $true; Write-Warning $_ } }
   if ($state.Site) { try { Stop-ManagedRecord $state.Site } catch { $cleanupFailed = $true; Write-Warning $_ } }
-  $failedProvider = [string]$state.Tunnel.Provider
-  if (!$failedProvider) { $failedProvider = 'cloudflare' }
-  if ($failedProvider -eq 'cloudflare' -or !$state.PublicUrl) {
-    try { Restore-PreviousAppUrl $state } catch { Write-Warning "Could not restore APP_URL: $_" }
-  } else {
-    Write-Host "Kept APP_URL at the reserved zrok URL $($state.PublicUrl)."
-  }
   if ($cleanupFailed) {
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath -Encoding utf8
     Write-Warning "Cleanup was incomplete. Run this script with -Action Stop to retry; session state was kept at $StatePath"
