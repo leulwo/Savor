@@ -259,6 +259,7 @@ export function MainApp() {
   const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [checkoutPhoneError, setCheckoutPhoneError] = useState<string | null>(null);
+  const [checkoutAddressError, setCheckoutAddressError] = useState<string | null>(null);
   const checkoutPhoneInput = useRef<HTMLInputElement>(null);
   const [fulfillmentType, setFulfillmentType] = useState<'delivery' | 'pickup' | 'dineIn'>('delivery');
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
@@ -995,12 +996,14 @@ export function MainApp() {
 
     setCheckoutError(null);
     setCheckoutPhoneError(null);
+    setCheckoutAddressError(null);
     setCheckoutLoading(true);
 
     // Make delivery address strictly required ONLY for delivery fulfillment
     if (fulfillmentType === 'delivery' && !googleMapsAddress.trim()) {
-      toastWarning("Please provide a Delivery Address so our courier can locate you.");
+      setCheckoutAddressError("Please provide your delivery address so the courier can find you.");
       setCheckoutLoading(false);
+      document.getElementById("checkout-delivery-address")?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
@@ -1393,25 +1396,45 @@ export function MainApp() {
 
             <section className="relative animate-scale-up" style={{ animationDelay: '140ms' }}>
               <div className="absolute -inset-8 rounded-full bg-amber-300/20 blur-3xl" />
-              <div className="relative rounded-[2rem] bg-stone-900 p-7 sm:p-9 text-white shadow-2xl shadow-stone-900/25 overflow-hidden">
-                <div className="absolute -right-14 -top-14 h-48 w-48 rounded-full border-[34px] border-amber-400/10" />
-                <h2 className="font-serif text-3xl sm:text-4xl max-w-sm">Good food without the guesswork.</h2>
-                <div className="mt-9 grid gap-3">
-                  {[
-                    { icon: ShoppingBag, title: "Order in moments", text: "A clear menu and a quick checkout." },
-                    { icon: Clock, title: "Stay updated", text: "Follow your order as it is prepared." },
-                    { icon: Lock, title: "Pay with confidence", text: "Secure checkout and verified payments." }
-                  ].map(({ icon: Icon, title, text }) => (
-                    <div key={title} className="flex items-center gap-4 rounded-2xl border border-white/10 bg-white/[0.06] p-4 backdrop-blur transition-transform duration-200 hover:-translate-y-0.5">
-                      <span className="h-11 w-11 shrink-0 grid place-items-center rounded-xl bg-amber-400 text-stone-950">
-                        <Icon className="h-5 w-5" />
-                      </span>
-                      <div>
-                        <p className="font-semibold">{title}</p>
-                        <p className="text-sm text-stone-400 mt-0.5">{text}</p>
+              <div className="relative overflow-hidden rounded-[2rem] border border-stone-700/80 bg-stone-900 p-7 text-white shadow-2xl shadow-stone-900/25 sm:p-9">
+                <div aria-hidden="true" className="pointer-events-none absolute -right-24 -top-28 h-72 w-72 rounded-full bg-amber-400/[0.08] blur-2xl" />
+                <div aria-hidden="true" className="pointer-events-none absolute right-8 top-8 h-28 w-28 rounded-full border border-amber-300/15" />
+                <div className="relative">
+                  <div className="mb-5 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-amber-300">
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                    Good food, made easy
+                  </div>
+                  <h2 className="max-w-sm font-serif text-3xl leading-tight sm:text-4xl">
+                    From your first pick to the last bite.
+                  </h2>
+                  <p className="mt-3 max-w-sm text-sm leading-6 text-stone-400">
+                    A thoughtful ordering experience, with every step clear.
+                  </p>
+
+                  <div className="mt-8 divide-y divide-white/10">
+                    {[
+                      { icon: ShoppingBag, step: "01", title: "Choose what you love", text: "Browse the menu and build your order." },
+                      { icon: Clock, step: "02", title: "Know what’s happening", text: "Follow updates while we prepare it fresh." },
+                      { icon: Lock, step: "03", title: "Checkout with confidence", text: "Secure payment, verified before completion." }
+                    ].map(({ icon: Icon, step, title, text }) => (
+                      <div key={step} className="group flex items-center gap-4 py-4 first:pt-0 last:pb-0">
+                        <span className="w-7 shrink-0 font-mono text-xs text-amber-300/80">{step}</span>
+                        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-white/10 bg-white/[0.04] text-amber-300 transition-colors group-hover:border-amber-300/40 group-hover:bg-amber-300/10">
+                          <Icon className="h-[18px] w-[18px]" strokeWidth={1.8} aria-hidden="true" />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-sm font-semibold text-stone-100">{title}</span>
+                          <span className="mt-0.5 block text-xs leading-5 text-stone-400">{text}</span>
+                        </span>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
+
+                  <div className="mt-7 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-white/10 pt-5 text-[10px] font-medium uppercase tracking-[0.13em] text-stone-500">
+                    <span>Made fresh</span><span className="text-amber-400">·</span>
+                    <span>Kept in the loop</span><span className="text-amber-400">·</span>
+                    <span>Paid securely</span>
+                  </div>
                 </div>
               </div>
             </section>
@@ -1568,8 +1591,10 @@ export function MainApp() {
 
                 {/* Search and Category filters */}
                 <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
-                  <div className="relative flex-grow sm:max-w-xs">
-                    <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-stone-400" />
+                  <div className="relative w-full sm:flex-1 sm:min-w-0 sm:max-w-xs self-stretch sm:self-start">
+                    <span className="pointer-events-none absolute inset-y-0 left-3.5 flex items-center text-stone-400">
+                      <Search className="w-4 h-4" />
+                    </span>
                     <input
                       type="text"
                       placeholder="Search dishes..."
@@ -1769,7 +1794,7 @@ export function MainApp() {
               <div className="p-6 border-b border-stone-100 flex items-center justify-between bg-stone-50">
                 <div className="flex items-center space-x-2.5">
                   <ShoppingCart className="w-5 h-5 text-stone-800" />
-                  <h3 className="font-serif text-lg font-bold text-stone-900">Your Gourmet Order</h3>
+                  <h3 className="font-serif text-lg font-bold text-stone-900">YourbOrder</h3>
                 </div>
                 <button
                   onClick={() => { setIsCartOpen(false); setIsCheckingOut(false); }}
@@ -1845,7 +1870,10 @@ export function MainApp() {
                               <button
                                 key={opt.id}
                                 type="button"
-                                onClick={() => setFulfillmentType(opt.id)}
+                                onClick={() => {
+                                  setFulfillmentType(opt.id);
+                                  setCheckoutAddressError(null);
+                                }}
                                 className={`p-2.5 rounded-xl border flex flex-col items-center justify-center space-y-1 text-center transition-all cursor-pointer ${fulfillmentType === opt.id
                                   ? 'border-amber-500 bg-amber-50 text-amber-900 ring-1 ring-amber-500/30'
                                   : 'border-stone-300 text-stone-500 hover:border-stone-400 bg-white'
@@ -1858,10 +1886,10 @@ export function MainApp() {
                           </div>
                         </div>
 
-                        {fulfillmentType === 'delivery' && (
-                          <div className="bg-amber-50 border border-amber-200/60 rounded-xl p-3 text-[11px] text-amber-800 leading-relaxed space-y-0.5">
-                            <span className="font-bold block text-[12px] text-amber-900"> Exact Address Required </span>
-                            Please provide your <strong className="text-amber-950">Delivery Address</strong>. Block and Room numbers are secondary.
+                        {fulfillmentType === 'delivery' && checkoutAddressError && (
+                          <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-[11px] text-rose-800 leading-relaxed space-y-0.5" role="alert">
+                            <span className="font-bold block text-[12px] text-rose-900">Delivery address required</span>
+                            {checkoutAddressError}
                           </div>
                         )}
                         {fulfillmentType !== 'delivery' && (
@@ -1900,7 +1928,7 @@ export function MainApp() {
                               </div>
                             </div>
 
-                            <div>
+                            <div id="checkout-delivery-address">
                               <div className="flex items-center justify-between mb-1">
                                 <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide">Delivery Address *</label>
                                 <button
@@ -1914,19 +1942,29 @@ export function MainApp() {
                               {useGoogleMaps ? (
                                 <GoogleMapsAddressInput
                                   value={googleMapsAddress}
-                                  onChange={setGoogleMapsAddress}
+                                  onChange={(value) => {
+                                    setGoogleMapsAddress(value);
+                                    if (checkoutAddressError && value.trim()) setCheckoutAddressError(null);
+                                  }}
                                 />
                               ) : (
                                 <input
+                                  id="delivery-address-input"
                                   type="text"
                                   name="street-address"
                                   autoComplete="street-address"
+                                  aria-invalid={!!checkoutAddressError}
+                                  aria-describedby={checkoutAddressError ? "checkout-address-error" : undefined}
                                   value={googleMapsAddress}
-                                  onChange={e => setGoogleMapsAddress(e.target.value)}
+                                  onChange={e => {
+                                    setGoogleMapsAddress(e.target.value);
+                                    if (checkoutAddressError && e.target.value.trim()) setCheckoutAddressError(null);
+                                  }}
                                   placeholder="e.g., Bole, near Edna Mall"
-                                  className="w-full text-xs border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 bg-stone-50/50"
+                                  className={`w-full text-xs border rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 bg-stone-50/50 ${checkoutAddressError ? "border-rose-400" : "border-stone-300"}`}
                                 />
                               )}
+                              {checkoutAddressError && <p id="checkout-address-error" className="mt-1 text-[10px] text-rose-700" role="alert">{checkoutAddressError}</p>}
                             </div>
                           </>
                         )}
@@ -2036,7 +2074,7 @@ export function MainApp() {
                             name="tel"
                             autoComplete="tel"
                             aria-invalid={!!checkoutPhoneError}
-                            aria-describedby="checkout-phone-help"
+                            aria-describedby={checkoutPhoneError ? "checkout-phone-help" : undefined}
                             required
                             value={customerPhone}
                             onChange={e => {
@@ -2049,9 +2087,7 @@ export function MainApp() {
                             placeholder="09xxxxxxxx or 07xxxxxxxx"
                             className="w-full text-xs border border-stone-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-amber-500 bg-stone-50/50"
                           />
-                          <p id="checkout-phone-help" className={`mt-1 text-[10px] ${checkoutPhoneError ? "text-rose-700" : "text-stone-500"}`}>
-                            {checkoutPhoneError || "Enter an Ethiopian mobile number starting with 09 or 07, or use +251 followed by 9 or 7 and eight digits."}
-                          </p>
+                          {checkoutPhoneError && <p id="checkout-phone-help" className="mt-1 text-[10px] text-rose-700" role="alert">{checkoutPhoneError}</p>}
                         </div>
 
                         <div>
@@ -2129,7 +2165,6 @@ export function MainApp() {
               {cart.length > 0 && (
                 <div className="p-6 border-t border-stone-200 bg-stone-50">
 
-                  {isCheckingOut && (
                     <div className="mb-4 space-y-3 pb-4 border-b border-stone-200">
                       <div>
                         <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1">Promo Code</label>
@@ -2164,7 +2199,6 @@ export function MainApp() {
                       </div>
 
                     </div>
-                  )}
 
                   <div className="space-y-1.5 mb-4 text-xs text-stone-600">
                     <div className="flex justify-between">

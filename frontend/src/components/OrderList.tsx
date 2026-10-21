@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect } from "react";
 import { Order } from "../types";
-import { ClipboardList, CheckCircle, Clock, Truck, Shield, AlertCircle, MoreVertical } from "lucide-react";
+import { ClipboardList, CheckCircle, Clock, Truck, Shield, AlertCircle, MoreVertical, CalendarDays } from "lucide-react";
 import { getLocalDateString, groupOrdersByDate } from "../App";
 import { motion, AnimatePresence } from "motion/react";
 import { hasPermission, PermissionMap } from "../permissions";
@@ -25,7 +25,17 @@ interface OrderListProps {
   actor?: { email: string; role: string };
 }
 
+const toLocalDateInputValue = (value: string | Date) => {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
 export default function OrderList({ orders = [], onOrderUpdated, userRole, can, permissions, actor }: OrderListProps) {
+  const [selectedDate, setSelectedDate] = useState(() => toLocalDateInputValue(new Date()));
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<Order | null>(null);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
@@ -41,6 +51,11 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
   const canAct = canUpdateStatus || canKds;
 
   const safeOrders = Array.isArray(orders) ? orders : [];
+  const todayDate = toLocalDateInputValue(new Date());
+  const ordersForSelectedDate = safeOrders.filter(order => toLocalDateInputValue(order.createdAt) === selectedDate);
+  const selectedDateLabel = selectedDate === todayDate
+    ? "Today"
+    : new Date(`${selectedDate}T12:00:00`).toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 
   useEffect(() => {
     const fetchSettings = async () => {
@@ -136,22 +151,46 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
 
   return (
     <div id="admin-orders-list" className="bg-white border border-stone-200 rounded-2xl p-6 shadow-md font-sans">
-      <div className="flex items-center space-x-2.5 border-b border-stone-100 pb-4 mb-5">
-        <ClipboardList className="w-5.5 h-5.5 text-stone-800" />
-        <div>
-          <h3 className="font-serif text-lg font-bold text-stone-900">Gourmet Order Manager</h3>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 pb-4 mb-5">
+        <div className="flex items-center space-x-2.5">
+          <ClipboardList className="w-5.5 h-5.5 text-stone-800" />
+          <div>
+            <h3 className="font-serif text-lg font-bold text-stone-900">Gourmet Order Manager</h3>
+            <p className="mt-0.5 text-[11px] text-stone-500">Showing orders for {selectedDateLabel}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <label htmlFor="admin-orders-date" className="sr-only">Choose order date</label>
+          <div className="flex items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 focus-within:border-amber-400 focus-within:ring-2 focus-within:ring-amber-500/15">
+            <CalendarDays aria-hidden="true" className="h-4 w-4 shrink-0 text-stone-500" />
+            <input
+              id="admin-orders-date"
+              type="date"
+              value={selectedDate}
+              max={todayDate}
+              onChange={event => {
+                if (event.target.value) setSelectedDate(event.target.value);
+              }}
+              className="min-w-0 bg-transparent text-xs font-semibold text-stone-700 outline-none"
+            />
+          </div>
+          {selectedDate !== todayDate && (
+            <button type="button" onClick={() => setSelectedDate(todayDate)} className="rounded-lg px-2.5 py-2 text-xs font-bold text-amber-800 hover:bg-amber-50">
+              Today
+            </button>
+          )}
         </div>
       </div>
 
       <div className="space-y-6 max-h-[600px] overflow-y-auto pr-2">
-        {safeOrders.length === 0 ? (
+        {ordersForSelectedDate.length === 0 ? (
           <div className="text-center py-12 text-stone-400">
             <ClipboardList className="w-12 h-12 mx-auto mb-3 text-stone-300 stroke-1" />
-            <p className="text-sm font-medium">No orders recorded yet.</p>
-            <p className="text-xs mt-1">Place an order from the front-end menu to generate records!</p>
+            <p className="text-sm font-medium">{safeOrders.length === 0 ? "No orders recorded yet." : `No orders found for ${selectedDateLabel}.`}</p>
+            <p className="text-xs mt-1">{safeOrders.length === 0 ? "Place an order from the front-end menu to generate records!" : "Choose another date to view its orders."}</p>
           </div>
         ) : (
-          Object.entries(groupOrdersByDate(safeOrders)).map(([dateGroup, groupOrders]) => (
+          Object.entries(groupOrdersByDate(ordersForSelectedDate)).map(([dateGroup, groupOrders]) => (
             <div key={dateGroup} className="space-y-4">
               <div className="sticky top-0 z-10 bg-white/95 backdrop-blur-md py-2 px-3 rounded-xl text-[11px] font-bold text-stone-600 tracking-wider uppercase flex justify-between items-center border border-stone-200/50 shadow-xs">
                 <span>{dateGroup}</span>
