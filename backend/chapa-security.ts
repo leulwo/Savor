@@ -34,9 +34,16 @@ export function isChapaCheckoutUrl(value: unknown): value is string {
 /** Parse currency without Number coercion accepting null, arrays or booleans. Robust against float precision. */
 export function paymentMinorUnits(value: unknown): number | null {
   if (typeof value !== "string" && typeof value !== "number") return null;
-  const num = typeof value === "number" ? value : parseFloat(String(value).trim());
-  if (!Number.isFinite(num) || num <= 0 || num > 9999999.99) return null;
-  const cents = Math.round(num * 100);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value <= 0 || value > 9999999.99) return null;
+    const rounded = Math.round(value * 100);
+    if (Math.abs(value - rounded / 100) > 1e-9) return null;
+    return Number.isSafeInteger(rounded) && rounded > 0 && rounded <= 999_999_999 ? rounded : null;
+  }
+  const text = value.trim();
+  if (!/^\d{1,8}(?:\.\d{1,2})?$/.test(text)) return null;
+  const [whole, fraction = ""] = text.split(".");
+  const cents = Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
   return Number.isSafeInteger(cents) && cents > 0 && cents <= 999_999_999 ? cents : null;
 }
 
@@ -62,7 +69,7 @@ export function hasConfirmedChapaFailure(order: any): boolean {
 
 /** Read and create inside the same transaction to close distinct-ID races. */
 export async function assertNewChapaAttemptCapacity(transaction: any, db: any, uid: string, currentTxRef?: string): Promise<void> {
-  const pending = await transaction.get(db.collection("orders").where("userId", "==", uid).where("paymentStatus", "==", "pending").limit(50));
+  const pending = await transaction.get(db.collection("orders").where("userId", "==", uid).where("paymentMethod", "==", "chapa").where("paymentStatus", "==", "pending").limit(50));
   const unresolved = pending.docs.filter((document: any) => {
     if (currentTxRef && document.id === currentTxRef) return false;
     return !hasConfirmedChapaFailure(document.data());

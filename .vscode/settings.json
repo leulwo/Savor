@@ -1,0 +1,27 @@
+{
+  "typescript.tsdk": "frontend/node_modules/typescript/lib",
+  "typescript.validate.enable": true,
+  "typescript.preferences.includePackageJsonAutoImports": "auto",
+  "files.exclude": {
+    "**/.git": true,
+    "**/.svn": true,
+    "**/.hg": true,
+    "**/CVS": true,
+    "**/.DS_Store": true,
+    "**/Thumbs.db": true,
+    "data/code-backups": true
+  },
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/node_modules/**": true,
+    "**/dist/**": true,
+    "**/data/code-backups/**": true,
+    "**/.gemini/**": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/data/code-backups": true
+  }
+}

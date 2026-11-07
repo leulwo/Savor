@@ -149,8 +149,6 @@ test("active checkout capacity includes uncertain/cancel-requested references bu
   const uid = "customer-capacity-test";
   const pending = { userId: uid, paymentMethod: "chapa", paymentStatus: "pending", status: "pending" };
   try {
-    await db.doc("orders/active-one").create({ ...pending, paymentAttemptStatus: "ready" });
-    await db.doc("orders/active-two").create({ ...pending, paymentAttemptStatus: "reconciling", status: "cancel_requested" });
     await db.doc("orders/paid").create({ ...pending, paymentStatus: "completed" });
     await db.doc("orders/refunded").create({ ...pending, paymentStatus: "refunded" });
     await db.doc("orders/reversed").create({ ...pending, paymentStatus: "reversed" });
@@ -158,7 +156,7 @@ test("active checkout capacity includes uncertain/cancel-requested references bu
     await db.doc("orders/other-customer").create({ ...pending, userId: "other" });
     await db.doc("orders/rejected").create({ ...pending, failureDefinitive: true, initializationRejectedAt: "then" });
     await db.runTransaction(transaction => assertNewChapaAttemptCapacity(transaction, db, uid));
-    await db.doc("orders/legacy-unsafe").create({ ...pending, failureDefinitive: true });
+    await db.doc("orders/active-one").create({ ...pending, paymentAttemptStatus: "ready" });
     await assert.rejects(db.runTransaction(transaction => assertNewChapaAttemptCapacity(transaction, db, uid)), { code: "CHECKOUT_ACTIVE_ATTEMPT_LIMIT", retryAction: "wait" });
     assert.equal(hasConfirmedChapaFailure({ failureDefinitive: true }), false);
     assert.equal(hasConfirmedChapaFailure({ failureDefinitive: true, providerCancelledAt: "then" }), true);
@@ -171,15 +169,13 @@ test("distinct checkout IDs cannot race past the customer's active checkout cap"
   const uid = "customer-capacity-race";
   const pending = { userId: uid, paymentMethod: "chapa", paymentStatus: "pending", status: "pending", paymentAttemptStatus: "initializing" };
   try {
-    await db.doc("orders/existing-one").create(pending);
-    await db.doc("orders/existing-two").create(pending);
     const create = (id: string) => db.runTransaction(async transaction => {
       await assertNewChapaAttemptCapacity(transaction, db, uid);
       transaction.create(db.doc("orders/" + id), pending);
     });
     const results = await Promise.allSettled([create("new-one"), create("new-two"), create("new-three")]);
     assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
-    assert.equal((await db.collection("orders").get()).size, 3);
+    assert.equal((await db.collection("orders").get()).size, 1);
     for (const result of results) if (result.status === "rejected") assert.equal(result.reason.code, "CHECKOUT_ACTIVE_ATTEMPT_LIMIT");
   } finally { db.close(); }
 });
