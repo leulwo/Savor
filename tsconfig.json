@@ -1,14 +1,11 @@
 {
-  "files": [],
-  "references": [
-    { "path": "./frontend" },
-    { "path": "./backend" }
-  ],
+  "compilerOptions": {
+    "skipLibCheck": true
+  },
+  "include": [],
   "exclude": [
     "node_modules",
-    "**/node_modules",
-    "dist",
-    "**/dist",
-    "data"
+    "data",
+    "dist"
   ]
 }
