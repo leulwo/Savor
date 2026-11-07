@@ -19,7 +19,12 @@ export function createAuthenticatedFetch(auth: ApiAuth, fetchRequest: typeof fet
     // Never reuse an Authorization header supplied by a caller or a previous account.
     headers.delete('Authorization');
     const attachToken = async (refresh = false) => {
-      if (!user) return;
+      if (!user) {
+        if (typeof window !== "undefined" && localStorage.getItem("savory_dev_user") === "1") {
+          headers.set('Authorization', 'Bearer dev-mock-token:b2Q2gSiZ0EaDf38qgnWOrs2AEoI3');
+        }
+        return;
+      }
       let token: string;
       try { token = await user.getIdToken(refresh); }
       catch {

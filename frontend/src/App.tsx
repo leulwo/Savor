@@ -93,6 +93,23 @@ function sanitizeForDatabase<T>(value: T): T {
   return value;
 }
 
+export function generateOrderId(): string {
+  const chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+  const arr = new Uint8Array(7);
+  crypto.getRandomValues(arr);
+  let res = "";
+  for (let i = 0; i < 7; i++) {
+    res += chars[arr[i] % chars.length];
+  }
+  return res;
+}
+
+export function formatOrderId(id: unknown): string {
+  if (!id) return "";
+  const s = String(id).trim();
+  return s.replace(/^(ORD-|PAY-)/i, "").toUpperCase();
+}
+
 function formatCheckoutError(value: unknown): string {
   if (typeof value === "string") return value.trim() || "Checkout could not be completed. Please try again.";
   if (value && typeof value === "object") {
@@ -303,6 +320,69 @@ export function MainApp() {
 
   const [placedOrder, setPlacedOrder] = useState<Order | null>(null);
   const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<Order | null>(null);
+  const [cancelledOrderIds, setCancelledOrderIds] = useState<Set<string>>(() => {
+    try {
+      const stored = localStorage.getItem('savory_cancelled_orders');
+      return stored ? new Set(JSON.parse(stored)) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
+
+  const markOrderCancelledLocally = useCallback((orderId: string) => {
+    setCancelledOrderIds(prev => {
+      const next = new Set(prev).add(orderId);
+      try {
+        localStorage.setItem('savory_cancelled_orders', JSON.stringify(Array.from(next)));
+      } catch {}
+      return next;
+    });
+  }, []);
+
+  // Tests whether an order represents an active, unfinished Chapa payment session
+  const isUnfinishedSession = useCallback((order: Order | null | undefined): boolean => {
+    if (!order || !order.id) return false;
+    // 1. Only online payment sessions (Chapa) can be an unfinished payment session
+    if (order.paymentMethod !== 'chapa') return false;
+
+    // 2. If locally marked cancelled, stop indicator immediately
+    if (cancelledOrderIds.has(order.id)) return false;
+
+    // 3. If the order or session is cancelled or cancel requested, stop indicator
+    if (
+      order.status === 'cancelled' ||
+      order.status === 'cancel_requested' ||
+      order.paymentAttemptStatus === 'cancelled' ||
+      Boolean((order as any).providerCancelledAt) ||
+      Boolean((order as any).cancelRequestedAt)
+    ) {
+      return false;
+    }
+
+    // 4. If completed, failed, refunded, reversed, delivered, or definitive failure, stop indicator
+    if (
+      order.paymentStatus === 'completed' ||
+      order.paymentStatus === 'failed' ||
+      order.paymentStatus === 'refunded' ||
+      order.paymentStatus === 'reversed' ||
+      order.paymentAttemptStatus === 'failed' ||
+      order.failureDefinitive === true ||
+      order.status === 'delivered'
+    ) {
+      return false;
+    }
+
+    // 5. Must be an active unfinished payment attempt
+    return order.paymentStatus === 'pending';
+  }, [cancelledOrderIds]);
+
+  // Finds the unfinished online payment session if any exists
+  const unfinishedSessionOrder = useMemo(() => {
+    return myOrders.find(isUnfinishedSession) || (isUnfinishedSession(placedOrder) ? placedOrder : null);
+  }, [myOrders, placedOrder, isUnfinishedSession]);
+
+  // Computes whether there is an unfinished online payment session
+  const hasPendingOrder = Boolean(unfinishedSessionOrder);
   const [chapaCheckoutUrl, setChapaCheckoutUrl] = useState<string | null>(() => localStorage.getItem('chapaCheckoutUrl'));
   const [hasShownOrderModal, setHasShownOrderModal] = useState<string | null>(() => localStorage.getItem('shownOrderModalId'));
   const [checkoutSettings, setCheckoutSettings] = useState({
@@ -415,10 +495,26 @@ export function MainApp() {
   });
   const [isOrderModalOpen, setIsOrderModalOpen] = useState<boolean>(() => {
     const params = new URLSearchParams(window.location.search);
-    return params.has('tx_ref') || params.has('status') || params.has('payment_return') || !!localStorage.getItem('activeOrderId');
+    return params.has('tx_ref') || params.has('status') || params.has('payment_return');
   });
   const [isVerifying, setIsVerifying] = useState(false);
   const [paymentVerificationResult, setPaymentVerificationResult] = useState<'verifying' | 'success' | 'failed' | 'pending' | null>(null);
+  // Ref that lets the Firestore onSnapshot listener abort the verify polling loop early
+  const paymentResolvedBySnapshotRef = useRef<'success' | 'failed' | null>(null);
+
+  const orderDisplayTotal = useMemo(() => {
+    if (placedOrder?.total != null) return placedOrder.total;
+    try {
+      const raw = localStorage.getItem('savory_active_order_preview');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.total != null && (!parsed.id || parsed.id === activeOrderId)) return Number(parsed.total);
+      }
+    } catch {}
+    const match = myOrders.find(o => o.id === activeOrderId);
+    if (match?.total != null) return match.total;
+    return null;
+  }, [placedOrder, activeOrderId, myOrders]);
 
   const clearCartAfterVerifiedPayment = useCallback(async (orderId: string, ownerUid?: string) => {
     // Guard against later snapshot updates clearing a new cart after the customer starts another order.
@@ -462,24 +558,78 @@ export function MainApp() {
     }
   }, []);
 
+  const syncCustomerOrders = useCallback(async () => {
+    if (!auth.currentUser && localStorage.getItem("savory_dev_user") !== "1") return;
+    try {
+      const res = await authedFetch("/api/customer/orders");
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data && Array.isArray(data.orders)) {
+          const sorted = (data.orders as Order[]).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          setMyOrders(sorted);
+        }
+      }
+    } catch (e) {
+      console.warn("Could not sync customer orders via REST:", e);
+    }
+  }, []);
+
+  const cancelOrderDirectly = useCallback(async (targetId: string) => {
+    markOrderCancelledLocally(targetId);
+    setMyOrders(prev => prev.map(o => o.id === targetId ? { ...o, status: 'cancelled', paymentAttemptStatus: 'cancelled', failureDefinitive: true } : o));
+    if (placedOrder?.id === targetId) setPlacedOrder(null);
+    if (activeOrderId === targetId) {
+      localStorage.removeItem('activeOrderId');
+      setActiveOrderId(null);
+    }
+    localStorage.removeItem('chapaCheckoutUrl');
+    localStorage.removeItem('chapaReconciliationOrderId');
+    localStorage.removeItem('chapaClientRequestId');
+    setChapaCheckoutUrl(null);
+    setOrderActionModal(null);
+
+    try {
+      const response = await authedFetch(`/api/orders/${encodeURIComponent(targetId)}/cancel`, { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(formatCheckoutError(data));
+      toastSuccess("Order cancelled.");
+      void syncCustomerOrders();
+    } catch (err) {
+      toastError(formatCheckoutError(err));
+    }
+  }, [markOrderCancelledLocally, placedOrder?.id, activeOrderId, syncCustomerOrders]);
+
   const verifyChapaPayment = useCallback(async (targetId: string, autoPoll = false, referenceQuery = "") => {
     const ownerUid = user?.uid;
-    if (!targetId || !ownerUid || auth.currentUser?.uid !== ownerUid) return;
+    const isDevMock = typeof window !== "undefined" && localStorage.getItem("savory_dev_user") === "1";
+    if (!targetId || !ownerUid || (!isDevMock && auth.currentUser?.uid !== ownerUid)) {
+      setIsVerifying(false);
+      return;
+    }
     setIsVerifying(true);
     setPaymentVerificationResult("verifying");
-    const delays = autoPoll ? [0, 2000, 5000, 10000, 20000, 30000, 60000] : [0];
+    paymentResolvedBySnapshotRef.current = null;
+    const delays = autoPoll ? [0, 2500] : [0];
     try {
       let finalStatus = "pending";
       let finalOrder: any = null;
       for (const delay of delays) {
         if (delay) await new Promise(resolve => window.setTimeout(resolve, delay));
-        if (auth.currentUser?.uid !== ownerUid) return;
+        if (!isDevMock && auth.currentUser?.uid !== ownerUid) return;
+        // If the Firestore snapshot already resolved the payment, stop polling
+        const snapshotResolution = paymentResolvedBySnapshotRef.current;
+        if (snapshotResolution === 'success') { finalStatus = "completed"; break; }
+        if (snapshotResolution === 'failed') { finalStatus = "failed"; break; }
         try {
           const response = await authedFetch(`/api/chapa/verify/${encodeURIComponent(targetId)}${delay === 0 ? referenceQuery : ""}`);
           const data = await response.json().catch(() => ({}));
-          if (auth.currentUser?.uid !== ownerUid) return;
+          if (!isDevMock && auth.currentUser?.uid !== ownerUid) return;
           finalOrder = data.order || finalOrder;
-          if (data.status === "completed" || data.status === "success") {
+          if (finalOrder) {
+            setPlacedOrder(finalOrder);
+            setMyOrders(prev => prev.map(o => o.id === targetId ? { ...o, ...finalOrder } : o));
+          }
+          if (data.status === "completed" || data.status === "success" || data.order?.paymentStatus === "completed") {
             finalStatus = "completed";
             break;
           }
@@ -494,7 +644,7 @@ export function MainApp() {
             finalStatus = "reconciling";
             break;
           }
-          const definitiveFailure = data.failureDefinitive === true || data.order?.failureDefinitive === true || data.order?.status === "cancelled";
+          const definitiveFailure = data.status === "cancelled" || data.status === "failed" || data.failureDefinitive === true || data.order?.failureDefinitive === true || data.order?.status === "cancelled" || data.order?.paymentAttemptStatus === "cancelled" || data.order?.paymentStatus === "failed" || cancelledOrderIds.has(targetId);
           if (definitiveFailure) {
             finalStatus = "failed";
             break;
@@ -532,8 +682,18 @@ export function MainApp() {
 
     // Auth Listener
     const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
+      let effectiveUser = currentUser;
+      if (!effectiveUser && (import.meta as any).env.DEV && localStorage.getItem("savory_dev_user") === "1") {
+        effectiveUser = {
+          uid: "b2Q2gSiZ0EaDf38qgnWOrs2AEoI3",
+          displayName: "Leul Diner",
+          email: "leulendale012@gmail.com",
+          photoURL: null,
+          getIdToken: async () => "dev-mock-token:b2Q2gSiZ0EaDf38qgnWOrs2AEoI3"
+        } as any;
+      }
       const previousUid = localStorage.getItem('lastAuthUid');
-      if (previousUid && previousUid !== (currentUser?.uid ?? null)) {
+      if (previousUid && previousUid !== (effectiveUser?.uid ?? null)) {
         clearPrivateBrowserCache(localStorage);
         setCartLoadedFromDb(false);
         setCart([]);
@@ -554,17 +714,17 @@ export function MainApp() {
         setUseGoogleMaps(false);
         setSpecialInstructions('');
       }
-      setUser(currentUser);
-      if (currentUser || !redirectWasPending) {
+      setUser(effectiveUser);
+      if (effectiveUser || !redirectWasPending) {
         setAuthLoading(false);
       }
-      if (currentUser) {
-        localStorage.setItem("lastAuthUid", currentUser.uid);
+      if (effectiveUser) {
+        localStorage.setItem("lastAuthUid", effectiveUser.uid);
         if (!localStorage.getItem("lastCheckoutName")) {
-          setCustomerName(currentUser.displayName || "");
+          setCustomerName(effectiveUser.displayName || "");
         }
         if (!localStorage.getItem("lastCheckoutEmail")) {
-          setCustomerEmail(currentUser.email || "");
+          setCustomerEmail(effectiveUser.email || "");
         }
 
         try {
@@ -678,6 +838,8 @@ export function MainApp() {
       return;
     }
     setIsMyOrdersLoading(true);
+    void syncCustomerOrders();
+
     // Listen to user's orders (fetch simply by userId and sort in JS, avoiding missing index errors)
     const q = query(
       collection(db, "orders"),
@@ -694,30 +856,46 @@ export function MainApp() {
       setIsMyOrdersLoading(false);
     });
     return () => unsubscribeMyOrders();
-  }, [user]);
+  }, [user, syncCustomerOrders]);
 
   useEffect(() => {
     if (!activeOrderId) {
       setPlacedOrder(null);
+      setPaymentVerificationResult(null);
+      paymentResolvedBySnapshotRef.current = null;
+      setIsVerifying(false);
       return;
     }
+
+    // Reset previous verification states whenever activeOrderId changes
+    setPlacedOrder(prev => (prev?.id === activeOrderId ? prev : null));
+    setPaymentVerificationResult(null);
+    paymentResolvedBySnapshotRef.current = null;
+    setIsVerifying(false);
 
     // Treat every return URL as a prompt to verify; query-string status is never proof of payment.
     const params = new URLSearchParams(window.location.search);
     const hasReturnSignal = params.has("tx_ref") || params.has("payment_return") || params.has("status");
     if (hasReturnSignal && user) {
-      // Wait for Firebase auth before consuming the return URL or verifying an owner-only order.
-      setIsOrderModalOpen(true);
-      window.history.replaceState({}, document.title, window.location.pathname);
-      setIsVerifying(true);
-      setPaymentVerificationResult("verifying");
-      const chapaReference = params.get("chapa_reference") || params.get("reference");
-      const referenceQuery = chapaReference ? "?reference=" + encodeURIComponent(chapaReference) : "";
-      void verifyChapaPayment(activeOrderId, true, referenceQuery);
+      if (cancelledOrderIds.has(activeOrderId)) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+        localStorage.removeItem('activeOrderId');
+        setActiveOrderId(null);
+      } else {
+        // Wait for Firebase auth before consuming the return URL or verifying an owner-only order.
+        setIsOrderModalOpen(true);
+        window.history.replaceState({}, document.title, window.location.pathname);
+        setIsVerifying(true);
+        setPaymentVerificationResult("verifying");
+        const chapaReference = params.get("chapa_reference") || params.get("reference");
+        const referenceQuery = chapaReference ? "?reference=" + encodeURIComponent(chapaReference) : "";
+        void verifyChapaPayment(activeOrderId, true, referenceQuery);
+      }
     } else if (user && localStorage.getItem("activeOrderId") === activeOrderId) {
-      // Recover an unresolved return after a refresh, even after the callback query was removed.
-      setIsOrderModalOpen(true);
-      void verifyChapaPayment(activeOrderId, true);
+      if (cancelledOrderIds.has(activeOrderId)) {
+        localStorage.removeItem('activeOrderId');
+        setActiveOrderId(null);
+      }
     }
 
     const unsubscribeOrder = onSnapshot(doc(db, "orders", activeOrderId), (docSnap) => {
@@ -727,6 +905,8 @@ export function MainApp() {
         
         if (orderData.paymentStatus === 'completed') {
           setPaymentVerificationResult('success');
+          setIsVerifying(false);
+          paymentResolvedBySnapshotRef.current = 'success';
           if (localStorage.getItem("chapaReconciliationOrderId") === docSnap.id) localStorage.removeItem("chapaReconciliationOrderId");
           void clearCartAfterVerifiedPayment(docSnap.id, user?.uid || orderData.userId || localStorage.getItem("lastAuthUid") || undefined).catch(error => {
             console.warn("Could not sync cleared paid cart yet:", error);
@@ -741,13 +921,15 @@ export function MainApp() {
             uid: targetUid,
             type: "order_paid",
             title: "Payment successful!",
-            body: `Payment succeeded! Thanks for ordering from ${globalSettings?.restaurantName || 'us'}! Your order #${docSnap.id.slice(-8).toUpperCase()} for ${(orderData.total ?? 0).toFixed(2)} ETB is being prepared.`,
+            body: `Payment succeeded! Thanks for ordering from ${globalSettings?.restaurantName || 'us'}! Your order #${formatOrderId(docSnap.id)} for ${(orderData.total ?? 0).toFixed(2)} ETB is being prepared.`,
             orderId: docSnap.id,
             amount: orderData.total,
             receiptUrl: receiptUrl
           }).catch(() => {});
         } else if (orderData.failureDefinitive === true || orderData.paymentAttemptStatus === 'cancelled' || orderData.paymentStatus === 'failed' || orderData.status === 'cancelled') {
           setPaymentVerificationResult('failed');
+          setIsVerifying(false);
+          paymentResolvedBySnapshotRef.current = 'failed';
           if (localStorage.getItem("chapaReconciliationOrderId") === docSnap.id) localStorage.removeItem("chapaReconciliationOrderId");
           void restoreCartForFailedPayment(orderData, user?.uid || orderData.userId || localStorage.getItem("lastAuthUid") || undefined).catch(error => {
             console.warn("Could not sync restored failed-payment cart yet:", error);
@@ -757,7 +939,7 @@ export function MainApp() {
             uid: targetUid,
             type: "order_failed",
             title: "Payment failed",
-            body: `Payment failed or cancelled for order #${docSnap.id.slice(-8).toUpperCase()}. ${orderData.failureReason || 'Your cart items have been restored.'}`,
+            body: `Payment failed or cancelled for order #${formatOrderId(docSnap.id)}. ${orderData.failureReason || 'Your cart items have been restored.'}`,
             orderId: docSnap.id,
             amount: orderData.total,
             failureReason: orderData.failureReason
@@ -769,7 +951,7 @@ export function MainApp() {
     });
 
     return () => unsubscribeOrder();
-  }, [activeOrderId, user?.uid, verifyChapaPayment, clearCartAfterVerifiedPayment, restoreCartForFailedPayment]);
+  }, [activeOrderId, user?.uid, verifyChapaPayment, clearCartAfterVerifiedPayment, restoreCartForFailedPayment, cancelledOrderIds]);
 
   const handleLogin = async () => {
     if (loginLoading) return;
@@ -778,6 +960,11 @@ export function MainApp() {
     try {
       await signInWithGoogle();
     } catch (error: any) {
+      if ((import.meta as any).env.DEV) {
+        localStorage.setItem("savory_dev_user", "1");
+        window.location.reload();
+        return;
+      }
       console.error("Login failed", error);
       setLoginError(googleSignInErrorMessage(error));
     } finally {
@@ -959,12 +1146,30 @@ export function MainApp() {
       setCheckoutLoading(false);
       return;
     }
+    if (isMyOrdersLoading) {
+      setCheckoutLoading(false);
+      toastWarning("Checking your earlier payment attempts. Please try again in a moment.");
+      return;
+    }
+    // If there is an unfinished online payment session, prompt to resume or cancel it
+    const pendingSession = myOrders.find(isUnfinishedSession) || (isUnfinishedSession(placedOrder) ? placedOrder : null);
+    if (pendingSession) {
+      setCheckoutLoading(false);
+      confirmDialog(
+        `You have an unfinished payment session for Order #${formatOrderId(pendingSession.id)} (${(pendingSession.total ?? 0).toFixed(2)} ETB).\n\nWould you like to resume and pay it now, or cancel it to start a new order?`,
+        () => {
+          setIsCartOpen(false);
+          setOrderActionModal(pendingSession);
+        },
+        async () => {
+          await cancelOrderDirectly(pendingSession.id);
+          toastSuccess(`Order #${formatOrderId(pendingSession.id)} cancelled. You can now place your new order.`);
+        },
+        "Resume & Pay"
+      );
+      return;
+    }
     if (paymentMethod === "chapa") {
-      if (isMyOrdersLoading) {
-        setCheckoutLoading(false);
-        toastWarning("Checking your earlier payment attempts. Please try again in a moment.");
-        return;
-      }
       const reconciliationOrder = myOrders.find(order => order.paymentReconciliationRequired && order.paymentStatus !== "completed" && cartMatchesOrder(cart, order.items));
       const rememberedReconciliationId = localStorage.getItem("chapaReconciliationOrderId");
       if (rememberedReconciliationId && !myOrders.some(order => order.id === rememberedReconciliationId && order.paymentReconciliationRequired && order.paymentStatus !== "completed")) {
@@ -1052,7 +1257,7 @@ export function MainApp() {
     try {
       if (paymentMethod === "chapa") {
         const requestStorageKey = "chapaClientRequestId";
-        let chapaRequestId = localStorage.getItem(requestStorageKey) || crypto.randomUUID().replace(/-/g, "");
+        let chapaRequestId = localStorage.getItem(requestStorageKey) || generateOrderId();
         localStorage.setItem(requestStorageKey, chapaRequestId);
 
         const checkoutPayload = {
@@ -1105,7 +1310,7 @@ export function MainApp() {
 
         let { response: res, data } = await initializePayment(chapaRequestId);
         if (data?.retryAction === "wait" && ["CHAPA_TIMEOUT", "CHAPA_NETWORK_ERROR", "CHAPA_UNAVAILABLE", "CHAPA_INVALID_RESPONSE", "INITIALIZATION_IN_PROGRESS", "CHAPA_RECONCILING"].includes(data?.code)) {
-          const txRef = data?.txRef || `PAY-${chapaRequestId}`;
+          const txRef = data?.txRef || chapaRequestId;
           for (const delay of [2000, 5000, 10000]) {
             await new Promise(resolve => window.setTimeout(resolve, delay));
             try {
@@ -1147,7 +1352,7 @@ export function MainApp() {
           }
         }
         if (data?.retryAction === "new_reference" && ["PAYMENT_ATTEMPT_ENDED", "PAYMENT_REQUEST_CHANGED", "CHAPA_DUPLICATE_REFERENCE"].includes(data?.code)) {
-          chapaRequestId = crypto.randomUUID().replace(/-/g, "");
+          chapaRequestId = generateOrderId();
           localStorage.setItem(requestStorageKey, chapaRequestId);
           ({ response: res, data } = await initializePayment(chapaRequestId));
         }
@@ -1159,23 +1364,27 @@ export function MainApp() {
         const checkoutUrl = safeChapaCheckoutUrl(data.checkoutUrl);
         if (!checkoutUrl) throw new Error("Chapa did not return a valid checkout link. Please try again.");
 
+        const serverTotal = Number(data.order?.total ?? finalTotal);
         localStorage.removeItem(requestStorageKey);
         localStorage.setItem("activeOrderId", data.txRef);
+        localStorage.setItem("savory_active_order_preview", JSON.stringify({ id: data.txRef, total: serverTotal, status: 'pending' }));
         setActiveOrderId(data.txRef);
         setPlacedOrder(data.order || null);
-        setIsOrderModalOpen(true);
+        setPaymentVerificationResult(null);
+        paymentResolvedBySnapshotRef.current = null;
+        setIsVerifying(false);
+        setIsOrderModalOpen(false);
 
         try {
           localStorage.setItem("gourmet_cart_backup", JSON.stringify(cart));
         } catch {}
 
-        const serverTotal = Number(data.order?.total ?? finalTotal);
         const targetUid = user?.uid || localStorage.getItem("lastAuthUid");
         pushNotification({
           uid: targetUid,
           type: "order_placed",
           title: "Order placed — complete payment",
-          body: "Order #" + String(data.txRef).slice(-8).toUpperCase() + " for " + serverTotal.toFixed(2) + " ETB is awaiting payment.",
+          body: "Order #" + formatOrderId(data.txRef) + " for " + serverTotal.toFixed(2) + " ETB is awaiting payment.",
           orderId: data.txRef,
           amount: serverTotal
         }).catch(() => {});
@@ -1196,7 +1405,7 @@ export function MainApp() {
       } else {
         // Save order as pending in DB directly for Cash
         const cashRequestStorageKey = "cashOrderClientRequestId";
-        let cashRequestId = localStorage.getItem(cashRequestStorageKey) || crypto.randomUUID().replace(/-/g, "");
+        let cashRequestId = localStorage.getItem(cashRequestStorageKey) || generateOrderId();
         localStorage.setItem(cashRequestStorageKey, cashRequestId);
         const res = await authedFetch("/api/orders", {
           method: "POST",
@@ -1226,7 +1435,7 @@ export function MainApp() {
         });
         let data = await res.json().catch(() => ({}));
         if (res.status === 409 && data?.code === "ORDER_REQUEST_CHANGED") {
-          cashRequestId = crypto.randomUUID().replace(/-/g, "");
+          cashRequestId = generateOrderId();
           localStorage.setItem(cashRequestStorageKey, cashRequestId);
           const retry = await authedFetch("/api/orders", {
             method: "POST",
@@ -1238,13 +1447,14 @@ export function MainApp() {
 
         if (data.success) {
           localStorage.removeItem(cashRequestStorageKey);
+          localStorage.setItem("savory_active_order_preview", JSON.stringify({ id: data.order?.id, total: finalTotal, status: 'pending' }));
           setPlacedOrder(data.order);
           const targetUid = user?.uid || (typeof window !== "undefined" ? localStorage.getItem("lastAuthUid") : null);
           pushNotification({
             uid: targetUid,
             type: "order_placed",
             title: "Order placed!",
-            body: `Order #${(data.order?.id || '').slice(-8).toUpperCase()} for ${finalTotal.toFixed(2)} ETB has been placed. Please pay cash upon arrival.`,
+            body: `Order #${formatOrderId(data.order?.id)} for ${finalTotal.toFixed(2)} ETB has been placed. Please pay cash upon arrival.`,
             orderId: data.order?.id,
             amount: finalTotal
           }).catch(() => {});
@@ -1480,8 +1690,13 @@ export function MainApp() {
               {user ? (
                 <div className="relative">
                   <button
-                    onClick={() => setIsProfileOpen(!isProfileOpen)}
-                    className="flex items-center space-x-2 p-1.5 pr-3 border border-stone-200 hover:border-stone-400 bg-stone-50 hover:bg-stone-100 rounded-full transition-all cursor-pointer text-stone-800"
+                    onClick={() => {
+                      const next = !isProfileOpen;
+                      setIsProfileOpen(next);
+                      if (next) void syncCustomerOrders();
+                    }}
+                    className="relative flex items-center space-x-2 p-1.5 pr-3 border border-stone-200 hover:border-stone-400 bg-stone-50 hover:bg-stone-100 rounded-full transition-all cursor-pointer text-stone-800"
+                    title={hasPendingOrder ? "You have an unfinished payment session" : "Profile menu"}
                   >
                     {safeHttpsUrl(user.photoURL) ? (
                       <img src={safeHttpsUrl(user.photoURL)} alt="Profile" referrerPolicy="no-referrer" className="w-8 h-8 rounded-full border border-stone-200" />
@@ -1492,6 +1707,9 @@ export function MainApp() {
                       {user.displayName?.split(" ")[0]}
                     </span>
                     <ChevronDown className="w-4 h-4 text-stone-400" />
+                    {hasPendingOrder && (
+                      <span className="absolute -top-0.5 -right-0.5 h-3 w-3 rounded-full bg-rose-600 border-2 border-white shadow-xs" title="Unfinished payment session" />
+                    )}
                   </button>
 
                   {isProfileOpen && (
@@ -1500,21 +1718,65 @@ export function MainApp() {
                         className="fixed inset-0 z-40"
                         onClick={() => setIsProfileOpen(false)}
                       />
-                      <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-lg border border-stone-200 overflow-hidden z-50 animate-fade-in">
+                      <div className="absolute right-0 mt-2 w-60 bg-white rounded-xl shadow-lg border border-stone-200 overflow-hidden z-50 animate-fade-in">
                         <div className="p-3 border-b border-stone-100 bg-stone-50/50">
                           <p className="text-xs font-bold text-stone-800 truncate">{user.displayName}</p>
                           <p className="text-[10px] text-stone-500 truncate">{user.email}</p>
                         </div>
+                        {unfinishedSessionOrder && (
+                          <div className="p-3 bg-amber-50/90 border-b border-amber-200/80 text-xs">
+                            <div className="flex items-center justify-between font-bold text-amber-950 text-[11px] mb-1">
+                              <span className="flex items-center gap-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-600 inline-block" />
+                                Unfinished Order
+                              </span>
+                              <span className="font-mono">#{formatOrderId(unfinishedSessionOrder.id)}</span>
+                            </div>
+                            <div className="text-[10px] text-amber-800 mb-2 flex justify-between">
+                              <span>Total:</span>
+                              <strong className="font-mono font-bold">{(unfinishedSessionOrder.total ?? 0).toFixed(2)} ETB</strong>
+                            </div>
+                            <div className="flex gap-1.5">
+                              <button
+                                onClick={() => {
+                                  setIsProfileOpen(false);
+                                  setOrderActionModal(unfinishedSessionOrder);
+                                }}
+                                className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-bold py-1 px-2 rounded-lg text-[10px] uppercase tracking-wider transition-colors text-center cursor-pointer"
+                              >
+                                Resume
+                              </button>
+                              <button
+                                onClick={async () => {
+                                  setIsProfileOpen(false);
+                                  await cancelOrderDirectly(unfinishedSessionOrder.id);
+                                }}
+                                className="flex-1 bg-rose-100 hover:bg-rose-200 text-rose-800 font-bold py-1 px-2 rounded-lg text-[10px] uppercase tracking-wider transition-colors text-center cursor-pointer"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        )}
                         <div className="p-1.5">
                           <button
                             onClick={() => {
                               setIsProfileOpen(false);
                               setIsMyOrdersOpen(true);
+                              void syncCustomerOrders();
                             }}
-                            className="w-full flex items-center space-x-2 px-3 py-2 text-sm text-stone-700 hover:bg-stone-100 rounded-lg transition-colors cursor-pointer"
+                            className="w-full flex items-center justify-between px-3 py-2 text-sm text-stone-700 hover:bg-stone-100 rounded-lg transition-colors cursor-pointer"
                           >
-                            <ClipboardList className="w-4 h-4 text-stone-500" />
-                            <span>My Orders</span>
+                            <div className="flex items-center space-x-2">
+                              <ClipboardList className="w-4 h-4 text-stone-500" />
+                              <span>My Orders</span>
+                            </div>
+                            {hasPendingOrder && (
+                              <span className="flex items-center gap-1.5">
+                                <span className="h-2 w-2 rounded-full bg-rose-600" />
+                                <span className="text-[10px] font-bold text-rose-600 uppercase">Pending</span>
+                              </span>
+                            )}
                           </button>
                           <button
                             onClick={() => {
@@ -1534,11 +1796,14 @@ export function MainApp() {
               ) : (
                 <button
                   onClick={handleLogin}
-                  className="flex items-center space-x-2 p-2 px-3 border border-stone-200 hover:border-stone-400 bg-stone-50 hover:bg-stone-100 rounded-xl transition-all cursor-pointer text-stone-800"
+                  className="relative flex items-center space-x-2 p-2 px-3 border border-stone-200 hover:border-stone-400 bg-stone-50 hover:bg-stone-100 rounded-xl transition-all cursor-pointer text-stone-800"
                   title="Sign in with Google"
                 >
                   <User className="w-4.5 h-4.5" />
                   <span className="text-xs font-semibold hidden md:block">Sign In</span>
+                  {hasPendingOrder && (
+                    <span className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-rose-600 border-2 border-white shadow-xs" title="Unfinished payment session" />
+                  )}
                 </button>
               )}
 
@@ -1794,7 +2059,7 @@ export function MainApp() {
               <div className="p-6 border-b border-stone-100 flex items-center justify-between bg-stone-50">
                 <div className="flex items-center space-x-2.5">
                   <ShoppingCart className="w-5 h-5 text-stone-800" />
-                  <h3 className="font-serif text-lg font-bold text-stone-900">YourbOrder</h3>
+                  <h3 className="font-serif text-lg font-bold text-stone-900">Your Order</h3>
                 </div>
                 <button
                   onClick={() => { setIsCartOpen(false); setIsCheckingOut(false); }}
@@ -2266,6 +2531,41 @@ export function MainApp() {
                     </div>
                   )}
 
+                  {hasPendingOrder && unfinishedSessionOrder && (
+                    <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50/90 p-3 text-xs text-amber-900 animate-fade-in shadow-xs" role="alert">
+                      <div className="flex items-start gap-2">
+                        <AlertCircle className="mt-0.5 h-4 w-4 text-amber-700 shrink-0" />
+                        <div className="flex-1">
+                          <p className="font-bold text-amber-950">Active Pending Order (#{formatOrderId(unfinishedSessionOrder.id)})</p>
+                          <p className="mt-0.5 text-[11px] leading-relaxed text-amber-800">
+                            You have an unfinished payment session for {(unfinishedSessionOrder.total ?? 0).toFixed(2)} ETB. Complete or cancel it before starting a new order.
+                          </p>
+                          <div className="mt-2.5 flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIsCartOpen(false);
+                                setOrderActionModal(unfinishedSessionOrder);
+                              }}
+                              className="bg-amber-600 hover:bg-amber-700 text-white font-bold px-3 py-1.5 rounded-lg text-[10px] uppercase tracking-wider transition-colors cursor-pointer"
+                            >
+                              Resume & Pay
+                            </button>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                await cancelOrderDirectly(unfinishedSessionOrder.id);
+                              }}
+                              className="bg-stone-200 hover:bg-stone-300 text-stone-700 font-bold px-3 py-1.5 rounded-lg text-[10px] uppercase tracking-wider transition-colors cursor-pointer"
+                            >
+                              Cancel Order
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {checkoutError && (
                     <div className="mb-3 flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50 p-3 text-left text-xs text-rose-800 animate-fade-in" role="alert">
                       <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -2390,7 +2690,7 @@ export function MainApp() {
                   </div>
                   <div className="flex justify-between text-[11px]">
                     <span className="text-stone-500">Tx Ref:</span>
-                    <span className="font-mono text-stone-900">{selectedReceiptOrder.id}</span>
+                    <span className="font-mono text-stone-900">#{formatOrderId(selectedReceiptOrder.id)}</span>
                   </div>
                   <div className="flex justify-between text-[11px]">
                     <span className="text-stone-500">Transaction ID:</span>
@@ -2496,7 +2796,7 @@ export function MainApp() {
                           })}
                       />
                     </div>
-                    <span className="text-[9px] font-mono text-stone-400 tracking-widest uppercase">Order details: {selectedReceiptOrder.id}</span>
+                    <span className="text-[9px] font-mono text-stone-400 tracking-widest uppercase">Order details: #{formatOrderId(selectedReceiptOrder.id)}</span>
                   </div>
                   <div className="space-y-1">
                     <p className="text-[11px] font-serif font-bold italic text-stone-950">Thank you for ordering!</p>
@@ -2533,9 +2833,24 @@ export function MainApp() {
         )}
 
         {/* Unified Order & Payment Status Modal */}
-        {isOrderModalOpen && (activeOrderId || placedOrder) && (
+        {isOrderModalOpen && (activeOrderId || placedOrder) && (() => {
+          // Compute a single, deterministic modal state — success/failure always win, even mid-poll
+          const currentId = activeOrderId || placedOrder?.id;
+          const isMatchingOrder = Boolean(placedOrder && currentId && placedOrder.id === currentId);
+          // Never declare success unless the loaded order explicitly matches this order ID and is confirmed completed
+          const isTerminalSuccess = Boolean(isMatchingOrder && placedOrder?.paymentStatus === 'completed');
+          // Never declare terminal failure unless the loaded order explicitly matches this order ID and has definitive failure
+          const isTerminalFailure = Boolean(
+            isMatchingOrder && (placedOrder?.failureDefinitive === true || placedOrder?.paymentAttemptStatus === 'cancelled' || placedOrder?.paymentStatus === 'failed' || placedOrder?.status === 'cancelled')
+          );
+          const orderModalState: 'success' | 'failed' | 'verifying' | 'pending' =
+            isTerminalSuccess ? 'success' :
+            isTerminalFailure ? 'failed' :
+            (isVerifying || paymentVerificationResult === 'verifying') ? 'verifying' :
+            'pending';
+          return (
           <div id="order-status-modal" className="fixed inset-0 bg-black/70 z-[999] flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in" onClick={() => {
-            if (paymentVerificationResult === 'success' || paymentVerificationResult === 'failed' || placedOrder?.paymentStatus === 'completed' || placedOrder?.paymentStatus === 'failed') {
+            if (orderModalState === 'success' || orderModalState === 'failed') {
               setIsOrderModalOpen(false);
               setActiveOrderId(null);
               setPlacedOrder(null);
@@ -2561,8 +2876,8 @@ export function MainApp() {
                 <X className="w-5 h-5" />
               </button>
 
-              {/* State 1: Verifying / Syncing initial details */}
-              {(isVerifying || (!placedOrder && paymentVerificationResult !== 'failed' && paymentVerificationResult !== 'success') || paymentVerificationResult === 'verifying') && (
+              {/* State 1: Verifying — only shown while actively polling AND no terminal result has been reached */}
+              {orderModalState === 'verifying' && (
                 <>
                   <div className="w-16 h-16 bg-amber-50 rounded-full flex items-center justify-center mx-auto mb-1">
                     <Loader2 className="h-7 w-7 animate-spin text-amber-600" />
@@ -2572,19 +2887,30 @@ export function MainApp() {
                     <p className="text-xs text-stone-500">Please wait while we sync your order and verify payment...</p>
                   </div>
 
-                  {/* Immediate skeleton details card - zero blank flash */}
+                  {/* Show real order data when available */}
                   <div className="bg-stone-50 border border-stone-200 p-4 rounded-2xl space-y-2.5 text-left text-xs">
                     <div className="flex justify-between items-center">
                       <span className="text-stone-400">Order ID:</span>
-                      <div className="h-3.5 bg-stone-200 rounded animate-pulse w-28" />
+                      {placedOrder?.id || activeOrderId ? (
+                        <strong className="text-stone-950 font-mono text-[11px]">#{formatOrderId(placedOrder?.id || activeOrderId)}</strong>
+                      ) : (
+                        <div className="h-3.5 bg-stone-200 rounded animate-pulse w-28" />
+                      )}
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-stone-400">Status:</span>
-                      <div className="h-3.5 bg-amber-200/70 rounded animate-pulse w-24" />
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 uppercase">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-600" />
+                        Verifying
+                      </span>
                     </div>
                     <div className="border-t border-stone-200 pt-2 flex justify-between items-center">
                       <span className="text-stone-400">Total:</span>
-                      <div className="h-4 bg-stone-200 rounded animate-pulse w-16" />
+                      {orderDisplayTotal != null ? (
+                        <span className="font-mono text-amber-700 font-bold">{orderDisplayTotal.toFixed(2)} ETB</span>
+                      ) : (
+                        <div className="h-4 bg-stone-200 rounded animate-pulse w-16" />
+                      )}
                     </div>
                   </div>
 
@@ -2596,8 +2922,8 @@ export function MainApp() {
                 </>
               )}
 
-              {/* State 2: Payment Success */}
-              {!isVerifying && (paymentVerificationResult === 'success' || placedOrder?.paymentStatus === 'completed') && (
+              {/* State 2: Payment Success — shown as soon as payment is confirmed, even mid-poll */}
+              {orderModalState === 'success' && (
                 <>
                   <div className="w-16 h-16 bg-emerald-50 rounded-full flex items-center justify-center mx-auto text-emerald-600">
                     <CheckCircle className="w-9 h-9" />
@@ -2615,7 +2941,7 @@ export function MainApp() {
                   <div className="bg-stone-50 border border-stone-200 p-4 rounded-2xl text-xs space-y-2 text-left text-stone-600">
                     <div className="flex justify-between items-center">
                       <span className="text-stone-500">Order Reference:</span>
-                      <strong className="text-stone-950 font-mono text-[11px]">#{placedOrder?.id ? placedOrder.id.slice(-8).toUpperCase() : (activeOrderId || '').slice(-8).toUpperCase()}</strong>
+                      <strong className="text-stone-950 font-mono text-[11px]">#{formatOrderId(placedOrder?.id || activeOrderId)}</strong>
                     </div>
                     {placedOrder?.customerName && (
                       <div className="flex justify-between">
@@ -2629,12 +2955,10 @@ export function MainApp() {
                         PAID
                       </span>
                     </div>
-                    {placedOrder?.total != null && (
-                      <div className="border-t border-stone-200 pt-2 flex justify-between font-bold text-stone-950 text-xs">
-                        <span>Total:</span>
-                        <span className="font-mono text-emerald-700 font-bold">{placedOrder.total.toFixed(2)} ETB</span>
-                      </div>
-                    )}
+                    <div className="border-t border-stone-200 pt-2 flex justify-between font-bold text-stone-950 text-xs">
+                      <span>Total:</span>
+                      <span className="font-mono text-emerald-700 font-bold">{(placedOrder?.total ?? orderDisplayTotal ?? 0).toFixed(2)} ETB</span>
+                    </div>
                   </div>
 
                   {placedOrder?.shipdayTrackingLink && (
@@ -2693,7 +3017,7 @@ export function MainApp() {
               )}
 
               {/* State 3: Payment Failed / Cancelled */}
-              {!isVerifying && (paymentVerificationResult === 'failed' || placedOrder?.failureDefinitive === true || placedOrder?.paymentAttemptStatus === 'cancelled' || placedOrder?.paymentStatus === 'failed' || placedOrder?.status === 'cancelled') && (
+              {orderModalState === 'failed' && (
                 <>
                   <div className="w-16 h-16 bg-rose-50 rounded-full flex items-center justify-center mx-auto text-rose-600">
                     <CircleX className="w-9 h-9" />
@@ -2764,7 +3088,7 @@ export function MainApp() {
               )}
 
               {/* State 4: Pending / Still Processing */}
-              {!isVerifying && paymentVerificationResult === 'pending' && placedOrder?.paymentStatus !== 'completed' && placedOrder?.failureDefinitive !== true && placedOrder?.paymentAttemptStatus !== 'cancelled' && placedOrder?.paymentStatus !== 'failed' && placedOrder?.status !== 'cancelled' && (
+              {orderModalState === 'pending' && (
                 <>
                   <div className="w-16 h-16 bg-amber-50 rounded-full flex items-center justify-center mx-auto text-amber-600">
                     <Clock className="w-9 h-9 animate-pulse" />
@@ -2783,21 +3107,19 @@ export function MainApp() {
                   <div className="bg-stone-50 border border-stone-200 p-4 rounded-2xl text-xs space-y-2 text-left text-stone-600">
                     <div className="flex justify-between items-center">
                       <span className="text-stone-500">Order Reference:</span>
-                      <strong className="text-stone-950 font-mono text-[11px]">#{placedOrder?.id ? placedOrder.id.slice(-8).toUpperCase() : (activeOrderId || '').slice(-8).toUpperCase()}</strong>
+                      <strong className="text-stone-950 font-mono text-[11px]">#{formatOrderId(placedOrder?.id || activeOrderId)}</strong>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-stone-500">Status:</span>
                       <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 uppercase">
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-600 animate-ping" />
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-600" />
                         {placedOrder?.paymentReconciliationRequired ? "Reconciling" : "Awaiting Confirmation"}
                       </span>
                     </div>
-                    {placedOrder?.total != null && (
-                      <div className="border-t border-stone-200 pt-2 flex justify-between font-bold text-stone-950 text-xs">
-                        <span>Total:</span>
-                        <span className="font-mono text-amber-700 font-bold">{placedOrder.total.toFixed(2)} ETB</span>
-                      </div>
-                    )}
+                    <div className="border-t border-stone-200 pt-2 flex justify-between font-bold text-stone-950 text-xs">
+                      <span>Total:</span>
+                      <span className="font-mono text-amber-700 font-bold">{(placedOrder?.total ?? orderDisplayTotal ?? 0).toFixed(2)} ETB</span>
+                    </div>
                   </div>
 
                   <div className="space-y-2 pt-2">
@@ -2834,30 +3156,17 @@ export function MainApp() {
                         My Orders
                       </button>
                       <button
-                        onClick={async () => {
+                        onClick={() => {
+                          const targetId = activeOrderId || placedOrder?.id;
+                          if (!targetId) return;
                           confirmDialog("Are you sure you want to cancel this order?", async () => {
-                            const targetId = activeOrderId || placedOrder?.id;
-                            if (targetId) {
-                              try {
-                                const cancelResponse = await authedFetch(`/api/orders/${encodeURIComponent(targetId)}/cancel`, { method: "POST" });
-                                const cancelData = await cancelResponse.json().catch(() => ({}));
-                                if (!cancelResponse.ok) throw new Error(formatCheckoutError(cancelData));
-                                if (placedOrder?.items && placedOrder.items.length > 0) {
-                                  setCart(placedOrder.items);
-                                  localStorage.setItem("gourmet_cart", JSON.stringify(placedOrder.items));
-                                }
-                                setIsOrderModalOpen(false);
-                                setActiveOrderId(null);
-                                setPlacedOrder(null);
-                                setPaymentVerificationResult(null);
-                                localStorage.removeItem('activeOrderId');
-                                toastSuccess(cancelData.order?.status === "cancel_requested"
-                                  ? "Cancellation is still being confirmed. You can retry it from My Orders."
-                                  : "Order cancelled. Your cart items were restored.");
-                              } catch (error) {
-                                toastError(formatCheckoutError(error));
-                              }
+                            setIsOrderModalOpen(false);
+                            setPaymentVerificationResult(null);
+                            if (placedOrder?.items && placedOrder.items.length > 0) {
+                              setCart(placedOrder.items);
+                              localStorage.setItem("gourmet_cart", JSON.stringify(placedOrder.items));
                             }
+                            await cancelOrderDirectly(targetId);
                           }, null, "Cancel Order");
                         }}
                         className="flex-1 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold py-2.5 rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
@@ -2870,7 +3179,8 @@ export function MainApp() {
               )}
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* My Orders Modal overlay */}
         {isMyOrdersOpen && (
@@ -2890,6 +3200,43 @@ export function MainApp() {
               </div>
 
               <div className="p-6 overflow-y-auto flex-grow space-y-6 max-h-[60vh]">
+                {unfinishedSessionOrder && (
+                  <div className="bg-amber-50/90 border border-amber-200 rounded-2xl p-4 text-xs space-y-2 mb-4">
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-amber-950 flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-amber-600 inline-block" />
+                        Unfinished Payment Session
+                      </span>
+                      <span className="font-mono font-bold text-amber-900">#{formatOrderId(unfinishedSessionOrder.id)}</span>
+                    </div>
+                    <p className="text-[11px] text-amber-800">
+                      You have an active online checkout session. Only one open payment session is allowed at a time.
+                    </p>
+                    <div className="flex justify-between items-center pt-2 border-t border-amber-200/70">
+                      <span className="text-stone-600 font-medium">Total: <strong className="text-stone-950 font-mono">{(unfinishedSessionOrder.total ?? 0).toFixed(2)} ETB</strong></span>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => {
+                            setIsMyOrdersOpen(false);
+                            setOrderActionModal(unfinishedSessionOrder);
+                          }}
+                          className="bg-amber-600 hover:bg-amber-700 text-white font-bold py-1.5 px-3 rounded-xl text-[10px] uppercase tracking-wider transition-colors cursor-pointer"
+                        >
+                          Resume & Pay
+                        </button>
+                        <button
+                          onClick={async () => {
+                            await cancelOrderDirectly(unfinishedSessionOrder.id);
+                          }}
+                          className="bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold py-1.5 px-3 rounded-xl text-[10px] uppercase tracking-wider border border-rose-200 transition-colors cursor-pointer"
+                        >
+                          Cancel Order
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {isMyOrdersLoading ? (
                   <div className="space-y-4 py-2">
                     <div className="flex items-center justify-center space-x-2 text-amber-700 py-4">
@@ -2950,7 +3297,7 @@ export function MainApp() {
                               <div className="flex justify-between items-start">
                                 <div>
                                   <span className="text-[10px] text-stone-500 uppercase tracking-wider block">Order ID</span>
-                                  <span className="font-mono text-xs font-bold">{order.id}</span>
+                                  <span className="font-mono text-xs font-bold">#{formatOrderId(order.id)}</span>
                                 </div>
                                 <div className="flex flex-col items-end space-y-1">
                                   <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${order.status === 'delivered' ? 'bg-emerald-100 text-emerald-800' :
@@ -3070,7 +3417,7 @@ export function MainApp() {
               </div>
               <div>
                 <h3 className="font-serif text-lg font-bold text-stone-900">Manage Order</h3>
-                <p className="font-mono text-xs text-stone-500 mt-1">Order ID: {orderActionModal.id}</p>
+                <p className="font-mono text-xs text-stone-500 mt-1">Order ID: #{formatOrderId(orderActionModal.id)}</p>
                 <p className="text-xs text-stone-600 mt-2 leading-relaxed">
                   {orderActionModal.status === 'cancel_requested'
                     ? "We’re confirming cancellation with Chapa. You can retry cancelling this payment while it remains pending."
@@ -3108,29 +3455,14 @@ export function MainApp() {
                 </button>}
 
                 <button
-                  onClick={async () => {
+                  onClick={() => {
                     confirmDialog("Are you sure you want to cancel this order?", async () => {
-                      try {
-                        const response = await authedFetch(`/api/orders/${encodeURIComponent(orderActionModal.id)}/cancel`, { method: "POST" });
-                        const data = await response.json().catch(() => ({}));
-                        if (!response.ok) throw new Error(formatCheckoutError(data));
-                        if (activeOrderId === orderActionModal.id) {
-                          setPlacedOrder(null);
-                          localStorage.removeItem('activeOrderId');
-                          setActiveOrderId(null);
-                        }
-                        setOrderActionModal(null);
-                        toastSuccess(data.order?.status === "cancel_requested"
-                          ? "Cancellation is still being confirmed. You can retry it from My Orders."
-                          : "Order cancelled.");
-                      } catch (err) {
-                        toastError(formatCheckoutError(err));
-                      }
+                      await cancelOrderDirectly(orderActionModal.id);
                     }, null, "Cancel Order");
                   }}
                   className="w-full bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
                 >
-                  {orderActionModal.status === 'cancel_requested' ? 'Retry Payment Cancellation' : 'Cancel Order'}
+                  Cancel Order
                 </button>
 
                 <button

@@ -6,7 +6,18 @@ type ChapaMode = "test" | "live";
 type ProviderReason = "not_found" | "unpaid" | "authorization" | "unavailable" | "invalid_response" | "rejected";
 
 export function validPaymentReference(value: unknown): value is string {
-  return typeof value === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(value);
+  return typeof value === "string" && /^[A-Za-z0-9_-]{7,120}$/.test(value);
+}
+
+/** 7 uppercase alphanumeric characters (unambiguous, clean, Chapa-compatible) */
+export function generateOrderId(): string {
+  const chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+  const bytes = crypto.randomBytes(7);
+  let id = "";
+  for (let i = 0; i < 7; i++) {
+    id += chars[bytes[i] % chars.length];
+  }
+  return id;
 }
 
 /** The browser must never be redirected to an arbitrary provider-controlled URL. */
@@ -20,13 +31,12 @@ export function isChapaCheckoutUrl(value: unknown): value is string {
   } catch { return false; }
 }
 
-/** Parse currency without Number coercion accepting null, arrays or booleans. */
+/** Parse currency without Number coercion accepting null, arrays or booleans. Robust against float precision. */
 export function paymentMinorUnits(value: unknown): number | null {
   if (typeof value !== "string" && typeof value !== "number") return null;
-  const text = typeof value === "number" ? String(value) : value;
-  if (!/^\d{1,8}(?:\.\d{1,2})?$/.test(text)) return null;
-  const [whole, fraction = ""] = text.split(".");
-  const cents = Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
+  const num = typeof value === "number" ? value : parseFloat(String(value).trim());
+  if (!Number.isFinite(num) || num <= 0 || num > 9999999.99) return null;
+  const cents = Math.round(num * 100);
   return Number.isSafeInteger(cents) && cents > 0 && cents <= 999_999_999 ? cents : null;
 }
 
@@ -45,15 +55,20 @@ export function isChapaAdjustmentStatus(value: unknown): value is "refunded" | "
 }
 
 export function hasConfirmedChapaFailure(order: any): boolean {
-  return order?.failureDefinitive === true && Boolean(order.initializationRejectedAt || order.providerCancelledAt || order.providerNotFoundConfirmedAt);
+  if (!order) return true;
+  if (order.status === "cancelled" || order.paymentAttemptStatus === "cancelled" || order.paymentStatus === "failed") return true;
+  return order.failureDefinitive === true && Boolean(order.initializationRejectedAt || order.providerCancelledAt || order.providerNotFoundConfirmedAt);
 }
 
 /** Read and create inside the same transaction to close distinct-ID races. */
-export async function assertNewChapaAttemptCapacity(transaction: any, db: any, uid: string): Promise<void> {
-  const pending = await transaction.get(db.collection("orders").where("userId", "==", uid).where("paymentMethod", "==", "chapa").where("paymentStatus", "==", "pending").limit(501));
-  const unresolved = pending.docs.filter((document: any) => !hasConfirmedChapaFailure(document.data()));
-  if (pending.size > 500 || unresolved.length >= 3) {
-    throw Object.assign(new Error("You already have open payment requests. Resume or cancel them in My Orders before starting another checkout."), { statusCode: 409, code: "CHECKOUT_ACTIVE_ATTEMPT_LIMIT", retryAction: "wait" });
+export async function assertNewChapaAttemptCapacity(transaction: any, db: any, uid: string, currentTxRef?: string): Promise<void> {
+  const pending = await transaction.get(db.collection("orders").where("userId", "==", uid).where("paymentStatus", "==", "pending").limit(50));
+  const unresolved = pending.docs.filter((document: any) => {
+    if (currentTxRef && document.id === currentTxRef) return false;
+    return !hasConfirmedChapaFailure(document.data());
+  });
+  if (unresolved.length >= 1) {
+    throw Object.assign(new Error("You already have an order pending payment. Resume or cancel it before starting another checkout."), { statusCode: 409, code: "CHECKOUT_ACTIVE_ATTEMPT_LIMIT", retryAction: "wait" });
   }
 }
 

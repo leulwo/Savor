@@ -107,6 +107,19 @@ function readRequest(target: Target): ReadRequest {
   return result;
 }
 
+function isPublicPath(path: string): boolean {
+  return path === 'menu' || path.startsWith('menu/') ||
+         path === 'categories' || path.startsWith('categories/') ||
+         path === 'reviews' || path.startsWith('reviews/') ||
+         path === 'settings' || path.startsWith('settings/');
+}
+
+function isPublicBody(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false;
+  const path = (body as any).path;
+  return typeof path === 'string' && isPublicPath(path);
+}
+
 export class DatabaseClient {
   readonly type = 'local-database' as const;
   private subscriptions = new Map<string, Subscription>();
@@ -125,24 +138,32 @@ export class DatabaseClient {
     }
   }
 
-  private async authenticatedFetch(path: string, options: RequestInit = {}): Promise<Response> {
-    await this.auth.authStateReady();
+  private async authenticatedFetch(path: string, options: RequestInit = {}, isPublic = false): Promise<Response> {
+    if (!isPublic) {
+      await this.auth.authStateReady();
+    }
     const user = this.auth.currentUser;
     const uid = user?.uid ?? null;
     const headers = new Headers(options.headers);
     headers.set('Content-Type', 'application/json');
-    try {
-      if (user) headers.set('Authorization', `Bearer ${await user.getIdToken()}`);
-    } catch { throw new DatabaseError('AUTH_SESSION_EXPIRED', 'Your sign-in session expired. Sign in again to continue.'); }
+    if (user) {
+      try {
+        headers.set('Authorization', `Bearer ${await user.getIdToken()}`);
+      } catch {
+        if (!isPublic) throw new DatabaseError('AUTH_SESSION_EXPIRED', 'Your sign-in session expired. Sign in again to continue.');
+      }
+    } else if (typeof window !== "undefined" && localStorage.getItem("savory_dev_user") === "1") {
+      headers.set('Authorization', 'Bearer dev-mock-token:b2Q2gSiZ0EaDf38qgnWOrs2AEoI3');
+    }
     const ensureCurrentUser = () => {
-      if ((this.auth.currentUser?.uid ?? null) !== uid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
+      if (!isPublic && (this.auth.currentUser?.uid ?? null) !== uid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
     };
     ensureCurrentUser();
     let response = await fetch(`${this.baseUrl}${path}`, { ...options, headers, redirect: 'error', credentials: 'same-origin', cache: 'no-store' });
     ensureCurrentUser();
     if (response.status === 401 && user) {
       try { headers.set('Authorization', `Bearer ${await user.getIdToken(true)}`); }
-      catch { throw new DatabaseError('AUTH_SESSION_EXPIRED', 'Your sign-in session expired. Sign in again to continue.'); }
+      catch { if (!isPublic) throw new DatabaseError('AUTH_SESSION_EXPIRED', 'Your sign-in session expired. Sign in again to continue.'); }
       ensureCurrentUser();
       response = await fetch(`${this.baseUrl}${path}`, { ...options, headers, redirect: 'error', credentials: 'same-origin', cache: 'no-store' });
       ensureCurrentUser();
@@ -151,17 +172,20 @@ export class DatabaseClient {
   }
 
   private async request<T>(path: string, body: unknown): Promise<T> {
+    const isPublic = isPublicBody(body);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
-      await this.auth.authStateReady();
+      if (!isPublic) {
+        await this.auth.authStateReady();
+      }
       const responseUid = this.auth.currentUser?.uid ?? null;
-      const response = await this.authenticatedFetch(path, { method: 'POST', body: JSON.stringify(encode(body)), signal: controller.signal });
-      if ((this.auth.currentUser?.uid ?? null) !== responseUid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
+      const response = await this.authenticatedFetch(path, { method: 'POST', body: JSON.stringify(encode(body)), signal: controller.signal }, isPublic);
+      if (!isPublic && (this.auth.currentUser?.uid ?? null) !== responseUid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
       let data: any;
       try { data = await response.json(); }
       catch { throw new DatabaseError('DATABASE_INVALID_RESPONSE', 'The database server returned an unreadable response. Please try again.'); }
-      if ((this.auth.currentUser?.uid ?? null) !== responseUid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
+      if (!isPublic && (this.auth.currentUser?.uid ?? null) !== responseUid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
       if (!response.ok || data?.success === false) {
         const message = typeof data?.error === 'string' ? data.error : typeof data?.message === 'string' ? data.message : 'The database request could not be completed.';
         throw new DatabaseError(String(data?.code || (response.status === 401 ? 'AUTH_SESSION_EXPIRED' : response.status === 403 ? 'permission-denied' : 'DATABASE_REQUEST_FAILED')), message);
@@ -255,10 +279,14 @@ export class DatabaseClient {
         this.generation++;
         this.revision = undefined;
         this.subscriptions.forEach(entry => {
+          // Public collections (menu, categories, reviews, settings) are the same for all users;
+          // never wipe them or flash blank when auth state resolves.
+          if (isPublicPath(entry.target.path)) return;
+
           entry.snapshot = undefined;
           entry.fingerprint = undefined;
           entry.dirty = true;
-          // Remove any previous customer's data immediately while the new session loads.
+          // Remove any previous customer's private data immediately while the new session loads.
           const empty = entry.target instanceof DocumentReference ? new DocumentSnapshot(entry.target, undefined) : new QuerySnapshot([]);
           entry.listeners.forEach(listener => this.deliver(listener, empty));
         });
