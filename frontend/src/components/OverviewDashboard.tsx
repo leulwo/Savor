@@ -104,7 +104,7 @@ export default function OverviewDashboard({ orders = [], can, onNavigate }: Over
           if (!item) return;
           const qty = item.quantity || 1;
           itemsSold += qty;
-          const id = item.menuItem?.id || item.menuItemId || (item.menuItem?.name || 'unknown');
+          const id = item.menuItem?.id || (item as any).menuItemId || (item.menuItem?.name || 'unknown');
           const name = item.menuItem?.name || 'Dish';
           const price = item.menuItem?.price || 0;
           if (!itemSales.has(id)) itemSales.set(id, { name, qty: 0, revenue: 0 });

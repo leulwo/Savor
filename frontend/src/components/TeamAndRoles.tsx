@@ -45,9 +45,7 @@ export default function TeamAndRoles({ currentUserEmail = '', userRole, can = ()
         </button>
         <button
           onClick={() => selectTab('roles')}
-          className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
-            currentTab === 'roles' ? 'bg-stone-900 text-white shadow-sm' : 'text-stone-500 hover:text-stone-800 hover:bg-stone-50'
-          }`}
+          className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer text-stone-500 hover:text-stone-800 hover:bg-stone-50"
         >
           <ShieldCheck className="w-4 h-4" />
           Roles & Permissions

@@ -223,7 +223,7 @@ export default function AnalyticsDashboard() {
 
       ordersCount++;
       const totalAmount = typeof order.total === 'number' ? order.total : 0;
-      const paid = order.paymentStatus === 'completed' && order.paymentStatus !== 'reversed';
+      const paid = order.paymentStatus === 'completed';
       if (paid) grossRevenue += totalAmount;
       const totalQty = (order.items || []).reduce((acc, i) => acc + (i?.quantity || 1), 0);
       if (paid) itemsSold += totalQty;
@@ -242,7 +242,7 @@ export default function AnalyticsDashboard() {
           const itemQty = item.quantity || 1;
           const cat = item.menuItem?.category || 'uncategorized';
           categoryMap.set(cat, (categoryMap.get(cat) || 0) + (itemQty * itemPrice));
-          const itemId = item.menuItem?.id || item.menuItemId || item.menuItem?.name || 'unknown';
+          const itemId = item.menuItem?.id || (item as any).menuItemId || item.menuItem?.name || 'unknown';
           const itemName = item.menuItem?.name || 'Dish';
           if (!itemsMap.has(itemId)) itemsMap.set(itemId, { name: itemName, quantity: 0, revenue: 0 });
           const itemData = itemsMap.get(itemId)!;
