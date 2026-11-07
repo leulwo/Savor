@@ -508,10 +508,12 @@ export function MainApp() {
       const raw = localStorage.getItem('savory_active_order_preview');
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (parsed?.total != null && (!parsed.id || parsed.id === activeOrderId)) return Number(parsed.total);
+        if (parsed?.total != null && (!parsed.id || !activeOrderId || formatOrderId(parsed.id) === formatOrderId(activeOrderId))) {
+          return Number(parsed.total);
+        }
       }
     } catch {}
-    const match = myOrders.find(o => o.id === activeOrderId);
+    const match = myOrders.find(o => formatOrderId(o.id) === formatOrderId(activeOrderId));
     if (match?.total != null) return match.total;
     return null;
   }, [placedOrder, activeOrderId, myOrders]);
@@ -2908,8 +2910,10 @@ export function MainApp() {
                       <span className="text-stone-400">Total:</span>
                       {orderDisplayTotal != null ? (
                         <span className="font-mono text-amber-700 font-bold">{orderDisplayTotal.toFixed(2)} ETB</span>
+                      ) : finalTotal > 0 ? (
+                        <span className="font-mono text-amber-700 font-bold">{finalTotal.toFixed(2)} ETB</span>
                       ) : (
-                        <div className="h-4 bg-stone-200 rounded animate-pulse w-16" />
+                        <span className="font-mono text-amber-700 font-semibold">Updating...</span>
                       )}
                     </div>
                   </div>
