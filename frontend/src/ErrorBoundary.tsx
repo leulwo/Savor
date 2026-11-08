@@ -11,11 +11,7 @@ interface State {
   errorInfo: string | null;
 }
 
-// React 19 + no @types/react installed → we lean on the runtime class
-// and use a type cast to satisfy strict tsc without `require()`.
-const ReactComponent = React.Component as unknown as new (props: Props) => any;
-
-export class ErrorBoundary extends ReactComponent {
+export class ErrorBoundary extends React.Component<Props, State> {
   state: State = { hasError: false, error: null, errorInfo: null };
 
   static getDerivedStateFromError(error: Error): Partial<State> {

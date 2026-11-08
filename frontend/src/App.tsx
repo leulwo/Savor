@@ -1031,7 +1031,7 @@ export function MainApp() {
 
       toastSuccess("Reservation requested successfully! We will confirm shortly.");
       setIsReservationOpen(false);
-      setReservationForm({ date: "", time: "19:00", partySize: 2 });
+      setReservationForm({ date: "", time: "19:00", partySize: 2, notes: "" });
     } catch (error) {
       console.error("Reservation failed:", error);
       toastError("Failed to submit reservation. Please try again.");
