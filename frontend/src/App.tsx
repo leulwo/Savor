@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { Routes, Route, useNavigate, Link, useLocation } from "react-router-dom";
+import { Routes, Route, useNavigate, useParams, Link, useLocation } from "react-router-dom";
 import { MenuItem, MenuItemVariation, Order, OrderItem } from "./types";
 
 const AdminPortal = React.lazy(() => import("./AdminPortal"));
@@ -18,6 +18,7 @@ import {
   Trash2,
   Lock,
   Clock,
+  Settings,
   Star,
   Search,
   LogIn,
@@ -26,6 +27,7 @@ import {
   RotateCcw,
   ChevronDown,
   Truck,
+  Heart,
   CalendarDays,
   Store,
   ShoppingBag,
@@ -52,7 +54,7 @@ import {
   signInWithGoogle,
   signOut
 } from "./firebase";
-import { collection, onSnapshot, doc, query, where, setDoc, getDoc } from "./database";
+import { collection, onSnapshot, doc, query, where, setDoc, getDoc, orderBy, limit } from "./database";
 import { APIProvider } from "@vis.gl/react-google-maps";
 import GoogleMapsAddressInput from "./GoogleMapsAddressInput";
 import Chatbot from "./components/Chatbot";
@@ -62,7 +64,7 @@ import ItemReviews from "./components/ItemReviews";
 import { confirmDialog, toastError, toastSuccess, toastInfo, toastWarning } from "./notify";
 import { NotificationCenter, pushNotification } from "./NotificationCenter";
 import { normalizeGalleryImages } from "./utils/galleries";
-import { scheduleAccepts, formatTimeHHMM } from "./utils/schedule";
+import { parseHHMMToMinutes, scheduleAccepts, formatTimeHHMM } from "./utils/schedule";
 import { getRestaurantName } from "./utils/businessName";
 import { getUnavailableCartItems } from "./utils/cartAvailability";
 import { safeChapaCheckoutUrl, safeHttpsUrl } from "./utils/security";
@@ -382,6 +384,7 @@ export function MainApp() {
   // Computes whether there is an unfinished online payment session
   const hasPendingOrder = Boolean(unfinishedSessionOrder);
   const [chapaCheckoutUrl, setChapaCheckoutUrl] = useState<string | null>(() => localStorage.getItem('chapaCheckoutUrl'));
+  const [hasShownOrderModal, setHasShownOrderModal] = useState<string | null>(() => localStorage.getItem('shownOrderModalId'));
   const [checkoutSettings, setCheckoutSettings] = useState({
     serviceTaxPercent: 15,
     flatFeeETB: 0,
@@ -1028,7 +1031,7 @@ export function MainApp() {
 
       toastSuccess("Reservation requested successfully! We will confirm shortly.");
       setIsReservationOpen(false);
-      setReservationForm({ date: "", time: "19:00", partySize: 2, notes: "" });
+      setReservationForm({ date: "", time: "19:00", partySize: 2 });
     } catch (error) {
       console.error("Reservation failed:", error);
       toastError("Failed to submit reservation. Please try again.");

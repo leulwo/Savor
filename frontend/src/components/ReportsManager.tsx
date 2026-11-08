@@ -101,7 +101,7 @@ export default function ReportsManager({
       if (o.status === 'cancelled') return;
       if (o.paymentStatus !== 'completed') return;
       (o.items || []).forEach(item => {
-        const menuItem: any = item.menuItem || item;
+        const menuItem = item.menuItem || item;
         const id = menuItem.id || menuItem.name;
         if (!map[id]) {
           map[id] = {
