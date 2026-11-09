@@ -17,9 +17,22 @@ const env = (import.meta as any).env || {};
 const procEnv = typeof process !== 'undefined' ? process.env : {};
 const configuredAuthDomain = env.VITE_FIREBASE_AUTH_DOMAIN || procEnv.VITE_FIREBASE_AUTH_DOMAIN || '';
 
+// When running on a custom domain (e.g. freshmen.me), use the current host so Google Sign-In
+// popups reflect your branded domain instead of the generic *.firebaseapp.com URL.
+// The backend server transparently reverse-proxies /__/auth/** to Firebase Auth.
+const isCustomDomain = typeof window !== 'undefined'
+  && window.location.hostname !== 'localhost'
+  && window.location.hostname !== '127.0.0.1'
+  && !window.location.hostname.endsWith('.firebaseapp.com')
+  && !window.location.hostname.endsWith('.web.app');
+
+const activeAuthDomain = isCustomDomain
+  ? window.location.host
+  : (configuredAuthDomain || 'project-609a1e43-d22e-44ae-a08.firebaseapp.com');
+
 const firebaseConfig = {
   apiKey: env.VITE_FIREBASE_API_KEY || procEnv.VITE_FIREBASE_API_KEY || '',
-  authDomain: configuredAuthDomain,
+  authDomain: activeAuthDomain,
   projectId: env.VITE_FIREBASE_PROJECT_ID || procEnv.VITE_FIREBASE_PROJECT_ID || procEnv.FIREBASE_PROJECT_ID || '',
   storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || procEnv.VITE_FIREBASE_STORAGE_BUCKET || '',
   messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || procEnv.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
