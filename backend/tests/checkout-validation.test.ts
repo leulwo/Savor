@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chapaPhoneNumber } from "../chapa-phone";
-import { checkoutValidationError, safeCheckoutFailure } from "../checkout-validation";
+import { checkoutValidationError, safeCheckoutFailure, validateOrderCustomerFields } from "../checkout-validation";
 
 test("an unrelated HTTP 400 cannot masquerade as an invalid phone number", () => {
   assert.deepEqual(safeCheckoutFailure(Object.assign(new Error("restaurant unavailable"), { statusCode: 400 })), {
@@ -66,4 +66,44 @@ test("attempt conflicts retain their specific recovery instruction", () => {
   const held = safeCheckoutFailure(checkoutValidationError("PAYMENT_RECONCILIATION_REQUIRED", 409));
   assert.equal(held.code, "PAYMENT_RECONCILIATION_REQUIRED");
   assert.match(held.error, /Do not pay again/);
+});
+
+test("validateOrderCustomerFields rejects non-strings, control characters, oversized values and invalid phones", () => {
+  const validCash = validateOrderCustomerFields({
+    customerName: "  Abebe Bikila ",
+    customerEmail: "abebe@gmail.com",
+    customerPhone: "+251 911 223344",
+    blockNumber: "Block 4",
+    roomNumber: "102",
+    googleMapsAddress: "Bole Road",
+    specialInstructions: "Line 1\nLine 2"
+  }, { chapa: false, fulfillmentType: "delivery" });
+  assert.equal(validCash.customerName, "Abebe Bikila");
+  assert.equal(validCash.customerPhone, "0911223344");
+  assert.equal(validCash.blockNumber, "Block 4");
+
+  const pickup = validateOrderCustomerFields({
+    first_name: "Abebe",
+    last_name: "Bikila",
+    email: "abebe@gmail.com",
+    blockNumber: "Block 4",
+    googleMapsAddress: "Bole Road",
+  }, { chapa: true, fulfillmentType: "pickup" });
+  assert.equal(pickup.blockNumber, "");
+  assert.equal(pickup.googleMapsAddress, "");
+
+  for (const bad of [
+    { customerName: { bad: true }, customerEmail: "a@gmail.com" },
+    { customerName: "A".repeat(121), customerEmail: "a@gmail.com" },
+    { customerName: "Abebe", customerEmail: "a@example.com" },
+    { customerName: "Abebe", customerEmail: "a@gmail.com", specialInstructions: ["array"] },
+    { customerName: "Abebe", customerEmail: "a@gmail.com", specialInstructions: "x".repeat(2001) },
+    { customerName: "Abebe", customerEmail: "a@gmail.com", googleMapsAddress: "x".repeat(1001) },
+    { customerName: "Abebe", customerEmail: "a@gmail.com", blockNumber: { nested: 1 } },
+    { customerName: "Abebe", customerEmail: "a@gmail.com", roomNumber: "x".repeat(121) },
+    { customerName: "Abebe\x00", customerEmail: "a@gmail.com" },
+    { customerName: "Abebe", customerEmail: "a@gmail.com", customerPhone: "not-a-phone" },
+  ]) {
+    assert.throws(() => validateOrderCustomerFields(bad, { chapa: false, fulfillmentType: "delivery" }), (err: any) => err.statusCode === 400);
+  }
 });

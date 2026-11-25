@@ -8,7 +8,7 @@ export const PRIVATE_CACHE_KEYS = [
   'cashOrderClientRequestId', 'chapaReconciliationOrderId',
   'savory_notifications_cache_v2', 'savory_customer_name', 'savory_conversation_id',
   'customer_last_seen_chat_time', 'admin_chat_read_counts', 'admin_last_seen_chat_time',
-  'newsletterAgreed'
+  'newsletterAgreed', 'savory_dev_user', 'savory_cancelled_orders', 'savory_active_order_preview'
 ] as const;
 
 export function clearPrivateBrowserCache(storage: Pick<Storage, 'removeItem' | 'length' | 'key'>): void {

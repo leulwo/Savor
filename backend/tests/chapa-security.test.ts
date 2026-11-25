@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import {
   isChapaCheckoutUrl, paymentMinorUnits, expectedChapaMode, chapaPaymentMatchDiagnostics,
   assertChapaWebhookSignature, readChapaJsonResponse, createChapaVerificationClient,
-  chapaProviderError, assertVerifiedChapaSettlement, isFinalPaymentStatus, buildVerifiedChapaAdjustment, buildChapaAdjustmentReconciliation, assertNewChapaAttemptCapacity, hasConfirmedChapaFailure
+  chapaProviderError, assertVerifiedChapaSettlement, isFinalPaymentStatus, buildVerifiedChapaAdjustment, buildChapaAdjustmentReconciliation, assertNewChapaAttemptCapacity, assertNoActivePendingOrder, hasConfirmedChapaFailure, generateOrderId
 } from "../chapa-security";
 import { createLocalStore } from "../local-store";
 
@@ -159,6 +159,9 @@ test("active checkout capacity includes uncertain/cancel-requested references bu
     await db.doc("orders/active-one").create({ ...pending, paymentAttemptStatus: "ready" });
     await assert.rejects(db.runTransaction(transaction => assertNewChapaAttemptCapacity(transaction, db, uid)), { code: "CHECKOUT_ACTIVE_ATTEMPT_LIMIT", retryAction: "wait" });
     assert.equal(hasConfirmedChapaFailure({ failureDefinitive: true }), false);
+    assert.equal(hasConfirmedChapaFailure({ status: "cancelled" }), false);
+    assert.equal(hasConfirmedChapaFailure({ paymentStatus: "failed" }), false);
+    assert.equal(hasConfirmedChapaFailure({ paymentAttemptStatus: "cancelled" }), false);
     assert.equal(hasConfirmedChapaFailure({ failureDefinitive: true, providerCancelledAt: "then" }), true);
     assert.equal(hasConfirmedChapaFailure({ failureDefinitive: true, providerNotFoundConfirmedAt: "then" }), true);
   } finally { db.close(); }
@@ -177,5 +180,49 @@ test("distinct checkout IDs cannot race past the customer's active checkout cap"
     assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
     assert.equal((await db.collection("orders").get()).size, 1);
     for (const result of results) if (result.status === "rejected") assert.equal(result.reason.code, "CHECKOUT_ACTIVE_ATTEMPT_LIMIT");
+  } finally { db.close(); }
+});
+
+test("generateOrderId emits 10-character unambiguous uppercase IDs", () => {
+  const seen = new Set<string>();
+  for (let i = 0; i < 50; i++) {
+    const id = generateOrderId();
+    assert.match(id, /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{10}$/);
+    seen.add(id);
+  }
+  assert.equal(seen.size, 50);
+});
+
+test("assertNewChapaAttemptCapacity fails closed above 500 pending Chapa records", async () => {
+  const db = createLocalStore(":memory:");
+  const uid = "customer-overflow-cap";
+  try {
+    const batch = db.batch();
+    for (let i = 0; i < 501; i++) {
+      batch.create(db.doc(`orders/ORD-${i}`), {
+        userId: uid, paymentMethod: "chapa", paymentStatus: "pending", status: "cancelled",
+        failureDefinitive: true, providerCancelledAt: "2026-01-01T00:00:00Z"
+      });
+    }
+    await batch.commit();
+    await assert.rejects(
+      db.runTransaction(transaction => assertNewChapaAttemptCapacity(transaction, db, uid)),
+      { code: "CHECKOUT_ACTIVE_ATTEMPT_LIMIT" }
+    );
+  } finally { db.close(); }
+});
+
+test("assertNoActivePendingOrder atomically blocks concurrent cash and online pending orders", async () => {
+  const db = createLocalStore(":memory:");
+  const uid = "customer-single-pending";
+  try {
+    const place = (id: string, method: "cash" | "chapa") => db.runTransaction(async transaction => {
+      await assertNoActivePendingOrder(transaction, db, uid, id);
+      transaction.create(db.doc(`orders/${id}`), { userId: uid, paymentMethod: method, paymentStatus: "pending", status: "pending" });
+    });
+    const results = await Promise.allSettled([place("ORDER00001", "cash"), place("ORDER00002", "chapa")]);
+    assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
+    const rejected = results.find(r => r.status === "rejected") as PromiseRejectedResult;
+    assert.equal(rejected.reason.code, "ACTIVE_PENDING_ORDER_EXISTS");
   } finally { db.close(); }
 });

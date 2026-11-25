@@ -22,6 +22,14 @@ export function safeChapaReceiptUrl(value: unknown): string | undefined {
   return href && new URL(href).hostname === 'chapa.link' ? href : undefined;
 }
 
+export function safeShipdayTrackingUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > 2048) return undefined;
+  const href = safeHttpsUrl(value);
+  if (!href) return undefined;
+  const url = new URL(href);
+  return !url.port && /^(?:[a-z0-9-]+\.)*shipday\.com$/i.test(url.hostname) ? href : undefined;
+}
+
 /** Keep Firebase bearer tokens within the application's own API routes. */
 export function requireApiPath(value: string): string {
   if (typeof value !== 'string' || !value.startsWith('/api/') || /[\u0000-\u0020\u007f\\#]/.test(value)) {

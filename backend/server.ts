@@ -14,16 +14,17 @@ import { createLocalStore } from "./local-store";
 import { initializeLocalData } from "./local-data";
 import { parsePrimaryAdminEmail, syncPrimaryAdmin, resolveLocalStaffPermissions, isPrimaryAdminProtectedPath } from "./primary-admin";
 import { installDatabaseApi, assertMenuWritePermissions } from "./database-api";
+import { assertImageFields } from "./image-security";
 import fs from "fs";
 import { mapChapaFailure, normalizeChapaMessage, safeChapaDiagnostic } from "./chapa-errors";
 import { createChapaCustomization } from "./chapa-payload";
 import { chapaPhoneNumber } from "./chapa-phone";
-import { checkoutValidationError, safeCheckoutFailure } from "./checkout-validation";
+import { checkoutValidationError, safeCheckoutFailure, validateOrderCustomerFields } from "./checkout-validation";
 import { installHttpSecurity, publicOrigin, requestOrigin, validateJsonShape, safeApiError, authenticatedOrderLimit } from "./http-security";
-import { redactServerSecrets, validatedCheckoutSettings, safeAuthRedirect, mergeFirebaseConfiguration } from "./config-security";
+import { redactServerSecrets, validatedCheckoutSettings, safeAuthRedirect, safeAuthUpstreamUrl, sanitizeOrderForCustomer, mergeFirebaseConfiguration } from "./config-security";
 import { buildStaffOrderUpdate } from "./order-security";
 import { acceptCashOrderPromotion, reserveOrderPromotion, completeOrderPromotion, releaseOrderPromotion, promotionCapacity, promotionDiscount } from "./promotion-security";
-import { isChapaCheckoutUrl, assertChapaWebhookSignature, createChapaVerificationClient, chapaPaymentMatchDiagnostics as securePaymentDiagnostics, assertVerifiedChapaSettlement, isFinalPaymentStatus, isChapaAdjustmentStatus, buildChapaAdjustmentReconciliation, assertNewChapaAttemptCapacity, hasConfirmedChapaFailure, readChapaJsonResponse, validPaymentReference, cancelChapaTransaction, generateOrderId } from "./chapa-security";
+import { isChapaCheckoutUrl, assertChapaWebhookSignature, createChapaVerificationClient, chapaPaymentMatchDiagnostics as securePaymentDiagnostics, assertVerifiedChapaSettlement, isFinalPaymentStatus, isChapaAdjustmentStatus, buildChapaAdjustmentReconciliation, assertNewChapaAttemptCapacity, assertNoActivePendingOrder, hasConfirmedChapaFailure, readChapaJsonResponse, validPaymentReference, cancelChapaTransaction, generateOrderId } from "./chapa-security";
 import { createShipdayService, installShipdayRoutes } from "./shipday-security";
 
 const appRoot = process.env.APP_ROOT || (fs.existsSync(path.join(process.cwd(), "frontend")) ? process.cwd() : path.resolve(process.cwd(), ".."));
@@ -107,7 +108,10 @@ app.use("/__/auth", async (req, res) => {
     return res.status(503).send("Firebase authentication is not configured.");
   }
 
-  const upstreamUrl = `https://${upstreamAuthDomain}${req.originalUrl}`;
+  const upstreamUrl = safeAuthUpstreamUrl(req.originalUrl, upstreamAuthDomain);
+  if (!upstreamUrl) {
+    return res.status(400).send("Invalid authentication path.");
+  }
   const forwardedHeaders: Record<string, string> = {};
   if (!["GET", "HEAD", "POST"].includes(req.method)) return res.sendStatus(405);
   for (const [name, value] of Object.entries(req.headers)) {
@@ -128,8 +132,9 @@ app.use("/__/auth", async (req, res) => {
       validateStatus: () => true
     });
 
+    const allowedResponseHeaders = new Set(["content-type", "content-security-policy", "vary", "referrer-policy", "x-frame-options", "x-content-type-options"]);
     for (const [name, value] of Object.entries(upstream.headers)) {
-      if (value === undefined || ["connection", "content-length", "content-encoding", "transfer-encoding", "set-cookie"].includes(name.toLowerCase())) continue;
+      if (value === undefined || !allowedResponseHeaders.has(name.toLowerCase())) continue;
       res.setHeader(name, Array.isArray(value) ? value : String(value));
     }
 
@@ -205,10 +210,6 @@ async function verifyFirebaseToken(req: any): Promise<any | null> {
       const header = String(req.headers?.authorization || "");
       const token = /^Bearer ([^\s]+)$/i.exec(header)?.[1] || String(req.headers?.["x-firebase-token"] || "");
       if (!token || token.length > 16384 || /\s/.test(token)) return null;
-      if (!PRODUCTION && token.startsWith("dev-mock-token:")) {
-        const uid = token.split(":")[1] || "b2Q2gSiZ0EaDf38qgnWOrs2AEoI3";
-        return { uid, email: "leulendale012@gmail.com", email_verified: true, name: "Leul Diner" };
-      }
       return await withinDeadline(getAuth(appFirebase).verifyIdToken(token), Date.now() + 8000, "auth");
     } catch { return null; }
   })();
@@ -373,7 +374,7 @@ function normalizeScheduledFor(scheduledFor: any, prepTimeMinutes: number): stri
 // 0. Category Endpoints
 app.get("/api/categories", async (req, res) => {
   try {
-    const snapshot = await db.collection("categories").get();
+    const snapshot = await db.collection("categories").limit(1000).get();
     const categories = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json(categories);
   } catch (error: any) {
@@ -383,15 +384,22 @@ app.get("/api/categories", async (req, res) => {
 
 app.post("/api/categories", requireStaffAuth, requireStaffPermission("menu.categories"), async (req, res) => {
   try {
-    const { name } = req.body;
-    if (!name) {
+    const rawName = req.body?.name;
+    if (typeof rawName !== "string") {
       return res.status(400).json({ error: "Category name is required." });
     }
+    const name = rawName.trim();
+    if (!name || name.length > 120 || /[\u0000-\u001f\u007f]/.test(name)) {
+      return res.status(400).json({ error: "Category name must be 1 to 120 characters." });
+    }
 
-    const id = name.toLowerCase().replace(/\s+/g, '-');
+    const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 120);
+    if (!id) {
+      return res.status(400).json({ error: "Category name must contain letters or numbers." });
+    }
     await db.collection("categories").doc(id).set({ name });
 
-    const snapshot = await db.collection("categories").get();
+    const snapshot = await db.collection("categories").limit(1000).get();
     const categories = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, categories });
   } catch (error: any) {
@@ -404,7 +412,7 @@ app.delete("/api/categories/:id", requireStaffAuth, requireStaffPermission("menu
     const { id } = req.params;
     await db.collection("categories").doc(id).delete();
 
-    const snapshot = await db.collection("categories").get();
+    const snapshot = await db.collection("categories").limit(1000).get();
     const categories = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, categories });
   } catch (error: any) {
@@ -415,7 +423,7 @@ app.delete("/api/categories/:id", requireStaffAuth, requireStaffPermission("menu
 // 1. Menu Endpoints
 app.get("/api/menu", async (req, res) => {
   try {
-    const snapshot = await db.collection("menu").get();
+    const snapshot = await db.collection("menu").limit(1000).get();
     const menu = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json(menu);
   } catch (error: any) {
@@ -426,23 +434,55 @@ app.get("/api/menu", async (req, res) => {
 app.post("/api/menu", requireStaffAuth, async (req, res) => {
   try {
     const item = req.body;
-    if (!item.name || !item.price || !item.category) {
-      return res.status(400).json({ error: "Name, price, and category are required." });
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return res.status(400).json({ error: "Invalid menu item payload." });
+    }
+    if (Object.keys(item).some(key => key.includes("."))) {
+      return res.status(400).json({ error: "Invalid menu field name." });
+    }
+    const name = typeof item.name === "string" ? item.name.trim() : "";
+    const category = typeof item.category === "string" ? item.category.trim() : "";
+    if (!name || name.length > 200 || /[\u0000-\u001f\u007f]/.test(name)) {
+      return res.status(400).json({ error: "Valid menu item name is required." });
+    }
+    if (!category || category.length > 120 || /[\u0000-\u001f\u007f]/.test(category)) {
+      return res.status(400).json({ error: "Valid menu item category is required." });
+    }
+    if (typeof item.price !== "number" || !Number.isFinite(item.price) || item.price < 0 || item.price > 9_999_999.99) {
+      return res.status(400).json({ error: "Valid menu item price is required." });
+    }
+    if (item.basePrice !== undefined && (typeof item.basePrice !== "number" || !Number.isFinite(item.basePrice) || item.basePrice < 0 || item.basePrice > 9_999_999.99)) {
+      return res.status(400).json({ error: "Invalid base price." });
+    }
+    if (item.description !== undefined && (typeof item.description !== "string" || item.description.length > 5000)) {
+      return res.status(400).json({ error: "Menu item description must be a string up to 5000 characters." });
+    }
+    if (item.id !== undefined && (typeof item.id !== "string" || !/^[A-Za-z0-9_-]{1,120}$/.test(item.id))) {
+      return res.status(400).json({ error: "Invalid menu item identifier." });
+    }
+    if (item.categories !== undefined && (!Array.isArray(item.categories) || item.categories.length > 50 || item.categories.some((c: any) => typeof c !== "string" || c.length > 120))) {
+      return res.status(400).json({ error: "Invalid menu item categories list." });
     }
 
-    const itemId = item.id || Math.random().toString(36).substring(2, 11);
+    const itemId = item.id || crypto.randomBytes(8).toString("hex");
     const newItem = {
       ...item,
       id: itemId,
+      name,
+      category,
       ingredients: item.ingredients || [],
       nutrition: item.nutrition || { protein: "0g", carbs: "0g", fat: "0g" },
       basePrice: item.basePrice !== undefined ? item.basePrice : item.price,
       isActive: item.isActive !== false,
       menuTiming: item.menuTiming || "All Day",
-      categories: item.categories || [item.category],
+      categories: item.categories || [category],
       promoStickers: item.promoStickers || [],
       galleryImages: item.galleryImages || []
     };
+    assertImageFields(newItem, "menu");
+    if (Buffer.byteLength(JSON.stringify(newItem)) > 6 * 1024 * 1024) {
+      return res.status(413).json({ error: "Menu item exceeds maximum allowed size." });
+    }
 
     const itemRef = db.collection("menu").doc(itemId);
     await db.runTransaction(async transaction => {
@@ -453,7 +493,7 @@ app.post("/api/menu", requireStaffAuth, async (req, res) => {
       else transaction.create(itemRef, newItem);
     });
 
-    const snapshot = await db.collection("menu").get();
+    const snapshot = await db.collection("menu").limit(1000).get();
     const menu = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, menu });
   } catch (error: any) {
@@ -466,7 +506,7 @@ app.delete("/api/menu/:id", requireStaffAuth, requireStaffPermission("menu.delet
     const { id } = req.params;
     await db.collection("menu").doc(id).delete();
 
-    const snapshot = await db.collection("menu").get();
+    const snapshot = await db.collection("menu").limit(1000).get();
     const menu = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, menu });
   } catch (error: any) {
@@ -477,7 +517,7 @@ app.delete("/api/menu/:id", requireStaffAuth, requireStaffPermission("menu.delet
 // 2. Order Endpoints
 app.get("/api/orders", requireStaffAuth, requireStaffAnyPermission(["orders.view", "kds.view"]), async (req, res) => {
   try {
-    const snapshot = await db.collection("orders").orderBy("createdAt", "desc").get();
+    const snapshot = await db.collection("orders").orderBy("createdAt", "desc").limit(5000).get();
     const orders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json(orders);
   } catch (error: any) {
@@ -496,31 +536,19 @@ app.post("/api/orders", requireCustomerAuth, customerOrderLimit, async (req, res
     }
 
     if (orderData.paymentMethod && orderData.paymentMethod !== "cash") return res.status(400).json({ error: "Use the online checkout endpoint for Chapa payments." });
-    const rawRequestId = String(orderData.clientRequestId || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
-    const clientRequestId = /^[a-zA-Z0-9_-]{7,80}$/.test(rawRequestId) ? rawRequestId.toUpperCase() : "";
-    const orderId = clientRequestId || generateOrderId();
-
-    // Enforce single pending order rule: customer cannot create a new order if they already have an active pending order
-    const pendingOrdersSnap = await db.collection("orders")
-      .where("userId", "==", res.locals.uid)
-      .where("paymentStatus", "==", "pending")
-      .get();
-    const existingPending = pendingOrdersSnap.docs.find((d: any) => {
-      const o = d.data();
-      return d.id !== orderId && o && o.status !== "cancelled" && o.paymentAttemptStatus !== "cancelled";
-    });
-    if (existingPending) {
-      return res.status(409).json({
-        success: false,
-        code: "ACTIVE_PENDING_ORDER_EXISTS",
-        error: "You already have an order pending payment. Please complete or cancel it before placing a new one.",
-        pendingOrderId: existingPending.id
-      });
+    if (orderData.clientRequestId !== undefined && orderData.clientRequestId !== null && typeof orderData.clientRequestId !== "string") {
+      return res.status(400).json({ error: "Refresh checkout and try again." });
     }
+    const rawRequestId = typeof orderData.clientRequestId === "string" ? orderData.clientRequestId.trim() : "";
+    if (rawRequestId && !/^[A-Za-z0-9_-]{7,80}$/.test(rawRequestId)) {
+      return res.status(400).json({ error: "Refresh checkout and try again." });
+    }
+    const clientRequestId = rawRequestId || crypto.randomUUID();
 
     const nowISO = new Date().toISOString();
     const status = "pending";
     const fulfillmentType = ['delivery', 'pickup', 'dineIn'].includes(orderData.fulfillmentType) ? orderData.fulfillmentType : 'delivery';
+    const customerFields = validateOrderCustomerFields(orderData, { chapa: false, fulfillmentType });
     const checkoutCfg = await getCheckoutSettings(db);
     const prepTimeMinutes = checkoutCfg.prepTimeMinutes || 30;
     const scheduledFor = normalizeScheduledFor(orderData.scheduledFor, prepTimeMinutes);
@@ -540,18 +568,24 @@ app.post("/api/orders", requireCustomerAuth, customerOrderLimit, async (req, res
     // it can only become 'completed' after the Chapa webhook/verification flow.
     const paymentStatus = "pending";
 
+    let orderId = generateOrderId();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (!(await db.collection("orders").doc(orderId).get()).exists) break;
+      orderId = generateOrderId();
+    }
+
     const newOrder = {
       id: orderId,
       items: recomputedItems,
       status: status,
       total: total,
-      customerName: orderData.customerName,
-      customerEmail: orderData.customerEmail,
-      customerPhone: orderData.customerPhone,
-      blockNumber: orderData.blockNumber || "",
-      roomNumber: orderData.roomNumber || "",
-      googleMapsAddress: orderData.googleMapsAddress || "",
-      specialInstructions: orderData.specialInstructions || "",
+      customerName: customerFields.customerName,
+      customerEmail: customerFields.customerEmail,
+      customerPhone: customerFields.customerPhone,
+      blockNumber: customerFields.blockNumber,
+      roomNumber: customerFields.roomNumber,
+      googleMapsAddress: customerFields.googleMapsAddress,
+      specialInstructions: customerFields.specialInstructions,
       paymentMethod: orderData.paymentMethod || "cash",
       paymentStatus: paymentStatus,
       fulfillmentType,
@@ -570,7 +604,7 @@ app.post("/api/orders", requireCustomerAuth, customerOrderLimit, async (req, res
 
     const orderRef = db.collection("orders").doc(orderId);
     const requestRef = db.collection("orderRequests").doc(crypto.createHash("sha256").update(res.locals.uid + ":" + clientRequestId).digest("hex"));
-    const cashRequestHash = crypto.createHash("sha256").update(JSON.stringify({ items: recomputedItems, customerName: orderData.customerName, customerEmail: orderData.customerEmail, customerPhone: orderData.customerPhone, fulfillmentType, scheduledFor, promoCode: newOrder.promoCode, blockNumber: newOrder.blockNumber, roomNumber: newOrder.roomNumber, googleMapsAddress: newOrder.googleMapsAddress, specialInstructions: newOrder.specialInstructions })).digest("hex");
+    const cashRequestHash = crypto.createHash("sha256").update(JSON.stringify({ items: recomputedItems, customerName: newOrder.customerName, customerEmail: newOrder.customerEmail, customerPhone: newOrder.customerPhone, fulfillmentType, scheduledFor, promoCode: newOrder.promoCode, blockNumber: newOrder.blockNumber, roomNumber: newOrder.roomNumber, googleMapsAddress: newOrder.googleMapsAddress, specialInstructions: newOrder.specialInstructions })).digest("hex");
     let finalOrder: any = newOrder;
     await db.runTransaction(async (transaction: any) => {
       const requestSnap = await transaction.get(requestRef);
@@ -584,6 +618,9 @@ app.post("/api/orders", requireCustomerAuth, customerOrderLimit, async (req, res
         finalOrder = { id: existingOrder.id, ...existingOrder.data() };
         return;
       }
+      await assertNoActivePendingOrder(transaction, db, res.locals.uid);
+      const targetSnap = await transaction.get(orderRef);
+      if (targetSnap.exists) throw Object.assign(new Error("Could not allocate order reference. Please retry."), { statusCode: 409, code: "ORDER_ID_COLLISION" });
       const promoFields = await acceptCashOrderPromotion(transaction, db, newOrder);
       transaction.create(orderRef, { ...newOrder, ...promoFields });
       transaction.create(requestRef, { orderId, userId: res.locals.uid, requestHash: cashRequestHash, createdAt: nowISO });
@@ -592,7 +629,12 @@ app.post("/api/orders", requireCustomerAuth, customerOrderLimit, async (req, res
 
     res.json({ success: true, order: finalOrder });
   } catch (error: any) {
-    res.status(error?.statusCode || 500).json({ code: error?.code, error: error?.code === "ORDER_REQUEST_CHANGED" ? error.message : safeCheckoutFailure(error).error });
+    res.status(error?.statusCode || 500).json({
+      success: false,
+      code: error?.code,
+      ...(error?.pendingOrderId ? { pendingOrderId: error.pendingOrderId } : {}),
+      error: error?.code === "ORDER_REQUEST_CHANGED" ? error.message : safeCheckoutFailure(error).error
+    });
   }
 });
 
@@ -603,50 +645,105 @@ app.post("/api/orders/:id/cancel", requireCustomerAuth, async (req, res) => {
   try {
     const now = new Date().toISOString();
     let order: any = null;
+    let handledLocally = false;
     await db.runTransaction(async (transaction: any) => {
       const snapshot = await transaction.get(orderRef);
       if (!snapshot.exists || snapshot.data()?.userId !== res.locals.uid) throw Object.assign(new Error("Order not found."), { statusCode: 404 });
       order = snapshot.data() || {};
       if (isFinalPaymentStatus(order.paymentStatus)) throw Object.assign(new Error("A settled order cannot be cancelled online. Contact the restaurant for help."), { statusCode: 409 });
       if (!['pending', 'cancel_requested', 'cancelled'].includes(order.status)) throw Object.assign(new Error("This order is already being prepared. Contact the restaurant to request a change."), { statusCode: 409 });
+      if (order.paymentMethod !== "chapa" || hasDefinitiveChapaFailure(order)) {
+        handledLocally = true;
+        const promoFields = order.paymentMethod === "chapa" ? await releaseOrderPromotion(transaction, db, order) : {};
+        if (order.status !== "cancelled" || Object.keys(promoFields).length || (order.paymentMethod === "chapa" && (order.paymentStatus !== "failed" || order.paymentAttemptStatus !== "cancelled"))) {
+          transaction.update(orderRef, {
+            ...promoFields,
+            status: "cancelled",
+            ...(order.paymentMethod === "chapa" ? { paymentStatus: "failed", paymentAttemptStatus: "cancelled", failureReason: order.failureReason || "Order cancelled by customer." } : {}),
+            updatedAt: now,
+            ...(order.status !== "cancelled" ? { statusHistory: [...(Array.isArray(order.statusHistory) ? order.statusHistory : []), { status: "cancelled", at: now }] } : {})
+          });
+        }
+        return;
+      }
+      if (order.status !== "cancel_requested") {
+        transaction.update(orderRef, {
+          status: "cancel_requested",
+          cancelRequestedAt: order.cancelRequestedAt || now,
+          updatedAt: now,
+          statusHistory: [...(Array.isArray(order.statusHistory) ? order.statusHistory : []), { status: "cancel_requested", at: now }]
+        });
+      }
     });
 
-    // For online payments, check if the customer already completed payment before cancelling
-    if (order.paymentMethod === "chapa" && order.paymentStatus !== "completed") {
-      try {
-        const verification = await callChapaVerify(id);
-        const payment = verification?.data;
-        if (verifiedPaymentMatchesOrder(payment, order, id)) {
-          await markChapaOrderPaid(orderRef, payment);
-          order = (await orderRef.get()).data() || order;
-          return res.status(409).json({ success: false, code: "ORDER_ALREADY_PAID", error: "This order was already paid and cannot be cancelled online.", order: customerOrderSummary(orderRef.id, order) });
-        }
-      } catch {
-        // Verification failed or unpaid — safe to proceed with cancellation
-      }
+    if (handledLocally) {
+      order = (await orderRef.get()).data() || order;
+      return res.json({ success: true, status: "cancelled", order: customerOrderSummary(orderRef.id, order) });
     }
 
-    // Cancel the order definitively so the user can immediately place a new order
-    await db.runTransaction(async (transaction: any) => {
-      const snapshot = await transaction.get(orderRef);
-      if (!snapshot.exists || isFinalPaymentStatus(snapshot.data()?.paymentStatus)) return;
-      const current = snapshot.data() || {};
-      const promoFields = await releaseOrderPromotion(transaction, db, current);
-      transaction.update(orderRef, {
-        ...promoFields,
-        status: "cancelled",
-        paymentStatus: "failed",
-        paymentAttemptStatus: "cancelled",
-        failureDefinitive: true,
-        providerCancelledAt: now,
-        failureReason: "Order cancelled by customer.",
-        updatedAt: now,
-        statusHistory: [...(Array.isArray(current.statusHistory) ? current.statusHistory : []), { status: "cancelled", at: now }]
-      });
-    });
+    // For uncertain online payments, verify first then cancel with Chapa before releasing capacity.
+    try {
+      const verification = await callChapaVerify(id);
+      const payment = verification?.data;
+      if (verifiedPaymentMatchesOrder(payment, order, id)) {
+        await markChapaOrderPaid(orderRef, payment);
+        order = (await orderRef.get()).data() || order;
+        return res.status(409).json({ success: false, code: "ORDER_ALREADY_PAID", error: "This order was already paid and cannot be cancelled online.", order: customerOrderSummary(orderRef.id, order) });
+      }
+      if (String(verification?.status || "").toLowerCase() === "success" && String(payment?.status || "").toLowerCase() === "success") {
+        await markChapaVerificationConflict(orderRef, "verified_details_mismatch");
+        order = (await orderRef.get()).data() || order;
+        return res.status(409).json({ success: false, code: "PAYMENT_DETAILS_MISMATCH", error: "Chapa reported a payment that needs verification before cancelling.", order: customerOrderSummary(orderRef.id, order) });
+      }
+      try {
+        await cancelChapaTransaction(id, getCleanEnv("CHAPA_SECRET_KEY"));
+        await recordProviderCancellation(orderRef, res.locals.uid);
+      } catch {
+        // Fail closed: keep status=cancel_requested until Chapa confirms cancellation.
+      }
+    } catch (verifyError: any) {
+      if (verifyError?.providerReason === "unpaid" || verifyError?.providerReason === "not_found") {
+        try {
+          await cancelChapaTransaction(id, getCleanEnv("CHAPA_SECRET_KEY"));
+          await recordProviderCancellation(orderRef, res.locals.uid);
+        } catch (cancelError: any) {
+          if (verifyError?.providerReason === "not_found" && cancelError?.providerReason === "not_found" && Number(order.leaseExpiresAt || 0) < Date.now()) {
+            const stampNow = new Date().toISOString();
+            await db.runTransaction(async (transaction: any) => {
+              const snapshot = await transaction.get(orderRef);
+              if (!snapshot.exists || snapshot.data()?.userId !== res.locals.uid || isFinalPaymentStatus(snapshot.data()?.paymentStatus)) return;
+              const current = snapshot.data() || {};
+              if (!["pending", "cancel_requested"].includes(current.status)) return;
+              const promoFields = await releaseOrderPromotion(transaction, db, current);
+              transaction.update(orderRef, {
+                ...promoFields,
+                status: "cancelled",
+                paymentStatus: "failed",
+                paymentAttemptStatus: "cancelled",
+                failureDefinitive: true,
+                providerNotFoundConfirmedAt: stampNow,
+                paymentInitError: false,
+                failureReason: "Chapa confirmed that this payment reference does not exist.",
+                updatedAt: stampNow,
+                statusHistory: [...(Array.isArray(current.statusHistory) ? current.statusHistory : []), { status: "cancelled", at: stampNow }]
+              });
+            });
+          }
+        }
+      }
+      // Transient 5xx/429/network errors keep status=cancel_requested (fail closed).
+    }
 
     order = (await orderRef.get()).data() || order;
-    return res.json({ success: true, status: "cancelled", order: customerOrderSummary(orderRef.id, order) });
+    if (order.status === "cancelled") {
+      return res.json({ success: true, status: "cancelled", order: customerOrderSummary(orderRef.id, order) });
+    }
+    return res.status(202).json({
+      success: true,
+      status: "cancel_requested",
+      error: "Cancellation requested. Confirming expiry with Chapa before releasing this checkout.",
+      order: customerOrderSummary(orderRef.id, order)
+    });
   } catch (error: any) {
     return res.status(error?.statusCode || 500).json({ success: false, code: error?.statusCode === 404 ? "ORDER_NOT_FOUND" : "ORDER_CANCEL_REJECTED", error: error?.statusCode ? error.message : "Could not cancel this order." });
   }
@@ -855,21 +952,32 @@ function hasDefinitiveChapaFailure(order: any): boolean {
 }
 
 function isChapaTerminalFailure(status: unknown, order?: any): boolean {
-  const norm = String(status || "").trim().toLowerCase();
-  if (["failed/cancelled", "cancelled", "canceled", "failed", "declined", "abandoned", "expired"].includes(norm)) return true;
-  if (norm.includes("cancel") || norm.includes("fail")) return true;
-  if (order?.status === "cancelled" || order?.paymentAttemptStatus === "cancelled" || Boolean(order?.providerCancelledAt)) return true;
-  return false;
+  // Failed/cancelled bank attempts can be retried in the same hosted checkout.
+  // Only our acknowledged irreversible provider cancel proves it unpayable.
+  return Boolean(order?.providerCancelledAt) && /^(?:cancelled|canceled)$/.test(String(status || "").trim().toLowerCase());
 }
 
-async function recordProviderCancellation(orderRef: any) {
+async function recordProviderCancellation(orderRef: any, expectedUid?: string) {
   await db.runTransaction(async (transaction: any) => {
     const snapshot = await transaction.get(orderRef);
     if (!snapshot.exists || isFinalPaymentStatus(snapshot.data()?.paymentStatus)) return;
-    const order = snapshot.data();
+    const order = snapshot.data() || {};
+    if (expectedUid && order.userId !== expectedUid) return;
+    if (!["pending", "cancel_requested", "cancelled"].includes(order.status)) return;
     const now = new Date().toISOString();
     const promoFields = await releaseOrderPromotion(transaction, db, order);
-    transaction.update(orderRef, { ...promoFields, status: "cancelled", providerCancelledAt: now, paymentAttemptStatus: "cancelled", failureDefinitive: true, paymentInitError: false, failureReason: "This checkout was cancelled and expired at Chapa.", updatedAt: now, statusHistory: [...(Array.isArray(order.statusHistory) ? order.statusHistory : []), { status: "cancelled", at: now }] });
+    transaction.update(orderRef, {
+      ...promoFields,
+      status: "cancelled",
+      paymentStatus: "failed",
+      providerCancelledAt: now,
+      paymentAttemptStatus: "cancelled",
+      failureDefinitive: true,
+      paymentInitError: false,
+      failureReason: "This checkout was cancelled and expired at Chapa.",
+      updatedAt: now,
+      ...(order.status !== "cancelled" ? { statusHistory: [...(Array.isArray(order.statusHistory) ? order.statusHistory : []), { status: "cancelled", at: now }] } : {})
+    });
   });
 }
 
@@ -1138,19 +1246,25 @@ app.get("/api/chapa/callback", async (req, res) => {
       const orderSnap = await orderRef.get();
       if (orderSnap.exists) {
         const order = orderSnap.data() || {};
-        const verification = await callChapaVerify(txRef);
-        const payment = verification && verification.data;
-        const diagnostic = chapaPaymentMatchDiagnostics(payment, order, txRef, verification?.status);
-        if (await reconcileChapaAdjustment(orderRef, verification, order.paymentVerificationIssue === "payment_adjustment_unconfirmed")) {
-          status = String((await orderRef.get()).data()?.paymentStatus || "pending");
-        } else if (diagnostic.matches) {
-          await markChapaOrderPaid(orderRef, payment);
-          status = "success";
-        } else if (String(verification?.status || "").toLowerCase() === "success" && String(payment?.status || "").toLowerCase() === "success") {
-          await markChapaVerificationConflict(orderRef, "verified_details_mismatch");
-        } else if (isChapaTerminalFailure(payment?.status, order)) {
-          // If customer returns without completing payment, keep status pending so they can resume or cancel explicitly
-          status = "pending";
+        if (!isFinalPaymentStatus(order.paymentStatus) || (order.paymentStatus === "completed" && order.paymentReconciliationRequired === true)) {
+          const verification = await callChapaVerify(txRef);
+          const payment = verification && verification.data;
+          const diagnostic = chapaPaymentMatchDiagnostics(payment, order, txRef, verification?.status);
+          if (await reconcileChapaAdjustment(orderRef, verification, order.paymentVerificationIssue === "payment_adjustment_unconfirmed")) {
+            status = String((await orderRef.get()).data()?.paymentStatus || "pending");
+          } else if (diagnostic.matches) {
+            await markChapaOrderPaid(orderRef, payment);
+            status = "success";
+          } else if (String(verification?.status || "").toLowerCase() === "success" && String(payment?.status || "").toLowerCase() === "success") {
+            await markChapaVerificationConflict(orderRef, "verified_details_mismatch");
+          } else if (isChapaTerminalFailure(payment?.status, order)) {
+            if (String(verification?.status || "").toLowerCase() === "success" && chapaPaymentIdentityMatchesOrder(payment, order, txRef, verification?.status)) {
+              await markChapaAttemptFailed(orderRef, String(payment.status).toLowerCase(), "Chapa confirmed that this checkout did not complete. Your cart is ready for a new payment attempt.", String(payment.reference || payment.ref_id || ""), true);
+              status = "failed";
+            } else {
+              await markChapaVerificationConflict(orderRef, "provider_status_conflict");
+            }
+          }
         }
       }
     } catch (error: any) {
@@ -1191,65 +1305,86 @@ app.post("/api/chapa/initialize", requireCustomerAuth, customerOrderLimit, async
   let claimMs = 0;
   let persistenceMs = 0;
   try {
-    const email = String(body.email || "").trim();
-    const firstName = String(body.first_name || "").trim();
-    const lastName = String(body.last_name || "").trim();
-    if (!firstName || !lastName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.endsWith("@example.com")) {
-    return res.status(400).json({ success: false, code: "CHECKOUT_INVALID_FIELDS", error: "Enter your first name, last name, and a valid email address.", retryAction: "new_reference" });
+    if (body.clientRequestId !== undefined && body.clientRequestId !== null && typeof body.clientRequestId !== "string") {
+      return res.status(400).json({ success: false, code: "INVALID_REQUEST_ID", error: "Refresh checkout and try again.", retryAction: "new_reference" });
     }
-    if (firstName.length > 35 || lastName.length > 35 || email.length > 50) {
-      return res.status(400).json({ success: false, code: "CHECKOUT_INVALID_FIELDS", error: "Keep each name to 35 characters and the email address to 50 characters or fewer.", retryAction: "new_reference" });
-    }
-
-    const secretKey = getCleanEnv("CHAPA_SECRET_KEY");
-    if (!hasConfiguredChapaSecret(secretKey)) {
-    return res.status(503).json({ success: false, code: "CHAPA_NOT_CONFIGURED", error: "Chapa API key is not configured on the server.", retryAction: "wait" });
-    }
-
-    const rawRequestId = String(body.clientRequestId || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
+    const rawRequestId = typeof body.clientRequestId === "string" ? body.clientRequestId.trim() : "";
     if (rawRequestId && !/^[a-zA-Z0-9_-]{7,80}$/.test(rawRequestId)) {
       return res.status(400).json({ success: false, code: "INVALID_REQUEST_ID", error: "Refresh checkout and try again.", retryAction: "new_reference" });
     }
-    txRef = (rawRequestId || generateOrderId()).toUpperCase();
 
     if (body.userId && body.userId !== res.locals.uid) {
       return res.status(403).json({ success: false, code: "AUTH_ACCOUNT_MISMATCH", error: "Checkout account does not match your session.", retryAction: "wait" });
     }
 
-    // Check if the customer has an existing pending order (with a different txRef)
-    const userOrdersSnap = await runStage("active_order_check", () => db.collection("orders").where("userId", "==", res.locals.uid).get());
-    const existingOtherPending = userOrdersSnap.docs.find((d: any) => {
-      const o = d.data();
-      return d.id !== txRef && o && o.paymentStatus === "pending" && o.status !== "cancelled" && o.paymentAttemptStatus !== "cancelled";
-    });
-    if (existingOtherPending) {
-      return res.status(409).json({
+    const fulfillmentType = ["delivery", "pickup", "dineIn"].includes(body.fulfillmentType) ? body.fulfillmentType : "delivery";
+    let validatedFields;
+    try {
+      validatedFields = validateOrderCustomerFields(body, { chapa: true, fulfillmentType });
+    } catch (fieldError: any) {
+      return res.status(fieldError?.statusCode || 400).json({
         success: false,
-        code: "ACTIVE_PENDING_ORDER_EXISTS",
-        error: "You already have an active pending order. Please complete payment or cancel it before starting a new checkout.",
-        pendingOrderId: existingOtherPending.id,
-        retryAction: "wait"
+        code: fieldError?.code || "CHECKOUT_INVALID_FIELDS",
+        error: safeCheckoutFailure(fieldError).error,
+        retryAction: "new_reference"
       });
     }
+    const { firstName, lastName, customerEmail: email, customerPhone, blockNumber, roomNumber, googleMapsAddress, specialInstructions } = validatedFields;
 
-    const customerPhone = chapaPhoneNumber(body.phone_number);
+    const secretKey = getCleanEnv("CHAPA_SECRET_KEY");
+    if (!hasConfiguredChapaSecret(secretKey)) {
+      return res.status(503).json({ success: false, code: "CHAPA_NOT_CONFIGURED", error: "Chapa API key is not configured on the server.", retryAction: "wait" });
+    }
+
+    const idempotencyKey = rawRequestId || crypto.randomUUID();
+    const requestRef = db.collection("orderRequests").doc(crypto.createHash("sha256").update(res.locals.uid + ":chapa:" + idempotencyKey).digest("hex"));
+    const now = new Date().toISOString();
+
+    const existingLookup = await runStage("order_lookup", async () => {
+      const requestSnap = await requestRef.get();
+      if (requestSnap.exists && requestSnap.data()?.userId === res.locals.uid && validPaymentReference(requestSnap.data()?.orderId)) {
+        const mappedId = String(requestSnap.data()!.orderId);
+        const mappedRef = db.collection("orders").doc(mappedId);
+        const mappedSnap = await mappedRef.get();
+        return { resolvedTxRef: mappedId, ref: mappedRef, snap: mappedSnap };
+      }
+      if (rawRequestId) {
+        const legacyRef = db.collection("orders").doc(rawRequestId.toUpperCase());
+        const legacySnap = await legacyRef.get();
+        if (legacySnap.exists && legacySnap.data()?.userId === res.locals.uid) {
+          return { resolvedTxRef: legacySnap.id, ref: legacyRef, snap: legacySnap };
+        }
+      }
+      let freshTxRef = generateOrderId();
+      let freshRef = db.collection("orders").doc(freshTxRef);
+      let freshSnap = await freshRef.get();
+      for (let attempt = 0; attempt < 5 && freshSnap.exists; attempt++) {
+        freshTxRef = generateOrderId();
+        freshRef = db.collection("orders").doc(freshTxRef);
+        freshSnap = await freshRef.get();
+      }
+      return { resolvedTxRef: freshTxRef, ref: freshRef, snap: freshSnap };
+    });
+
+    txRef = existingLookup.resolvedTxRef;
+    orderRef = existingLookup.ref;
+    const existing: any = existingLookup.snap;
+
     const requestHash = crypto.createHash("sha256").update(JSON.stringify({
       items: body.items,
-      fulfillmentType: body.fulfillmentType,
+      fulfillmentType,
       scheduledFor: body.scheduledFor || null,
-      promoCode: body.promoCode || null,
+      promoCode: body.promoCode ? String(body.promoCode).trim().toUpperCase() : null,
       email,
       firstName,
       lastName,
       phone: customerPhone || "",
-      blockNumber: body.blockNumber || "",
-      roomNumber: body.roomNumber || "",
-      googleMapsAddress: body.googleMapsAddress || "",
-      specialInstructions: body.specialInstructions || ""
+      blockNumber,
+      roomNumber,
+      googleMapsAddress,
+      specialInstructions
     })).digest("hex");
-    orderRef = db.collection("orders").doc(txRef);
-    const now = new Date().toISOString();
-    const existing: any = await runStage<any>("order_lookup", () => orderRef.get());
+
     if (existing.exists) {
       order = existing.data() || {};
       if (order.userId !== res.locals.uid) return res.status(404).json({ success: false, code: "PAYMENT_NOT_FOUND", error: "Payment attempt not found." });
@@ -1261,8 +1396,29 @@ app.post("/api/chapa/initialize", requireCustomerAuth, customerOrderLimit, async
         const failure = safeCheckoutFailure(checkoutValidationError(definitive ? "PAYMENT_REQUEST_CHANGED" : "PAYMENT_PREVIOUS_ATTEMPT_OPEN", 409));
         return res.status(409).json({ success: false, ...failure, txRef, retryAction: definitive ? "new_reference" : "wait" });
       }
+      if ((order.status === "cancelled" || order.paymentAttemptStatus === "cancelled" || order.paymentAttemptStatus === "failed") && hasDefinitiveChapaFailure(order)) {
+        const failure = safeCheckoutFailure(checkoutValidationError("PAYMENT_ATTEMPT_ENDED", 409));
+        return res.status(409).json({ success: false, ...failure, txRef, retryAction: "new_reference" });
+      }
       if (isChapaCheckoutUrl(order.chapaCheckoutUrl) && order.paymentStatus === "pending" && order.failureDefinitive !== true && !["cancelled", "cancel_requested"].includes(order.status)) return res.json({ success: true, recovered: true, txRef, checkoutUrl: order.chapaCheckoutUrl, order: customerOrderSummary(txRef, order) });
     } else {
+      // Fast-path pending order check before pricing (enforced atomically inside the claim transaction below).
+      const userOrdersSnap = await runStage("active_order_check", () => db.collection("orders").where("userId", "==", res.locals.uid).where("paymentStatus", "==", "pending").limit(50).get());
+      const existingOtherPending = userOrdersSnap.docs.find((d: any) => {
+        const o = d.data();
+        if (!o || d.id === txRef) return false;
+        return o.paymentMethod === "chapa" ? !hasDefinitiveChapaFailure(o) : (o.status !== "cancelled" && o.paymentAttemptStatus !== "cancelled");
+      });
+      if (existingOtherPending) {
+        return res.status(409).json({
+          success: false,
+          code: "ACTIVE_PENDING_ORDER_EXISTS",
+          error: "You already have an order pending payment. Please complete or cancel it before placing a new one.",
+          pendingOrderId: existingOtherPending.id,
+          retryAction: "wait"
+        });
+      }
+
       const pricingStartedAt = Date.now();
       const pricing = await runStage("pricing", () => calculateChapaOrder(body, (stage, durationMs) => { stageMs[stage] = durationMs; }));
       pricingMs = Date.now() - pricingStartedAt;
@@ -1274,10 +1430,10 @@ app.post("/api/chapa/initialize", requireCustomerAuth, customerOrderLimit, async
         customerName: (firstName + " " + lastName).trim(),
         customerEmail: email,
         customerPhone: customerPhone || "",
-        blockNumber: body.fulfillmentType === "delivery" ? String(body.blockNumber || "") : "",
-        roomNumber: body.fulfillmentType === "delivery" ? String(body.roomNumber || "") : "",
-        googleMapsAddress: body.fulfillmentType === "delivery" ? String(body.googleMapsAddress || "") : "",
-        specialInstructions: String(body.specialInstructions || ""),
+        blockNumber,
+        roomNumber,
+        googleMapsAddress,
+        specialInstructions,
         paymentMethod: "chapa",
         paymentStatus: "pending",
         paymentAttemptStatus: "initializing",
@@ -1324,16 +1480,18 @@ app.post("/api/chapa/initialize", requireCustomerAuth, customerOrderLimit, async
           return;
         }
         if (current.paymentAttemptStatus === "reconciling" || current.paymentAttemptStatus === "initialization_unknown") { claim = { reconciling: true, order: current }; return; }
-        if (current.paymentAttemptStatus === "failed" && hasDefinitiveChapaFailure(current)) throw Object.assign(new Error("This payment attempt was rejected. Start a new payment attempt."), { statusCode: 409, code: "PAYMENT_ATTEMPT_ENDED" });
+        if ((current.status === "cancelled" || current.paymentAttemptStatus === "cancelled" || current.paymentAttemptStatus === "failed") && hasDefinitiveChapaFailure(current)) throw Object.assign(new Error("This payment attempt was rejected. Start a new payment attempt."), { statusCode: 409, code: "PAYMENT_ATTEMPT_ENDED" });
         const promoFields = await reserveOrderPromotion(transaction, db, current);
         const version = (Number(current.attemptVersion) || 0) + 1;
         transaction.update(orderRef, { ...promoFields, paymentAttemptStatus: "initializing", attemptToken, attemptVersion: version, leaseExpiresAt, paymentInitError: false, updatedAt: new Date().toISOString() });
         claim = { order: { ...current, ...promoFields }, version };
       } else {
+        await assertNoActivePendingOrder(transaction, db, res.locals.uid, txRef);
         await assertNewChapaAttemptCapacity(transaction, db, res.locals.uid, txRef);
         const promoFields = await reserveOrderPromotion(transaction, db, order);
         const createdOrder = { ...order, ...promoFields, attemptToken, attemptVersion: 1, leaseExpiresAt, paymentAttemptStatus: "initializing" };
         transaction.create(orderRef, createdOrder);
+        transaction.create(requestRef, { orderId: txRef, userId: res.locals.uid, requestHash, createdAt: now });
         claim = { order: createdOrder, version: 1 };
         order = createdOrder;
       }
@@ -1345,19 +1503,25 @@ app.post("/api/chapa/initialize", requireCustomerAuth, customerOrderLimit, async
       const createdOrder = { ...order, attemptToken, attemptVersion: 1, leaseExpiresAt, paymentAttemptStatus: "initializing" };
       try {
         await runStage("claim", () => db.runTransaction(async (transaction: any) => {
+          const reqSnap = await transaction.get(requestRef);
+          if (reqSnap.exists) throw Object.assign(new Error("Payment attempt already exists."), { code: "already-exists", existingOrderId: reqSnap.data()?.orderId });
           const current = await transaction.get(orderRef);
           if (current.exists) throw Object.assign(new Error("Payment attempt already exists."), { code: "already-exists" });
+          await assertNoActivePendingOrder(transaction, db, res.locals.uid, txRef);
           await assertNewChapaAttemptCapacity(transaction, db, res.locals.uid, txRef);
           const promoFields = await reserveOrderPromotion(transaction, db, createdOrder);
           Object.assign(createdOrder, promoFields);
           transaction.create(orderRef, createdOrder);
+          transaction.create(requestRef, { orderId: txRef, userId: res.locals.uid, requestHash, createdAt: now });
         }));
         claim = { order: createdOrder, version: 1 };
         order = createdOrder;
       } catch (claimError: any) {
         const claimCode = String(claimError?.code || claimError?.statusCode || "").toLowerCase();
-        if (["6", "409", "already_exists", "already-exists"].includes(claimCode)) {
-          return res.status(202).json({ success: false, code: "INITIALIZATION_IN_PROGRESS", error: "We’re checking your payment request. Tap Pay Online again to safely resume.", txRef, retryAction: "wait" });
+        if (["6", "already_exists", "already-exists"].includes(claimCode)) {
+          const mappedId = claimError?.existingOrderId || (await requestRef.get().catch(() => null))?.data()?.orderId;
+          const resolvedRef = validPaymentReference(mappedId) ? mappedId : txRef;
+          return res.status(202).json({ success: false, code: "INITIALIZATION_IN_PROGRESS", error: "We’re checking your payment request. Tap Pay Online again to safely resume.", txRef: resolvedRef, retryAction: "wait" });
         }
         throw claimError;
       }
@@ -1467,7 +1631,7 @@ app.post("/api/chapa/initialize", requireCustomerAuth, customerOrderLimit, async
   } catch (error: any) {
     const timedOut = error && (error.name === "TimeoutError" || error.name === "AbortError");
     const transportError = timedOut || !error?.statusCode;
-    const failedBeforeProvider = !chapaStartedAt && ["auth", "order_lookup", "pricing", "claim"].includes(String(timedOutStage || error?.stage || ""));
+    const failedBeforeProvider = !chapaStartedAt && ["auth", "order_lookup", "active_order_check", "pricing", "claim"].includes(String(timedOutStage || error?.stage || ""));
     const retryAction = error?.retryAction === "wait" ? "wait" : failedBeforeProvider
       ? "same_reference"
       : ["PAYMENT_ATTEMPT_ENDED", "PAYMENT_REQUEST_CHANGED"].includes(String(error?.code || ""))
@@ -1489,10 +1653,25 @@ app.post("/api/chapa/initialize", requireCustomerAuth, customerOrderLimit, async
       : transportError
         ? "We’re checking your payment request. Tap Pay Online again to safely resume."
         : localFailure.error;
-    console.error(JSON.stringify({ event: "chapa_initialize_error", txRef: order?.id || txRef || undefined, attemptVersion: order?.attemptVersion, bodyBytes: checkoutRequest.checkoutBodyBytes, bodyMs: Number(checkoutRequest.checkoutBodyParsedAt || startedAt) - Number(checkoutRequest.checkoutBodyStartedAt || startedAt), timedOutStage: timedOutStage || error?.stage || null, stageMs, authMs: res.locals.authMs, totalMs: Date.now() - startedAt, timedOut: !!timedOut, statusCode, code, errorMessage: error?.message, errorStack: error?.stack }));
+    console.error(JSON.stringify({
+      event: "chapa_initialize_error",
+      txRef: order?.id || txRef || undefined,
+      attemptVersion: order?.attemptVersion,
+      bodyBytes: checkoutRequest.checkoutBodyBytes,
+      bodyMs: Number(checkoutRequest.checkoutBodyParsedAt || startedAt) - Number(checkoutRequest.checkoutBodyStartedAt || startedAt),
+      timedOutStage: timedOutStage || error?.stage || null,
+      stageMs,
+      authMs: res.locals.authMs,
+      totalMs: Date.now() - startedAt,
+      timedOut: !!timedOut,
+      statusCode,
+      code,
+      ...(PRODUCTION ? { errorName: String(error?.name || "Error").slice(0, 64) } : { errorMessage: error?.message, errorStack: error?.stack })
+    }));
     return res.status(statusCode).json({
       success: false,
       code,
+      ...(error?.pendingOrderId ? { pendingOrderId: error.pendingOrderId } : {}),
       txRef: order?.id || txRef || undefined,
       retryAction,
       error: safeError
@@ -1501,12 +1680,23 @@ app.post("/api/chapa/initialize", requireCustomerAuth, customerOrderLimit, async
 });
 
 app.get("/api/chapa/attempt/:txRef", requireCustomerAuth, async (req, res) => {
-  const txRef = String(req.params.txRef || "").trim();
-  if (!/^[a-zA-Z0-9_-]{1,120}$/.test(txRef)) return res.status(400).json({ success: false, code: "INVALID_REFERENCE", error: "Invalid payment reference." });
-  const orderRef = db.collection("orders").doc(txRef);
+  const requestedRef = String(req.params.txRef || "").trim();
+  if (!/^[a-zA-Z0-9_-]{1,120}$/.test(requestedRef)) return res.status(400).json({ success: false, code: "INVALID_REFERENCE", error: "Invalid payment reference." });
+  let txRef = requestedRef;
+  let orderRef = db.collection("orders").doc(txRef);
   try {
-    const snapshot = await orderRef.get();
-    if (!snapshot.exists) return res.status(404).json({ success: false, code: "PAYMENT_NOT_FOUND", error: "No payment record was saved yet. Tap Pay Online again to safely resume this checkout.", txRef, retryAction: "same_reference" });
+    let snapshot = await orderRef.get();
+    if (!snapshot.exists || snapshot.data()?.userId !== res.locals.uid) {
+      const requestRef = db.collection("orderRequests").doc(crypto.createHash("sha256").update(res.locals.uid + ":chapa:" + requestedRef).digest("hex"));
+      const requestSnap = await requestRef.get();
+      const mappedOrderId = requestSnap.exists && requestSnap.data()?.userId === res.locals.uid ? String(requestSnap.data()?.orderId || "") : "";
+      if (mappedOrderId && validPaymentReference(mappedOrderId)) {
+        txRef = mappedOrderId;
+        orderRef = db.collection("orders").doc(txRef);
+        snapshot = await orderRef.get();
+      }
+    }
+    if (!snapshot.exists) return res.status(404).json({ success: false, code: "PAYMENT_NOT_FOUND", error: "No payment record was saved yet. Tap Pay Online again to safely resume this checkout.", txRef: requestedRef, retryAction: "same_reference" });
     if (snapshot.data()?.userId !== res.locals.uid) return res.status(404).json({ success: false, code: "PAYMENT_NOT_FOUND", error: "Payment attempt not found." });
     let order = await recoverLegacyChapaFailure(orderRef, snapshot.data() || {});
     const staleInitialization = order.paymentAttemptStatus === "initializing" && Number(order.leaseExpiresAt || 0) <= Date.now();
@@ -1584,14 +1774,14 @@ app.get("/api/chapa/attempt/:txRef", requireCustomerAuth, async (req, res) => {
 app.get("/api/customer/orders", requireCustomerAuth, async (_req, res) => {
   try {
     const uid = res.locals.uid;
-    const snapshot = await db.collection("orders").where("userId", "==", uid).get();
-    const orders = snapshot.docs.map((docSnap: any) => ({
+    const snapshot = await db.collection("orders").where("userId", "==", uid).limit(500).get();
+    const orders = snapshot.docs.map((docSnap: any) => sanitizeOrderForCustomer({
       id: docSnap.id,
       ...docSnap.data()
     }));
     return res.json({ success: true, orders });
   } catch (error: any) {
-    console.error("[CUSTOMER ORDERS] Failed to fetch customer orders:", error);
+    console.error("[CUSTOMER ORDERS] Failed to fetch customer orders:", error?.code || "database error");
     return res.status(500).json({ success: false, error: "Failed to load orders." });
   }
 });
@@ -1786,21 +1976,6 @@ app.post("/api/business/clear", requireStaffAuth, async (req, res) => {
       return res.status(400).json({ error: "Confirmation phrase is incorrect. Type 'CLEAR MY DATA' exactly." });
     }
 
-    // 1) Pre-log a final audit entry FIRST so there is a record of the wipe.
-    try {
-      await db.collection("audit_log").add({
-        actorEmail: email || "unknown",
-        actorRole: permCtx?.role || "unknown",
-        action: "Cleared business data",
-        category: "settings",
-        targetId: null,
-        details: { scope: "full-nuclear", initiatedBy: email || "unknown" },
-        createdAt: new Date().toISOString()
-      });
-    } catch (e: any) {
-      console.warn("[BUSINESS CLEAR] Could not pre-write audit entry:", e?.message);
-    }
-
     // Preserve the server-configured primary login when clearing business data.
     const counts: Record<string, number> = {};
     for (const name of BUSINESS_COLLECTIONS) {
@@ -1818,6 +1993,21 @@ app.post("/api/business/clear", requireStaffAuth, async (req, res) => {
         console.warn(`[BUSINESS CLEAR] Failed to clear ${name}:`, err?.message);
       }
       counts[name] = removed;
+    }
+
+    // Record the wipe audit entry AFTER clearing collections so the audit trail survives.
+    try {
+      await db.collection("audit_log").add({
+        actorEmail: email || "unknown",
+        actorRole: permCtx?.role || "unknown",
+        action: "Cleared business data",
+        category: "settings",
+        targetId: null,
+        details: { scope: "full-nuclear", initiatedBy: email || "unknown", counts },
+        createdAt: new Date().toISOString()
+      });
+    } catch (e: any) {
+      console.warn("[BUSINESS CLEAR] Could not write post-clear audit entry:", e?.message);
     }
 
     // 3) Reset settings documents to a sensible default so the site keeps
@@ -1854,7 +2044,7 @@ app.post("/api/business/clear", requireStaffAuth, async (req, res) => {
 // Customer Management Endpoints
 app.get("/api/customers", requireStaffAuth, requireStaffPermission("customers.view"), async (req, res) => {
   try {
-    const snapshot = await db.collection("users").get();
+    const snapshot = await db.collection("users").limit(5000).get();
     const customers = snapshot.docs.map(doc => ({ uid: doc.id, id: doc.id, ...doc.data() }));
     res.json(customers);
   } catch (error: any) {
@@ -1865,17 +2055,17 @@ app.get("/api/customers", requireStaffAuth, requireStaffPermission("customers.vi
 // Mailchimp Connection Test Endpoint
 app.get("/api/mailchimp/test", requireStaffAuth, requireStaffPermission("settings.edit"), async (req, res) => {
   try {
-    const apiKey = process.env.MAILCHIMP_API_KEY;
-    const listId = process.env.MAILCHIMP_LIST_ID;
+    const apiKey = getCleanEnv("MAILCHIMP_API_KEY");
+    const listId = getCleanEnv("MAILCHIMP_LIST_ID");
 
-    if (!apiKey || !listId || apiKey === "YOUR_MAILCHIMP_API_KEY") {
+    if (isMissingOrPlaceholderSecret(apiKey) || !listId) {
       return res.status(400).json({
         success: false,
         error: "Mailchimp is not configured in the environment variables."
       });
     }
 
-    const datacenter = apiKey.split("-")[1] || "us1";
+    const datacenter = apiKey.split("-")[1] || "";
     if (!/^us[0-9]{1,3}$/.test(datacenter)) return res.status(400).json({ success: false, error: "Mailchimp configuration is invalid." });
     const mailchimpUrl = `https://${datacenter}.api.mailchimp.com/3.0/lists/${encodeURIComponent(listId)}`;
 
@@ -1887,12 +2077,12 @@ app.get("/api/mailchimp/test", requireStaffAuth, requireStaffPermission("setting
       }
     });
 
-    const data: any = await response.json();
+    const data: any = await readChapaJsonResponse(response);
 
     if (response.ok) {
-      res.json({ success: true, message: `Connected to Mailchimp! List: ${data.name}` });
+      res.json({ success: true, message: `Connected to Mailchimp! List: ${typeof data.name === "string" ? data.name.slice(0, 120) : "Configured"}` });
     } else {
-      res.status(400).json({ success: false, error: data.title || "Mailchimp connection failed" });
+      res.status(400).json({ success: false, error: "Mailchimp connection failed." });
     }
   } catch (error: any) {
     res.status(500).json({ success: false, error: "The integration connection test failed." });

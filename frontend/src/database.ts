@@ -111,7 +111,7 @@ function isPublicPath(path: string): boolean {
   return path === 'menu' || path.startsWith('menu/') ||
          path === 'categories' || path.startsWith('categories/') ||
          path === 'reviews' || path.startsWith('reviews/') ||
-         path === 'settings' || path.startsWith('settings/');
+         path === 'settings/global' || path === 'settings/checkout';
 }
 
 function isPublicBody(body: unknown): boolean {
@@ -152,11 +152,9 @@ export class DatabaseClient {
       } catch {
         if (!isPublic) throw new DatabaseError('AUTH_SESSION_EXPIRED', 'Your sign-in session expired. Sign in again to continue.');
       }
-    } else if (typeof window !== "undefined" && localStorage.getItem("savory_dev_user") === "1") {
-      headers.set('Authorization', 'Bearer dev-mock-token:b2Q2gSiZ0EaDf38qgnWOrs2AEoI3');
     }
     const ensureCurrentUser = () => {
-      if (!isPublic && (this.auth.currentUser?.uid ?? null) !== uid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
+      if ((!isPublic || uid !== null) && (this.auth.currentUser?.uid ?? null) !== uid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
     };
     ensureCurrentUser();
     let response = await fetch(`${this.baseUrl}${path}`, { ...options, headers, redirect: 'error', credentials: 'same-origin', cache: 'no-store' });
@@ -181,11 +179,11 @@ export class DatabaseClient {
       }
       const responseUid = this.auth.currentUser?.uid ?? null;
       const response = await this.authenticatedFetch(path, { method: 'POST', body: JSON.stringify(encode(body)), signal: controller.signal }, isPublic);
-      if (!isPublic && (this.auth.currentUser?.uid ?? null) !== responseUid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
+      if ((!isPublic || responseUid !== null) && (this.auth.currentUser?.uid ?? null) !== responseUid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
       let data: any;
       try { data = await response.json(); }
       catch { throw new DatabaseError('DATABASE_INVALID_RESPONSE', 'The database server returned an unreadable response. Please try again.'); }
-      if (!isPublic && (this.auth.currentUser?.uid ?? null) !== responseUid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
+      if ((!isPublic || responseUid !== null) && (this.auth.currentUser?.uid ?? null) !== responseUid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
       if (!response.ok || data?.success === false) {
         const message = typeof data?.error === 'string' ? data.error : typeof data?.message === 'string' ? data.message : 'The database request could not be completed.';
         throw new DatabaseError(String(data?.code || (response.status === 401 ? 'AUTH_SESSION_EXPIRED' : response.status === 403 ? 'permission-denied' : 'DATABASE_REQUEST_FAILED')), message);
@@ -275,13 +273,20 @@ export class DatabaseClient {
     this.stopAuthWatch = onIdTokenChanged(this.auth, user => {
       const uid = user?.uid ?? null;
       if (uid !== previousUid) {
+        const signedOutOrSwitched = previousUid !== null;
         previousUid = uid;
         this.generation++;
         this.revision = undefined;
         this.subscriptions.forEach(entry => {
-          // Public collections (menu, categories, reviews, settings) are the same for all users;
-          // never wipe them or flash blank when auth state resolves.
-          if (isPublicPath(entry.target.path)) return;
+          // Public catalog collections (menu, categories, reviews) are the same for all users;
+          // settings/* may contain staff-only fields after authentication, so preserve them only on
+          // initial anonymous-to-authenticated hydration and clear them on sign-out or account switch.
+          const path = entry.target.path;
+          const isAlwaysPublic =
+            path === 'menu' || path.startsWith('menu/') ||
+            path === 'categories' || path.startsWith('categories/') ||
+            path === 'reviews' || path.startsWith('reviews/');
+          if (isAlwaysPublic || (!signedOutOrSwitched && isPublicPath(path))) return;
 
           entry.snapshot = undefined;
           entry.fingerprint = undefined;

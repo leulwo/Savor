@@ -1,4 +1,4 @@
-import { CHECKOUT_PHONE_ERROR } from "./chapa-phone";
+import { CHECKOUT_PHONE_ERROR, chapaPhoneNumber } from "./chapa-phone";
 
 /** Customer messages are controlled here; never forward arbitrary Error.message. */
 const checkoutMessages = {
@@ -22,6 +22,7 @@ const checkoutMessages = {
   PAYMENT_PREVIOUS_ATTEMPT_OPEN: "Your previous checkout is still open. Resume or cancel it in My Orders before changing these details.",
   PAYMENT_RECONCILIATION_REQUIRED: "Your payment needs verification. Do not pay again while we check it.",
   CHECKOUT_ACTIVE_ATTEMPT_LIMIT: "You already have open payment requests. Resume or cancel them in My Orders before starting another checkout.",
+  ACTIVE_PENDING_ORDER_EXISTS: "You already have an order pending payment. Please complete or cancel it before placing a new one.",
   PAYMENT_ATTEMPT_ENDED: "This payment attempt has ended. Start a new payment attempt.",
   PAYMENT_ATTEMPT_CHANGED: "Your payment attempt changed while Chapa was responding. Tap Pay Online again to safely resume."
 } as const;
@@ -42,4 +43,59 @@ export function safeCheckoutFailure(error: unknown): { code: string; error: stri
     return { code: "CHECKOUT_INVALID_REQUEST", error: "Review your checkout details and try again." };
   }
   return { code: "CHAPA_INITIALIZE_ERROR", error: "Payment initialization failed. Please retry safely." };
+}
+
+function optionalBoundedString(value: unknown, max: number, allowNewlines = false): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string") throw checkoutValidationError("CHECKOUT_INVALID_FIELDS");
+  const control = allowNewlines ? /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/ : /[\u0000-\u001f\u007f]/;
+  if (control.test(value)) throw checkoutValidationError("CHECKOUT_INVALID_FIELDS");
+  const trimmed = value.trim();
+  if (trimmed.length > max || value.length > max + 64) throw checkoutValidationError("CHECKOUT_INVALID_FIELDS");
+  return trimmed;
+}
+
+export function validateOrderCustomerFields(input: any, options: { chapa?: boolean; fulfillmentType: string }) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw checkoutValidationError("CHECKOUT_INVALID_FIELDS");
+  const delivery = options.fulfillmentType === "delivery";
+  const blockNumber = optionalBoundedString(input.blockNumber, 120);
+  const roomNumber = optionalBoundedString(input.roomNumber, 120);
+  const googleMapsAddress = optionalBoundedString(input.googleMapsAddress, 1000);
+  const specialInstructions = optionalBoundedString(input.specialInstructions, 2000, true);
+
+  let firstName = "";
+  let lastName = "";
+  let customerName = "";
+  let customerEmail = "";
+  let customerPhone = "";
+
+  if (options.chapa) {
+    firstName = optionalBoundedString(input.first_name, 35);
+    lastName = optionalBoundedString(input.last_name, 35);
+    customerEmail = optionalBoundedString(input.email, 50);
+    if (!firstName || !lastName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail) || customerEmail.toLowerCase().endsWith("@example.com")) {
+      throw checkoutValidationError("CHECKOUT_INVALID_FIELDS");
+    }
+    customerName = `${firstName} ${lastName}`.trim();
+    customerPhone = chapaPhoneNumber(input.phone_number) || "";
+  } else {
+    customerName = optionalBoundedString(input.customerName, 120);
+    customerEmail = optionalBoundedString(input.customerEmail, 254);
+    if (!customerName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail) || customerEmail.toLowerCase().endsWith("@example.com")) {
+      throw checkoutValidationError("CHECKOUT_INVALID_FIELDS");
+    }
+    customerPhone = chapaPhoneNumber(input.customerPhone) || "";
+  }
+
+  return {
+    firstName,
+    lastName,
+    customerName,
+    customerEmail,
+    customerPhone,
+    blockNumber: delivery ? blockNumber : "",
+    roomNumber: delivery ? roomNumber : "",
+    googleMapsAddress: delivery ? googleMapsAddress : "",
+    specialInstructions
+  };
 }

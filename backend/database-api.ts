@@ -3,7 +3,7 @@ import type { LocalStore, LocalTransaction } from "./local-store";
 import { isEnvironmentManagedAdmin } from "./primary-admin";
 import { createRevisionWriter } from "./sse-security";
 import { assertImageFields } from "./image-security";
-import { redactServerSecrets, normalizeSettingsFields } from "./config-security";
+import { redactServerSecrets, normalizeSettingsFields, sanitizeOrderForCustomer } from "./config-security";
 
 type Actor = { uid: string; email?: string; email_verified?: boolean; exp?: number };
 type Staff = { role: string; permissions: Record<string, boolean>; disabled?: boolean };
@@ -118,6 +118,9 @@ function sanitizeRead(ctx: Context, collection: string, data: any) {
     const safe = redactServerSecrets(data);
     return permitted(ctx, "settings.view", "settings.edit") ? safe : selectFields(safe, publicSettings);
   }
+  if (collection === "orders" && !permitted(ctx, "orders.view", "kds.view", "reports.view", "reports.export", "analytics.view")) {
+    return sanitizeOrderForCustomer(data);
+  }
   if (collection === "promoCodes" && !permitted(ctx, "promos.view", "promos.manage")) return selectFields(data, customerPromoFields);
   return data;
 }
@@ -199,6 +202,14 @@ async function authorizedWrite(ctx: Context, write: any, previous: any, tx: Loca
       if (child === "notifications") { if (id !== ctx.actor.uid) deny(); return data; }
       stringFields(data, ["uid", "name", "displayName", "email", "phone", "phoneNumber", "block", "room"], 300);
       stringFields(data, ["photoURL", "address", "fcmToken"], 3000);
+      if (!removing) {
+        if (data.savedAddresses !== undefined && (!Array.isArray(data.savedAddresses) || data.savedAddresses.length > 50 || data.savedAddresses.some((entry: any) => typeof entry !== "string" || entry.length > 1000))) {
+          fault(400, "DATABASE_INVALID_REQUEST", "Invalid savedAddresses field.");
+        }
+        if (data.favoriteItems !== undefined && (!Array.isArray(data.favoriteItems) || data.favoriteItems.length > 200 || data.favoriteItems.some((entry: any) => typeof entry !== "string" || entry.length > 128))) {
+          fault(400, "DATABASE_INVALID_REQUEST", "Invalid favoriteItems field.");
+        }
+      }
       if (ctx.staff?.role === "admin") return data;
       if (id !== ctx.actor.uid) deny();
       if (!removing) onlyKeys(data, ["uid", "name", "displayName", "email", "photoURL", "phone", "phoneNumber", "address", "block", "room", "createdAt", "updatedAt", "lastLogin", "fcmToken", "preferences", "savedAddresses", "favoriteItems"]);
@@ -212,7 +223,9 @@ async function authorizedWrite(ctx: Context, write: any, previous: any, tx: Loca
         fault(409, "PRIMARY_ADMIN_MANAGED", "The primary admin role always has full access and cannot be edited.");
       }
       if (id === "admin" && ctx.staff?.role !== "admin") deny();
-      checkRoleGrant(ctx, data); return data;
+      if (ctx.staff?.role !== "admin" && previous) checkRoleGrant(ctx, previous);
+      if (!removing) checkRoleGrant(ctx, data);
+      return data;
     case "admins": {
       if (!permitted(ctx, removing ? "team.remove" : previous ? "roles.edit" : "team.invite")) deny();
       if (id === ctx.primaryAdminEmail || isEnvironmentManagedAdmin(previous)) {
@@ -223,6 +236,10 @@ async function authorizedWrite(ctx: Context, write: any, previous: any, tx: Loca
       }
       if (id !== emailKey(id)) fault(400, "DATABASE_INVALID_REQUEST", "Use a lowercase staff email.");
       if (ctx.staff?.role !== "admin" && (id === emailKey(ctx.actor.email) || previous?.role === "admin")) deny();
+      if (ctx.staff?.role !== "admin" && previous?.role && previous.role !== "admin") {
+        const previousRoleDoc = (await tx.get(db.collection("roles").doc(previous.role))).data();
+        if (previousRoleDoc) checkRoleGrant(ctx, previousRoleDoc);
+      }
       checkRoleGrant(ctx, data);
       const assignedRole = data.role || previous?.role;
       if (!removing && assignedRole && assignedRole !== "admin") {
@@ -278,7 +295,8 @@ async function authorizedWrite(ctx: Context, write: any, previous: any, tx: Loca
     case "chat_messages":
       if (previous || removing) deny();
       onlyKeys(data, ["conversationId", "userId", "role", "text", "createdAt", "isRead", "image", "imageUrl", "metadata", "customerName", "senderName"]);
-      if (typeof data.conversationId !== "string" || !data.conversationId || typeof data.text !== "string" || data.text.length > 20000) fault(400, "DATABASE_INVALID_REQUEST", "Invalid chat message.");
+      if (typeof data.conversationId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(data.conversationId) || typeof data.text !== "string" || data.text.length > 4000) fault(400, "DATABASE_INVALID_REQUEST", "Invalid chat message.");
+      if (data.metadata !== undefined && (!record(data.metadata) || Buffer.byteLength(JSON.stringify(data.metadata)) > 4096)) fault(400, "DATABASE_INVALID_REQUEST", "Invalid chat metadata.");
       if (data.role === "model") {
         if (!permitted(ctx, "chat.reply")) deny();
         const conversation = await tx.get(db.collection("chat_messages").where("conversationId", "==", data.conversationId));
@@ -298,6 +316,12 @@ async function authorizedWrite(ctx: Context, write: any, previous: any, tx: Loca
       data.createdAt = stamp(); return data;
     case "audit_log":
       if (!ctx.staff || previous || removing) deny();
+      onlyKeys(data, ["actorEmail", "actorRole", "action", "category", "targetId", "details", "createdAt"]);
+      stringFields(data, ["action"], 300);
+      stringFields(data, ["category"], 60);
+      stringFields(data, ["targetId"], 200);
+      if (typeof data.action !== "string" || !data.action.trim()) fault(400, "DATABASE_INVALID_REQUEST", "Invalid audit action.");
+      if (data.details !== undefined && data.details !== null && !record(data.details)) fault(400, "DATABASE_INVALID_REQUEST", "Invalid audit details.");
       data.actorEmail = emailKey(ctx.actor.email); data.actorRole = ctx.staff.role; data.createdAt = stamp(); return data;
     default: deny();
   }

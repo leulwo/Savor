@@ -211,3 +211,73 @@ test('changing users discards a former user response and clears cached private s
     unsubscribe();
   } finally { env.dispose(); }
 });
+
+test('sign-out clears cached settings snapshots without flashing menu, and collection(settings) requires auth readiness', async () => {
+  let releaseInFlight;
+  const inFlight = new Promise(resolve => { releaseInFlight = resolve; });
+  let stallSettingsRead = false;
+  let authReadyChecks = 0;
+  const env = setup(async (url, options) => {
+    if (url.endsWith('/events')) return events(options.signal);
+    const body = JSON.parse(options.body);
+    if (body.path === 'settings/global') {
+      if (stallSettingsRead) await inFlight;
+      const authHeader = options.headers.get('Authorization');
+      return json({
+        id: 'global',
+        exists: true,
+        version: authHeader ? 1 : 2,
+        data: authHeader ? { restaurantName: 'Savory', internalFlag: true } : { restaurantName: 'Savory' }
+      });
+    }
+    if (body.path === 'settings') {
+      return json({ docs: [] });
+    }
+    return json({ docs: [{ id: 'dish1', path: 'menu/dish1', version: 1, data: { name: 'Tibs' } }] });
+  }, user('staff'));
+  const origReady = env.auth.authStateReady;
+  env.auth.authStateReady = async () => { authReadyChecks++; return origReady(); };
+
+  try {
+    const settingsSnaps = [];
+    const menuSnaps = [];
+    const unsubSettings = env.api.onSnapshot(env.api.doc(env.db, 'settings', 'global'), snap => {
+      settingsSnaps.push(snap.exists() ? JSON.parse(JSON.stringify(snap.data())) : null);
+    });
+    const unsubMenu = env.api.onSnapshot(env.api.collection(env.db, 'menu'), snap => {
+      menuSnaps.push(snap.docs.map(d => JSON.parse(JSON.stringify(d.data()))));
+    });
+    await sleep(30);
+    assert.deepEqual(settingsSnaps, [{ restaurantName: 'Savory', internalFlag: true }]);
+    assert.deepEqual(menuSnaps, [[{ name: 'Tibs' }]]);
+
+    // Switching away from an authenticated user clears settings/global immediately while keeping menu cached.
+    env.changeUser(null);
+    assert.equal(settingsSnaps.at(-1), null);
+    assert.equal(menuSnaps.length, 1);
+    await sleep(100);
+    assert.deepEqual(settingsSnaps.at(-1), { restaurantName: 'Savory' });
+
+    // Initial anonymous-to-authenticated hydration does not flash settings/global empty.
+    env.changeUser(user('staff'));
+    assert.deepEqual(settingsSnaps.at(-1), { restaurantName: 'Savory' });
+    await sleep(100);
+    assert.deepEqual(settingsSnaps.at(-1), { restaurantName: 'Savory', internalFlag: true });
+
+    // In-flight authenticated read of settings/global rejects if user signs out mid-request.
+    stallSettingsRead = true;
+    const pendingRead = env.api.getDoc(env.api.doc(env.db, 'settings', 'global'));
+    await sleep(10);
+    env.auth.currentUser = null;
+    releaseInFlight();
+    await assert.rejects(pendingRead, error => error.code === 'AUTH_USER_CHANGED');
+
+    // Broad collection('settings') is NOT public and must check authStateReady before querying.
+    const before = authReadyChecks;
+    await env.api.getDocs(env.api.collection(env.db, 'settings'));
+    assert.ok(authReadyChecks > before);
+
+    unsubSettings();
+    unsubMenu();
+  } finally { env.dispose(); }
+});

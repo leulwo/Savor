@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
+import http from "node:http";
 import { createHmac } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs/promises";
@@ -37,7 +38,7 @@ async function availablePort(): Promise<number> {
 }
 
 type VerificationFixture = { body: Record<string, any>; status?: number };
-async function fixture(options: { appUrl?: string; start?: boolean; orders?: Record<string, any>; verification?: Record<string, VerificationFixture> } = {}) {
+async function fixture(options: { appUrl?: string; authDomain?: string; start?: boolean; orders?: Record<string, any>; verification?: Record<string, VerificationFixture> } = {}) {
   const prefix = path.join(os.tmpdir(), "savory-production-security-");
   const root = await fs.mkdtemp(prefix);
   assert.ok(root.startsWith(prefix));
@@ -75,7 +76,7 @@ for (const name of ["node:http", "node:https"]) {
   }
   Object.assign(environment, {
     NODE_ENV: "production", APP_ROOT: root, DATABASE_PATH: databasePath,
-    VITE_FIREBASE_PROJECT_ID: "savory-security-fixture", VITE_FIREBASE_AUTH_DOMAIN: "",
+    VITE_FIREBASE_PROJECT_ID: "savory-security-fixture", VITE_FIREBASE_AUTH_DOMAIN: options.authDomain ?? "",
     PRIMARY_ADMIN_EMAIL: "fixture-owner@restaurant.invalid",
     CHAPA_WEBHOOK_SECRET: syntheticWebhookSecret,
     SHIPDAY_WEBHOOK_TOKEN: "fixture-only-shipday-webhook-value-410923",
@@ -196,13 +197,20 @@ test("real production server rejects unauthorized mutations and forged provider 
   });
 
   await t.test("invalid Firebase credentials cannot authenticate API requests", async () => {
-    for (const headers of [{ authorization: "Bearer definitely-not-a-jwt" }, { "x-firebase-token": "definitely-not-a-jwt" }]) {
+    for (const headers of [
+      { authorization: "Bearer definitely-not-a-jwt" },
+      { "x-firebase-token": "definitely-not-a-jwt" },
+      { authorization: "Bearer dev-mock-token:fixture-customer" },
+      { "x-firebase-token": "dev-mock-token:fixture-customer" },
+    ]) {
       const response = await h.request("/api/orders", { headers });
       assert.equal(response.status, 401);
-      assert.doesNotMatch(await response.text(), /definitely-not-a-jwt|PRIVATE_CUSTOMER/);
+      assert.doesNotMatch(await response.text(), /definitely-not-a-jwt|dev-mock-token|PRIVATE_CUSTOMER/);
     }
-    const response = await h.post("/api/database/query", { path: "orders", kind: "collection" }, { authorization: "Bearer definitely-not-a-jwt" });
-    assert.equal(response.status, 401);
+    for (const token of ["Bearer definitely-not-a-jwt", "Bearer dev-mock-token:fixture-customer"]) {
+      const response = await h.post("/api/database/query", { path: "orders", kind: "collection" }, { authorization: token });
+      assert.equal(response.status, 401);
+    }
   });
 
   await t.test("forged Chapa and Shipday signatures are rejected before settlement", async () => {
@@ -360,4 +368,37 @@ test("real signed adjustment webhooks require provider verification and preserve
   const calls = await h.verificationCalls();
   assert.equal(calls.length, cases.length, "Only exact fixture verification GET requests may run");
   assert.ok(calls.every(call => call.method === "GET" && Object.hasOwn(verification, call.url.slice("https://api.chapa.co/v1/transaction/verify/".length))));
+});
+
+test("source files contain no dev-mock auth backdoor or hardcoded developer email", async () => {
+  const repoRoot = path.resolve(backendRoot, "..");
+  const guardedFiles = [
+    path.join(repoRoot, "backend", "server.ts"),
+    path.join(repoRoot, "frontend", "src", "App.tsx"),
+    path.join(repoRoot, "frontend", "src", "database.ts"),
+    path.join(repoRoot, "frontend", "src", "utils", "authenticatedFetch.ts"),
+  ];
+  for (const filePath of guardedFiles) {
+    const content = await fs.readFile(filePath, "utf8");
+    assert.equal(content.includes("dev-mock-token"), false, `${path.basename(filePath)} must not contain dev-mock-token`);
+    assert.equal(content.includes("leulendale012@gmail.com"), false, `${path.basename(filePath)} must not contain hardcoded email`);
+  }
+});
+
+test("auth reverse proxy rejects traversal paths without contacting upstream", async t => {
+  const h = await fixture({ appUrl: publicOrigin, authDomain: "fixture-auth.firebaseapp.com" });
+  t.after(() => h.close());
+  await h.ready();
+  const port = Number(new URL((await (async () => { const r = await h.request("/health"); await r.body?.cancel(); return r.url; })())).port);
+  for (const target of ["/__/auth/..%2findex.html", "/__/auth/%2e%2e/index.html", "/__/auth/../index.html"]) {
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request({ hostname: "127.0.0.1", port, path: target, method: "GET" }, res => {
+        res.resume();
+        resolve(res.statusCode || 0);
+      });
+      req.on("error", reject);
+      req.end();
+    });
+    assert.equal(status, 400, target);
+  }
 });

@@ -16,11 +16,12 @@ import CustomerManager from "./components/CustomerManager";
 import ReportsManager from "./components/ReportsManager";
 import CommandPalette from "./components/CommandPalette";
 import { Utensils, Settings, LogOut, LayoutDashboard, MessageSquare, CalendarDays, ChefHat, ShoppingBag, Percent, Users, FileText, Search, BarChart3 } from "lucide-react";
-import { auth, authedFetch, completeGoogleSignIn, db, googleSignInErrorMessage, signInWithGoogle } from "./firebase";
+import { auth, authedFetch, completeGoogleSignIn, db, googleSignInErrorMessage, signInWithGoogle, signOut } from "./firebase";
 import { collection, query, where, orderBy, onSnapshot, doc, getDoc, getDocs } from "./database";
 import { PermissionMap, hasPermission } from "./permissions";
-import { onAuthStateChanged, signOut } from "firebase/auth";
+import { onAuthStateChanged } from "firebase/auth";
 import { getRestaurantName } from "./utils/businessName";
+import { normalizeUserProfile } from "./utils/displayData";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -360,7 +361,7 @@ export default function AdminPortal() {
       return;
     }
     const unsubscribe = onSnapshot(collection(db, "users"), (snapshot) => {
-      const usersData = snapshot.docs.map(d => ({ uid: d.id, ...(d.data() as any) })) as UserProfile[];
+      const usersData = snapshot.docs.map(d => normalizeUserProfile(d.data(), d.id));
       setCustomers(usersData);
     }, (err) => {
       console.warn("Users listener unavailable (likely lack of customers.view read access).", err);

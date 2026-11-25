@@ -35,14 +35,21 @@ export default function AdminChat({ can, permissions, currentStaffName = '' }: A
   const [reply, setReply] = useState("");
   const [loading, setLoading] = useState(false);
   const [readCounts, setReadCounts] = useState<Record<string, number>>(() => {
-    const saved = localStorage.getItem("admin_chat_read_counts");
-    return saved ? JSON.parse(saved) : {};
+    try {
+      const saved = localStorage.getItem("admin_chat_read_counts");
+      const parsed = saved ? JSON.parse(saved) : null;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
   });
 
   const canReply = can ? can("chat.reply") : hasPermission(permissions, "chat.reply");
 
   useEffect(() => {
-    localStorage.setItem("admin_chat_read_counts", JSON.stringify(readCounts));
+    try {
+      localStorage.setItem("admin_chat_read_counts", JSON.stringify(readCounts));
+    } catch {}
   }, [readCounts]);
 
   const scrollRef = useRef<HTMLDivElement>(null);

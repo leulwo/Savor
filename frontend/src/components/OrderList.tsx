@@ -13,7 +13,7 @@ import { confirmDialog } from "../notify";
 import { logAudit } from "../utils/auditLogger";
 import { authedFetch } from "../firebase";
 import { getRestaurantName } from "../utils/businessName";
-import { safeHttpsUrl } from "../utils/security";
+import { safeChapaReceiptUrl, safeShipdayTrackingUrl } from "../utils/security";
 import ReceiptQrCode from "./ReceiptQrCode";
 
 interface OrderListProps {
@@ -286,10 +286,10 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
                           {order.roomNumber && <div><span className="text-stone-500">Room:</span> {order.roomNumber}</div>}
                           {order.googleMapsAddress && <div><span className="text-stone-500">Address:</span> {order.googleMapsAddress}</div>}
                         </div>
-                        {order.shipdayTrackingLink && (
+                        {safeShipdayTrackingUrl(order.shipdayTrackingLink) && (
                           <div className="mt-2 pt-2 border-t border-stone-200">
                             <a
-                              href={safeHttpsUrl(order.shipdayTrackingLink)}
+                              href={safeShipdayTrackingUrl(order.shipdayTrackingLink)}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="inline-flex items-center space-x-1.5 text-blue-600 hover:text-blue-800 font-bold uppercase text-[9px] tracking-wider transition-colors"
@@ -524,11 +524,11 @@ export default function OrderList({ orders = [], onOrderUpdated, userRole, can, 
                   <span className="text-stone-500">Method:</span>
                   <span className="font-semibold text-emerald-800 font-sans uppercase">{selectedReceiptOrder.receipt?.paymentMethod || "Online (CBE/Telebirr)"}</span>
                 </div>
-                {selectedReceiptOrder.paymentMethod === "chapa" && (
+                {selectedReceiptOrder.paymentMethod === "chapa" && safeChapaReceiptUrl(`https://chapa.link/payment-receipt/${encodeURIComponent(String(selectedReceiptOrder.receipt?.reference || selectedReceiptOrder.id || ""))}`) && (
                   <div className="flex justify-between items-center text-[11px] pt-1.5 mt-1.5 border-t border-stone-200/40">
                     <span className="text-stone-500 font-medium">Receipt:</span>
                     <a
-                      href={`https://chapa.link/payment-receipt/${selectedReceiptOrder.receipt?.reference || selectedReceiptOrder.id}`}
+                      href={safeChapaReceiptUrl(`https://chapa.link/payment-receipt/${encodeURIComponent(String(selectedReceiptOrder.receipt?.reference || selectedReceiptOrder.id || ""))}`)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="font-bold text-emerald-700 hover:text-emerald-800 underline flex items-center gap-0.5 cursor-pointer"

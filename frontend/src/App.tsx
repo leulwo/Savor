@@ -67,7 +67,7 @@ import { normalizeGalleryImages } from "./utils/galleries";
 import { parseHHMMToMinutes, scheduleAccepts, formatTimeHHMM } from "./utils/schedule";
 import { getRestaurantName } from "./utils/businessName";
 import { getUnavailableCartItems } from "./utils/cartAvailability";
-import { safeChapaCheckoutUrl, safeHttpsUrl } from "./utils/security";
+import { safeChapaCheckoutUrl, safeChapaReceiptUrl, safeHttpsUrl, safeShipdayTrackingUrl } from "./utils/security";
 import { clearPrivateBrowserCache } from "./utils/privateCache";
 import { normalizeUserProfile } from "./utils/displayData";
 // @ts-ignore
@@ -95,10 +95,10 @@ function sanitizeForDatabase<T>(value: T): T {
 
 export function generateOrderId(): string {
   const chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-  const arr = new Uint8Array(7);
+  const arr = new Uint8Array(24);
   crypto.getRandomValues(arr);
   let res = "";
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < 24; i++) {
     res += chars[arr[i] % chars.length];
   }
   return res;
@@ -561,7 +561,7 @@ export function MainApp() {
   }, []);
 
   const syncCustomerOrders = useCallback(async () => {
-    if (!auth.currentUser && localStorage.getItem("savory_dev_user") !== "1") return;
+    if (!auth.currentUser) return;
     try {
       const res = await authedFetch("/api/customer/orders");
       if (res.ok) {
@@ -576,35 +576,46 @@ export function MainApp() {
     }
   }, []);
 
-  const cancelOrderDirectly = useCallback(async (targetId: string) => {
-    markOrderCancelledLocally(targetId);
-    setMyOrders(prev => prev.map(o => o.id === targetId ? { ...o, status: 'cancelled', paymentAttemptStatus: 'cancelled', failureDefinitive: true } : o));
-    if (placedOrder?.id === targetId) setPlacedOrder(null);
-    if (activeOrderId === targetId) {
-      localStorage.removeItem('activeOrderId');
-      setActiveOrderId(null);
-    }
-    localStorage.removeItem('chapaCheckoutUrl');
-    localStorage.removeItem('chapaReconciliationOrderId');
-    localStorage.removeItem('chapaClientRequestId');
-    setChapaCheckoutUrl(null);
-    setOrderActionModal(null);
-
+  const cancelOrderDirectly = useCallback(async (targetId: string): Promise<boolean> => {
     try {
       const response = await authedFetch(`/api/orders/${encodeURIComponent(targetId)}/cancel`, { method: "POST" });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(formatCheckoutError(data));
-      toastSuccess("Order cancelled.");
+      if (!response.ok) {
+        toastError(formatCheckoutError(data));
+        void syncCustomerOrders();
+        return false;
+      }
+      if (data.status === "cancelled") {
+        markOrderCancelledLocally(targetId);
+        setMyOrders(prev => prev.map(o => o.id === targetId ? { ...o, ...(data.order || {}), status: 'cancelled', paymentAttemptStatus: 'cancelled', failureDefinitive: true } : o));
+        if (placedOrder?.id === targetId) setPlacedOrder(null);
+        if (activeOrderId === targetId) {
+          localStorage.removeItem('activeOrderId');
+          setActiveOrderId(null);
+        }
+        localStorage.removeItem('chapaCheckoutUrl');
+        localStorage.removeItem('chapaReconciliationOrderId');
+        localStorage.removeItem('chapaClientRequestId');
+        setChapaCheckoutUrl(null);
+        setOrderActionModal(null);
+        toastSuccess("Order cancelled.");
+        void syncCustomerOrders();
+        return true;
+      }
+      setMyOrders(prev => prev.map(o => o.id === targetId ? { ...o, ...(data.order || {}), status: 'cancel_requested' } : o));
+      setOrderActionModal(null);
+      toastInfo("Cancellation requested with Chapa. Tap Cancel again shortly if it remains pending.");
       void syncCustomerOrders();
+      return false;
     } catch (err) {
       toastError(formatCheckoutError(err));
+      return false;
     }
   }, [markOrderCancelledLocally, placedOrder?.id, activeOrderId, syncCustomerOrders]);
 
   const verifyChapaPayment = useCallback(async (targetId: string, autoPoll = false, referenceQuery = "") => {
     const ownerUid = user?.uid;
-    const isDevMock = typeof window !== "undefined" && localStorage.getItem("savory_dev_user") === "1";
-    if (!targetId || !ownerUid || (!isDevMock && auth.currentUser?.uid !== ownerUid)) {
+    if (!targetId || !ownerUid || auth.currentUser?.uid !== ownerUid) {
       setIsVerifying(false);
       return;
     }
@@ -617,7 +628,7 @@ export function MainApp() {
       let finalOrder: any = null;
       for (const delay of delays) {
         if (delay) await new Promise(resolve => window.setTimeout(resolve, delay));
-        if (!isDevMock && auth.currentUser?.uid !== ownerUid) return;
+        if (auth.currentUser?.uid !== ownerUid) return;
         // If the Firestore snapshot already resolved the payment, stop polling
         const snapshotResolution = paymentResolvedBySnapshotRef.current;
         if (snapshotResolution === 'success') { finalStatus = "completed"; break; }
@@ -625,7 +636,7 @@ export function MainApp() {
         try {
           const response = await authedFetch(`/api/chapa/verify/${encodeURIComponent(targetId)}${delay === 0 ? referenceQuery : ""}`);
           const data = await response.json().catch(() => ({}));
-          if (!isDevMock && auth.currentUser?.uid !== ownerUid) return;
+          if (auth.currentUser?.uid !== ownerUid) return;
           finalOrder = data.order || finalOrder;
           if (finalOrder) {
             setPlacedOrder(finalOrder);
@@ -684,19 +695,10 @@ export function MainApp() {
 
     // Auth Listener
     const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
-      let effectiveUser = currentUser;
-      if (!effectiveUser && (import.meta as any).env.DEV && localStorage.getItem("savory_dev_user") === "1") {
-        effectiveUser = {
-          uid: "b2Q2gSiZ0EaDf38qgnWOrs2AEoI3",
-          displayName: "Leul Diner",
-          email: "leulendale012@gmail.com",
-          photoURL: null,
-          getIdToken: async () => "dev-mock-token:b2Q2gSiZ0EaDf38qgnWOrs2AEoI3"
-        } as any;
-      }
       const previousUid = localStorage.getItem('lastAuthUid');
-      if (previousUid && previousUid !== (effectiveUser?.uid ?? null)) {
+      if (previousUid && previousUid !== (currentUser?.uid ?? null)) {
         clearPrivateBrowserCache(localStorage);
+        setCancelledOrderIds(new Set());
         setCartLoadedFromDb(false);
         setCart([]);
         setUserProfile(null);
@@ -716,17 +718,17 @@ export function MainApp() {
         setUseGoogleMaps(false);
         setSpecialInstructions('');
       }
-      setUser(effectiveUser);
-      if (effectiveUser || !redirectWasPending) {
+      setUser(currentUser);
+      if (currentUser || !redirectWasPending) {
         setAuthLoading(false);
       }
-      if (effectiveUser) {
-        localStorage.setItem("lastAuthUid", effectiveUser.uid);
+      if (currentUser) {
+        localStorage.setItem("lastAuthUid", currentUser.uid);
         if (!localStorage.getItem("lastCheckoutName")) {
-          setCustomerName(effectiveUser.displayName || "");
+          setCustomerName(currentUser.displayName || "");
         }
         if (!localStorage.getItem("lastCheckoutEmail")) {
-          setCustomerEmail(effectiveUser.email || "");
+          setCustomerEmail(currentUser.email || "");
         }
 
         try {
@@ -916,7 +918,7 @@ export function MainApp() {
           setChapaCheckoutUrl(null);
           localStorage.removeItem('chapaCheckoutUrl');
           const receiptUrl = orderData.receipt?.reference
-            ? `https://chapa.link/payment-receipt/${orderData.receipt.reference}`
+            ? safeChapaReceiptUrl(`https://chapa.link/payment-receipt/${encodeURIComponent(String(orderData.receipt.reference))}`)
             : undefined;
           const targetUid = user?.uid || orderData.userId || (typeof window !== "undefined" ? localStorage.getItem("lastAuthUid") : null);
           pushNotification({
@@ -962,11 +964,6 @@ export function MainApp() {
     try {
       await signInWithGoogle();
     } catch (error: any) {
-      if ((import.meta as any).env.DEV) {
-        localStorage.setItem("savory_dev_user", "1");
-        window.location.reload();
-        return;
-      }
       console.error("Login failed", error);
       setLoginError(googleSignInErrorMessage(error));
     } finally {
@@ -1165,7 +1162,6 @@ export function MainApp() {
         },
         async () => {
           await cancelOrderDirectly(pendingSession.id);
-          toastSuccess(`Order #${formatOrderId(pendingSession.id)} cancelled. You can now place your new order.`);
         },
         "Resume & Pay"
       );
@@ -1322,7 +1318,7 @@ export function MainApp() {
                 // A recovered URL is a successful initialize result even though
                 // the original POST may have timed out or returned 504.
                 res = { ok: true, status: 200 } as Response;
-                data = { success: true, txRef, checkoutUrl: attempt.checkoutUrl, order: attempt.order };
+                data = { success: true, txRef: attempt.txRef || attempt.order?.id || txRef, checkoutUrl: attempt.checkoutUrl, order: attempt.order };
                 break;
               }
               if (attempt.retryAction === "new_reference") {
@@ -2702,19 +2698,24 @@ export function MainApp() {
                     <span className="text-stone-500">Method:</span>
                     <span className="font-semibold text-emerald-800 font-sans uppercase">{selectedReceiptOrder.receipt?.paymentMethod || "Online (CBE/Telebirr)"}</span>
                   </div>
-                  {selectedReceiptOrder.paymentMethod === "chapa" && (
-                    <div className="flex justify-between items-center text-[11px] pt-1.5 mt-1.5 border-t border-stone-200/40">
-                      <span className="text-stone-500 font-medium">Receipt:</span>
-                      <a
-                        href={`https://chapa.link/payment-receipt/${selectedReceiptOrder.receipt?.reference || selectedReceiptOrder.id}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="font-bold text-emerald-700 hover:text-emerald-800 underline flex items-center gap-0.5 cursor-pointer"
-                      >
-                        View Receipt <ExternalLink className="h-3 w-3" />
-                      </a>
-                    </div>
-                  )}
+                  {selectedReceiptOrder.paymentMethod === "chapa" && (() => {
+                    const receiptHref = safeChapaReceiptUrl(
+                      `https://chapa.link/payment-receipt/${encodeURIComponent(String(selectedReceiptOrder.receipt?.reference || selectedReceiptOrder.id || ""))}`
+                    );
+                    return receiptHref ? (
+                      <div className="flex justify-between items-center text-[11px] pt-1.5 mt-1.5 border-t border-stone-200/40">
+                        <span className="text-stone-500 font-medium">Receipt:</span>
+                        <a
+                          href={receiptHref}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-bold text-emerald-700 hover:text-emerald-800 underline flex items-center gap-0.5 cursor-pointer"
+                        >
+                          View Receipt <ExternalLink className="h-3 w-3" />
+                        </a>
+                      </div>
+                    ) : null;
+                  })()}
                 </div>
 
                 {/* Customer Info */}
@@ -2965,21 +2966,24 @@ export function MainApp() {
                     </div>
                   </div>
 
-                  {placedOrder?.shipdayTrackingLink && (
-                    <div className="bg-blue-50 border border-blue-100 p-3.5 rounded-2xl flex flex-col items-center">
-                      <Truck className="w-6 h-6 text-blue-600 mb-1.5" />
-                      <h4 className="text-xs font-bold text-blue-900">Track Your Delivery</h4>
-                      <p className="text-[10px] text-blue-600 mb-2.5 text-center">Your order has been dispatched! Track your driver in real-time below.</p>
-                      <a
-                        href={safeHttpsUrl(placedOrder.shipdayTrackingLink)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded-xl text-xs uppercase tracking-wider text-center transition-colors"
-                      >
-                        Open Live Tracker
-                      </a>
-                    </div>
-                  )}
+                  {(() => {
+                    const trackingUrl = safeShipdayTrackingUrl(placedOrder?.shipdayTrackingLink);
+                    return trackingUrl ? (
+                      <div className="bg-blue-50 border border-blue-100 p-3.5 rounded-2xl flex flex-col items-center">
+                        <Truck className="w-6 h-6 text-blue-600 mb-1.5" />
+                        <h4 className="text-xs font-bold text-blue-900">Track Your Delivery</h4>
+                        <p className="text-[10px] text-blue-600 mb-2.5 text-center">Your order has been dispatched! Track your driver in real-time below.</p>
+                        <a
+                          href={trackingUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded-xl text-xs uppercase tracking-wider text-center transition-colors"
+                        >
+                          Open Live Tracker
+                        </a>
+                      </div>
+                    ) : null;
+                  })()}
 
                   <div className="flex flex-col sm:flex-row gap-2.5 pt-2">
                     {placedOrder && (
@@ -3164,13 +3168,16 @@ export function MainApp() {
                           const targetId = activeOrderId || placedOrder?.id;
                           if (!targetId) return;
                           confirmDialog("Are you sure you want to cancel this order?", async () => {
-                            setIsOrderModalOpen(false);
-                            setPaymentVerificationResult(null);
-                            if (placedOrder?.items && placedOrder.items.length > 0) {
-                              setCart(placedOrder.items);
-                              localStorage.setItem("gourmet_cart", JSON.stringify(placedOrder.items));
+                            const itemsToRestore = placedOrder?.items;
+                            const cancelled = await cancelOrderDirectly(targetId);
+                            if (cancelled) {
+                              setIsOrderModalOpen(false);
+                              setPaymentVerificationResult(null);
+                              if (itemsToRestore && itemsToRestore.length > 0) {
+                                setCart(itemsToRestore);
+                                localStorage.setItem("gourmet_cart", JSON.stringify(itemsToRestore));
+                              }
                             }
-                            await cancelOrderDirectly(targetId);
                           }, null, "Cancel Order");
                         }}
                         className="flex-1 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold py-2.5 rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
@@ -3386,20 +3393,23 @@ export function MainApp() {
                                 <span className="font-mono font-bold text-amber-700">{order.total.toFixed(2)} ETB</span>
                               </div>
 
-                              {order.shipdayTrackingLink && (
-                                <div className="pt-2">
-                                  <a
-                                    href={safeHttpsUrl(order.shipdayTrackingLink)}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    onClick={(e) => e.stopPropagation()}
-                                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded-lg text-[10px] uppercase tracking-wider text-center transition-colors flex items-center justify-center space-x-2"
-                                  >
-                                    <Truck className="w-3.5 h-3.5" />
-                                    <span>Track Delivery</span>
-                                  </a>
-                                </div>
-                              )}
+                              {(() => {
+                                const trackingUrl = safeShipdayTrackingUrl(order.shipdayTrackingLink);
+                                return trackingUrl ? (
+                                  <div className="pt-2">
+                                    <a
+                                      href={trackingUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded-lg text-[10px] uppercase tracking-wider text-center transition-colors flex items-center justify-center space-x-2"
+                                    >
+                                      <Truck className="w-3.5 h-3.5" />
+                                      <span>Track Delivery</span>
+                                    </a>
+                                  </div>
+                                ) : null;
+                              })()}
                             </div>
                           );
                         })}

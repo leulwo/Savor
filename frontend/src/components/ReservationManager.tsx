@@ -124,16 +124,25 @@ export default function ReservationManager({ can, permissions }: ReservationMana
                 )}
 
                 <div className="flex flex-wrap gap-y-2 gap-x-4 text-xs text-stone-500 mt-2">
-                  <div className="flex items-center space-x-1.5">
-                    <Mail className="w-3.5 h-3.5 text-stone-400" />
-                    <a href={`mailto:${res.customerEmail}`} className="hover:text-amber-600 underline">{res.customerEmail}</a>
-                  </div>
-                  {res.customerPhone && (
+                  {res.customerEmail && (
                     <div className="flex items-center space-x-1.5">
-                      <Phone className="w-3.5 h-3.5 text-stone-400" />
-                      <a href={`tel:${res.customerPhone}`} className="hover:text-amber-600 underline">{res.customerPhone}</a>
+                      <Mail className="w-3.5 h-3.5 text-stone-400" />
+                      <a href={`mailto:${encodeURIComponent(res.customerEmail)}`} className="hover:text-amber-600 underline">{res.customerEmail}</a>
                     </div>
                   )}
+                  {res.customerPhone && (() => {
+                    const sanitizedPhone = res.customerPhone.replace(/[^+\d]/g, "");
+                    return (
+                      <div className="flex items-center space-x-1.5">
+                        <Phone className="w-3.5 h-3.5 text-stone-400" />
+                        {sanitizedPhone ? (
+                          <a href={`tel:${sanitizedPhone}`} className="hover:text-amber-600 underline">{res.customerPhone}</a>
+                        ) : (
+                          <span>{res.customerPhone}</span>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {res.userId && (
                     <div className="flex items-center space-x-1.5 text-amber-600">
                       <User className="w-3.5 h-3.5" />

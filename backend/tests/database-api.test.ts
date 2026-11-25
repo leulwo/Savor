@@ -524,7 +524,7 @@ test("SSE announces revisions without broadcasting private records", async () =>
           assert.equal(frame.includes("VERY-PRIVATE-SSE-MARKER"), false);
           assert.equal(frame.includes("PRIVATE-ADDRESS"), false);
           assert.equal(frame.includes("orders/"), false);
-          const payload = frame.split(/\r?\n/).find(line => line.startsWith("data:"));
+      const payload = frame.split(/\r?\n/).find(line => line.startsWith("data:"));
           if (!payload) continue;
           const data = JSON.parse(payload.slice(5).trim());
           assert.deepEqual(Object.keys(data), ["revision"]);
@@ -537,5 +537,42 @@ test("SSE announces revisions without broadcasting private records", async () =>
       controller.abort();
       await reader?.cancel().catch(() => {});
     }
+  });
+});
+
+test("non-admin role managers cannot edit or delete higher-privileged roles or staff", async () => {
+  await withHarness(async api => {
+    await api.db.doc("roles/elevated").set({ name: "Elevated", permissions: { "settings.edit": true, "orders.view": true } });
+    await api.db.doc("admins/elevated@example.com").set({ email: "elevated@example.com", role: "elevated", active: true });
+    assert.equal((await api.commit([{ type: "update", path: "roles/elevated", data: { name: "Downgraded" } }], "manager")).status, 403);
+    assert.equal((await api.commit([{ type: "delete", path: "roles/elevated" }], "manager")).status, 403);
+    assert.equal((await api.commit([{ type: "update", path: "admins/elevated@example.com", data: { disabled: true } }], "manager")).status, 403);
+    assert.equal((await api.db.doc("roles/elevated").get()).exists, true);
+    assert.equal((await api.db.doc("admins/elevated@example.com").get()).get("disabled"), undefined);
+  });
+});
+
+test("audit_log and chat_messages enforce strict payload validation", async () => {
+  await withHarness(async api => {
+    assert.equal((await api.commit([{ type: "set", path: "audit_log/bad1", data: { action: { bad: true } } }], "staff")).status, 400);
+    assert.equal((await api.commit([{ type: "set", path: "audit_log/bad2", data: { action: "OK", unknownKey: 1 } }], "staff")).status, 403);
+    assert.equal((await api.commit([{ type: "set", path: "audit_log/ok", data: { action: "Updated item", category: "menu", details: { id: "dish" } } }], "staff")).status, 200);
+    assert.equal((await api.commit([{ type: "set", path: "chat_messages/bad-conv", data: { userId: "user-a", conversationId: "../bad", role: "user", text: "Hi" } }], "customer")).status, 400);
+    assert.equal((await api.commit([{ type: "set", path: "chat_messages/bad-text", data: { userId: "user-a", conversationId: "conversation-a", role: "user", text: "x".repeat(4001) } }], "customer")).status, 400);
+  });
+});
+
+test("customer order reads redact internal backend tokens while staff retain order state", async () => {
+  await withHarness(async api => {
+    await api.db.doc("orders/own").update({ attemptToken: "INTERNAL-ATTEMPT-SECRET", shipdayDispatchToken: "INTERNAL-SHIPDAY-SECRET", paymentRequestHash: "INTERNAL-HASH" });
+    const ownDoc = await api.query("orders/own", "customer", [], "document");
+    assert.equal(ownDoc.status, 200);
+    assert.equal(ownDoc.body.data.attemptToken, undefined);
+    assert.equal(ownDoc.body.data.shipdayDispatchToken, undefined);
+    assert.equal(ownDoc.body.data.paymentRequestHash, undefined);
+    const ownQuery = await api.query("orders", "customer", [{ field: "userId", op: "==", value: "user-a" }]);
+    assert.equal(ownQuery.status, 200);
+    assert.equal(ownQuery.body.docs[0].data.attemptToken, undefined);
+    assert.equal(ownQuery.body.docs[0].data.shipdayDispatchToken, undefined);
   });
 });

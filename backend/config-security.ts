@@ -18,6 +18,37 @@ export function safeAuthRedirect(value: string, upstreamOrigin: string, appOrigi
   } catch { return null; }
 }
 
+export function safeAuthUpstreamUrl(originalUrl: string, upstreamAuthDomain: string): string | null {
+  if (!/^[a-z0-9][a-z0-9-]*\.(?:firebaseapp\.com|web\.app)$/i.test(upstreamAuthDomain)) return null;
+  if (typeof originalUrl !== "string" || /[\u0000-\u0020\u007f\\]/.test(originalUrl)) return null;
+  const [rawPath] = originalUrl.split(/[?#]/);
+  if (!rawPath || /\.\.|%2e|%2f|%5c/i.test(rawPath)) return null;
+  if (!(rawPath === "/__/auth" || rawPath.startsWith("/__/auth/"))) return null;
+  try {
+    const upstreamOrigin = `https://${upstreamAuthDomain}`;
+    const parsed = new URL(originalUrl, upstreamOrigin);
+    if (parsed.origin !== upstreamOrigin) return null;
+    if (!(parsed.pathname === "/__/auth" || parsed.pathname.startsWith("/__/auth/")) || parsed.pathname.includes("..")) return null;
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
+const INTERNAL_ORDER_FIELDS = new Set([
+  "attemptToken",
+  "shipdayDispatchToken",
+  "paymentRequestHash",
+  "leaseExpiresAt",
+  "reconciliationNotFoundChecks",
+  "lastReconciliationNotFoundAt"
+]);
+
+export function sanitizeOrderForCustomer(order: any): any {
+  if (!order || typeof order !== "object" || Array.isArray(order)) return order;
+  return Object.fromEntries(Object.entries(order).filter(([key]) => !INTERNAL_ORDER_FIELDS.has(key)));
+}
+
 export function mergeFirebaseConfiguration(file: Record<string, any>, environment: Record<string, any>): Record<string, any> {
   return { ...file, ...Object.fromEntries(Object.entries(environment).filter(([, value]) => value !== undefined && value !== "")) };
 }

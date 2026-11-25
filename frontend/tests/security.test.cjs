@@ -31,6 +31,24 @@ test('external receipt and tracking links cannot execute JavaScript', () => {
   for (const value of ['javascript:alert(1)', 'https://chapa.link.evil.example/test', 'https://evil.example/test']) assert.equal(security.safeChapaReceiptUrl(value), undefined);
 });
 
+test('Shipday tracking links accept only HTTPS *.shipday.com URLs without custom ports', () => {
+  assert.equal(security.safeShipdayTrackingUrl('https://track.shipday.com/trackingPage?id=abc'), 'https://track.shipday.com/trackingPage?id=abc');
+  assert.equal(security.safeShipdayTrackingUrl('https://shipday.com/track/123'), 'https://shipday.com/track/123');
+  for (const value of [
+    null,
+    {},
+    'https://evil.example/track',
+    'https://shipday.com.evil.example/track',
+    'https://evilshipday.com/track',
+    'https://track.shipday.com:8443/track',
+    'http://track.shipday.com/track',
+    'javascript:alert(1)',
+    'https://track.shipday.com/' + 'x'.repeat(2048)
+  ]) {
+    assert.equal(security.safeShipdayTrackingUrl(value), undefined, String(value));
+  }
+});
+
 test('authenticated API paths reject cross-origin and normalized traversal destinations', () => {
   assert.equal(security.requireApiPath('/api/chapa/attempt/PAY-123?ref=test'), '/api/chapa/attempt/PAY-123?ref=test');
   for (const value of ['https://evil.example/api/test', '//evil.example/api/test', '/api/../../other', '/api/%2e%2e/%2e%2e/other', '/api\\evil.example', '/other', '/api/test#fragment', '/api/\ntest']) {
@@ -80,6 +98,20 @@ test('public requests cannot inherit an Authorization header from a previous ses
   let authorization;
   const env = authFetchSetup(async (url, options) => { authorization = options.headers.get('Authorization'); return new Response('{}'); }, null);
   await env.request('/api/settings', { headers: { Authorization: 'Bearer previous-account' } });
+  assert.equal(authorization, null);
+});
+
+test('authenticated fetch never attaches a dev-mock token when signed out even if savory_dev_user is set', async () => {
+  let authorization = 'unexpected';
+  const auth = { currentUser: null, authStateReady: async () => {} };
+  const { createAuthenticatedFetch } = load('src/utils/authenticatedFetch.ts', {
+    window: { localStorage: { getItem: key => key === 'savory_dev_user' ? '1' : null } }
+  }, { './security': security });
+  const request = createAuthenticatedFetch(auth, async (url, options) => {
+    authorization = options.headers.get('Authorization');
+    return new Response('{}');
+  });
+  await request('/api/orders');
   assert.equal(authorization, null);
 });
 
@@ -135,7 +167,7 @@ test('generated Excel workbooks round-trip formula-leading names as literal stri
 
 test('sign-out clears customer contact, address, cart, order, chat, and notification caches', () => {
   const { clearPrivateBrowserCache, notificationCacheKey } = load('src/utils/privateCache.ts');
-  const values = new Map([['lastAuthUid', 'old'], ['lastCheckoutAddress', 'private address'], ['gourmet_cart', 'private cart'], ['activeOrderId', 'PAY-old'], ['savory_customer_name', 'Private name'], [notificationCacheKey('old'), 'private notifications'], ['theme', 'dark']]);
+  const values = new Map([['lastAuthUid', 'old'], ['lastCheckoutAddress', 'private address'], ['gourmet_cart', 'private cart'], ['activeOrderId', 'PAY-old'], ['savory_customer_name', 'Private name'], ['savory_cancelled_orders', '["ORD-1"]'], ['savory_active_order_preview', '{"id":"ORD-1"}'], ['savory_dev_user', '1'], [notificationCacheKey('old'), 'private notifications'], ['theme', 'dark']]);
   const storage = { get length() { return values.size; }, key: index => [...values.keys()][index], removeItem: key => values.delete(key) };
   clearPrivateBrowserCache(storage);
   assert.deepEqual([...values.keys()], ['theme']);
@@ -188,6 +220,7 @@ test('receipt QR rendering stays local and login never silently reseeds role per
   assert.equal(orders.includes('api.qrserver.com'), false);
   assert.equal(qr.includes('toCanvas(canvas.current, value'), true);
   assert.equal(admin.includes('seedDefaultRoles'), false);
+  assert.equal(/import\s*\{[^}]*\bsignOut\b[^}]*\}\s*from\s*['"]firebase\/auth['"]/.test(admin), false);
   const qrData = require('qrcode').create(JSON.stringify({ orderId: 'SECURITY-TEST', total: '12.50 ETB' }), { errorCorrectionLevel: 'M' });
   assert.ok(qrData.modules.size > 0);
 });

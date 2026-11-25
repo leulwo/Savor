@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { redactServerSecrets, validatedCheckoutSettings, normalizeSettingsFields, safeAuthRedirect, mergeFirebaseConfiguration } from "../config-security";
+import { redactServerSecrets, validatedCheckoutSettings, normalizeSettingsFields, safeAuthRedirect, safeAuthUpstreamUrl, sanitizeOrderForCustomer, mergeFirebaseConfiguration } from "../config-security";
 
 test("browser settings and exports omit nested legacy server credentials", () => {
   const original = { restaurantName: "Test", shipdayApiKey: "private", chapa_secret: "private", integration: { apiKey: "private", refreshToken: "private", enabled: true }, rows: [{ password: "private", name: "Keep" }] };
@@ -40,4 +40,28 @@ test("checkout settings use bounded finite primitives and retain partial updates
   for (const value of [{ serviceTaxPercent: -1 }, { serviceTaxPercent: Infinity }, { flatFeeETB: [] }, { isOpen: "false" }, { openTime: "12:99" }, { closeTime: {} }, { shipdayApiKey: "private" }, { shipdayPickupMinutes: 1.5 }]) {
     assert.throws(() => validatedCheckoutSettings(value), (error: any) => error.statusCode === 400);
   }
+});
+
+test("safeAuthUpstreamUrl accepts only normalized /__/auth paths on valid Firebase domains", () => {
+  assert.equal(safeAuthUpstreamUrl("/__/auth/handler?state=abc", "fixture.firebaseapp.com"), "https://fixture.firebaseapp.com/__/auth/handler?state=abc");
+  assert.equal(safeAuthUpstreamUrl("/__/auth/iframe", "fixture.web.app"), "https://fixture.web.app/__/auth/iframe");
+  for (const bad of ["/__/auth/..%2findex.html", "/__/auth/%2e%2e/index.html", "/__/auth\\handler", "/__/auth/handler/../secret", "//evil.example/__/auth/handler", "/api/orders", "/__/authEvil"]) {
+    assert.equal(safeAuthUpstreamUrl(bad, "fixture.firebaseapp.com"), null, bad);
+  }
+  assert.equal(safeAuthUpstreamUrl("/__/auth/handler", "evil.example"), null);
+});
+
+test("sanitizeOrderForCustomer strips internal tokens while keeping order fields", () => {
+  const cleaned = sanitizeOrderForCustomer({
+    id: "ORD123",
+    total: 100,
+    status: "pending",
+    attemptToken: "secret-attempt-token",
+    shipdayDispatchToken: "secret-shipday-token",
+    paymentRequestHash: "hash-val",
+    leaseExpiresAt: 12345,
+    reconciliationNotFoundChecks: 2,
+    lastReconciliationNotFoundAt: 12345
+  });
+  assert.deepEqual(cleaned, { id: "ORD123", total: 100, status: "pending" });
 });

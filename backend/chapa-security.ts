@@ -9,12 +9,12 @@ export function validPaymentReference(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9_-]{7,120}$/.test(value);
 }
 
-/** 7 uppercase alphanumeric characters (unambiguous, clean, Chapa-compatible) */
+/** 10 uppercase alphanumeric characters (~50 bits CSPRNG, unambiguous, Chapa-compatible) */
 export function generateOrderId(): string {
   const chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-  const bytes = crypto.randomBytes(7);
+  const bytes = crypto.randomBytes(10);
   let id = "";
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < 10; i++) {
     id += chars[bytes[i] % chars.length];
   }
   return id;
@@ -62,20 +62,38 @@ export function isChapaAdjustmentStatus(value: unknown): value is "refunded" | "
 }
 
 export function hasConfirmedChapaFailure(order: any): boolean {
-  if (!order) return true;
-  if (order.status === "cancelled" || order.paymentAttemptStatus === "cancelled" || order.paymentStatus === "failed") return true;
-  return order.failureDefinitive === true && Boolean(order.initializationRejectedAt || order.providerCancelledAt || order.providerNotFoundConfirmedAt);
+  return order?.failureDefinitive === true && Boolean(order.initializationRejectedAt || order.providerCancelledAt || order.providerNotFoundConfirmedAt);
 }
 
 /** Read and create inside the same transaction to close distinct-ID races. */
 export async function assertNewChapaAttemptCapacity(transaction: any, db: any, uid: string, currentTxRef?: string): Promise<void> {
-  const pending = await transaction.get(db.collection("orders").where("userId", "==", uid).where("paymentMethod", "==", "chapa").where("paymentStatus", "==", "pending").limit(50));
+  const pending = await transaction.get(db.collection("orders").where("userId", "==", uid).where("paymentMethod", "==", "chapa").where("paymentStatus", "==", "pending").limit(501));
   const unresolved = pending.docs.filter((document: any) => {
     if (currentTxRef && document.id === currentTxRef) return false;
     return !hasConfirmedChapaFailure(document.data());
   });
-  if (unresolved.length >= 1) {
+  if (pending.size > 500 || unresolved.length >= 1) {
     throw Object.assign(new Error("You already have an order pending payment. Resume or cancel it before starting another checkout."), { statusCode: 409, code: "CHECKOUT_ACTIVE_ATTEMPT_LIMIT", retryAction: "wait" });
+  }
+}
+
+/** Enforce single unresolved pending order (cash or online) transactionally. */
+export async function assertNoActivePendingOrder(transaction: any, db: any, uid: string, excludeOrderId?: string): Promise<void> {
+  const pending = await transaction.get(db.collection("orders").where("userId", "==", uid).where("paymentStatus", "==", "pending").limit(501));
+  const active = pending.docs.filter((document: any) => {
+    if (excludeOrderId && document.id === excludeOrderId) return false;
+    const order = document.data();
+    if (!order) return false;
+    if (order.paymentMethod === "chapa") return !hasConfirmedChapaFailure(order);
+    return order.status !== "cancelled" && order.paymentAttemptStatus !== "cancelled";
+  });
+  if (pending.size > 500 || active.length >= 1) {
+    throw Object.assign(new Error("You already have an order pending payment. Please complete or cancel it before placing a new one."), {
+      statusCode: 409,
+      code: "ACTIVE_PENDING_ORDER_EXISTS",
+      ...(active[0]?.id ? { pendingOrderId: active[0].id } : {}),
+      retryAction: "wait"
+    });
   }
 }
 
