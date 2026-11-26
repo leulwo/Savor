@@ -18,6 +18,7 @@ async function harness(options: { production?: boolean; proxyCidrs?: string } = 
     app.post(route, (_req, res) => res.json({ accepted: true }));
   }
   app.get("/__/auth/handler", (_req, res) => res.send("<html><body>Official authentication helper placeholder</body></html>"));
+  app.get("/__/auth/iframe", (_req, res) => res.send("<html><body>Official authentication iframe placeholder</body></html>"));
   app.get("/api/throw", (_req, _res, next) => next(Object.assign(new Error("PRIVATE_TOKEN_CUSTOMER_ADDRESS /host/secret.env"), { detail: "PRIVATE_PROVIDER_BODY" })));
   app.use(safeApiError);
   const server = await new Promise<Server>(resolve => {
@@ -119,9 +120,16 @@ test("production headers harden content while preserving Google OAuth popup comp
     assert.doesNotMatch(csp.match(/script-src [^;]*/)?.[0] || "", /'unsafe-inline'|'unsafe-eval'/);
     const helper = await h.request("/__/auth/handler");
     assert.equal(helper.status, 200);
+    assert.equal(helper.headers.get("x-frame-options"), "SAMEORIGIN");
     assert.equal(helper.headers.get("content-security-policy"), null);
     assert.equal(helper.headers.get("cross-origin-opener-policy"), "same-origin-allow-popups");
     assert.match(helper.headers.get("cache-control") || "", /no-store/);
+    const iframe = await h.request("/__/auth/iframe");
+    assert.equal(iframe.status, 200);
+    assert.equal(iframe.headers.get("x-frame-options"), null);
+    assert.equal(iframe.headers.get("content-security-policy"), "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*");
+    assert.equal(iframe.headers.get("cross-origin-opener-policy"), "same-origin-allow-popups");
+    assert.match(iframe.headers.get("cache-control") || "", /no-store/);
   } finally { await h.close(); }
 });
 

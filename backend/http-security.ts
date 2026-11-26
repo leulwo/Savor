@@ -66,6 +66,12 @@ export function installHttpSecurity(app: Express, options: { origin: string; pro
     headers(req, res, () => {
       // Firebase's official same-origin helper has its own policy.
       if (req.path.startsWith("/__/auth/")) res.removeHeader("Content-Security-Policy");
+      if (req.path === "/__/auth/iframe") {
+        // Allow local dev origins to embed the Firebase Auth helper iframe when
+        // sharing the production custom authDomain (e.g. freshmen.me).
+        res.removeHeader("X-Frame-Options");
+        res.setHeader("Content-Security-Policy", "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*");
+      }
       res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(self)");
       if (req.path.startsWith("/api/") || req.path.startsWith("/__/auth/")) res.setHeader("Cache-Control", "no-store");
       next();

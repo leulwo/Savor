@@ -16,19 +16,29 @@ import {
 const env = (import.meta as any).env || {};
 const procEnv = typeof process !== 'undefined' ? process.env : {};
 const configuredAuthDomain = env.VITE_FIREBASE_AUTH_DOMAIN || procEnv.VITE_FIREBASE_AUTH_DOMAIN || '';
+const publicAuthDomain = env.VITE_FIREBASE_PUBLIC_AUTH_DOMAIN || procEnv.VITE_FIREBASE_PUBLIC_AUTH_DOMAIN || 'freshmen.me';
 
 // When running on a custom domain (e.g. freshmen.me), use the current host so Google Sign-In
 // popups reflect your branded domain instead of the generic *.firebaseapp.com URL.
+// Local development also routes through the public custom domain so Google OAuth only
+// requires https://freshmen.me/__/auth/handler as an authorized redirect URI.
 // The backend server transparently reverse-proxies /__/auth/** to Firebase Auth.
+const isLocalHost = typeof window !== 'undefined' && (
+  window.location.hostname === 'localhost'
+  || window.location.hostname === '127.0.0.1'
+  || window.location.hostname === '[::1]'
+);
+
 const isCustomDomain = typeof window !== 'undefined'
-  && window.location.hostname !== 'localhost'
-  && window.location.hostname !== '127.0.0.1'
+  && !isLocalHost
   && !window.location.hostname.endsWith('.firebaseapp.com')
   && !window.location.hostname.endsWith('.web.app');
 
 const activeAuthDomain = isCustomDomain
   ? window.location.host
-  : (configuredAuthDomain || 'project-609a1e43-d22e-44ae-a08.firebaseapp.com');
+  : isLocalHost
+    ? (publicAuthDomain || configuredAuthDomain || 'project-609a1e43-d22e-44ae-a08.firebaseapp.com')
+    : (configuredAuthDomain || 'project-609a1e43-d22e-44ae-a08.firebaseapp.com');
 
 const firebaseConfig = {
   apiKey: env.VITE_FIREBASE_API_KEY || procEnv.VITE_FIREBASE_API_KEY || '',
