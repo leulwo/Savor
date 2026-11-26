@@ -95,7 +95,7 @@ export class QuerySnapshot<T extends DocumentData = DocumentData> {
 type Target = DocumentReference | CollectionReference | Query;
 type Snapshot = DocumentSnapshot | QuerySnapshot;
 type Listener = { next: (snapshot: any) => void; error?: (error: DatabaseError) => void };
-type Subscription = { target: Target; listeners: Set<Listener>; snapshot?: Snapshot; fingerprint?: string; loading: boolean; dirty: boolean; timer?: ReturnType<typeof setTimeout> };
+type Subscription = { target: Target; listeners: Set<Listener>; snapshot?: Snapshot; fingerprint?: string; loading: boolean; dirty: boolean; hadError: boolean; consecutiveErrors: number; timer?: ReturnType<typeof setTimeout>; retryTimer?: ReturnType<typeof setTimeout> };
 
 function readRequest(target: Target): ReadRequest {
   const result: ReadRequest = { path: target.path, kind: target.type === 'document' ? 'document' : 'collection', filters: [], orders: [] };
@@ -127,6 +127,7 @@ export class DatabaseClient {
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private pollingTimer?: ReturnType<typeof setInterval>;
   private stopAuthWatch?: () => void;
+  private stopVisibilityWatch?: () => void;
   private generation = 0;
   private retryDelay = 1000;
   private revision: number | undefined;
@@ -171,12 +172,12 @@ export class DatabaseClient {
 
   private async request<T>(path: string, body: unknown): Promise<T> {
     const isPublic = isPublicBody(body);
+    if (!isPublic) {
+      await this.auth.authStateReady();
+    }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), 25000);
     try {
-      if (!isPublic) {
-        await this.auth.authStateReady();
-      }
       const responseUid = this.auth.currentUser?.uid ?? null;
       const response = await this.authenticatedFetch(path, { method: 'POST', body: JSON.stringify(encode(body)), signal: controller.signal }, isPublic);
       if ((!isPublic || responseUid !== null) && (this.auth.currentUser?.uid ?? null) !== responseUid) throw new DatabaseError('AUTH_USER_CHANGED', 'Your sign-in session changed. Please try again.');
@@ -212,7 +213,7 @@ export class DatabaseClient {
     const key = JSON.stringify(encode(readRequest(target)));
     let entry = this.subscriptions.get(key);
     if (!entry) {
-      entry = { target, listeners: new Set(), loading: false, dirty: false };
+      entry = { target, listeners: new Set(), loading: false, dirty: false, hadError: false, consecutiveErrors: 0 };
       this.subscriptions.set(key, entry);
     }
     const listener = { next, error };
@@ -224,6 +225,7 @@ export class DatabaseClient {
       entry!.listeners.delete(listener);
       if (!entry!.listeners.size) {
         if (entry!.timer) clearTimeout(entry!.timer);
+        if (entry!.retryTimer) clearTimeout(entry!.retryTimer);
         this.subscriptions.delete(key);
       }
       if (!this.subscriptions.size) this.stopWatching();
@@ -245,14 +247,25 @@ export class DatabaseClient {
       if (generation !== this.generation || !entry.listeners.size) return;
       const fingerprint = JSON.stringify(snapshot instanceof QuerySnapshot ? snapshot.docs.map(item => [item.id, item.version, item.data()]) : [snapshot.exists(), snapshot.version, snapshot.data()]);
       entry.snapshot = snapshot;
-      if (entry.fingerprint !== fingerprint) {
+      entry.consecutiveErrors = 0;
+      const recovered = entry.hadError;
+      entry.hadError = false;
+      if (entry.fingerprint !== fingerprint || recovered) {
         entry.fingerprint = fingerprint;
         entry.listeners.forEach(listener => this.deliver(listener, snapshot));
       }
     } catch (error) {
       if (generation === this.generation && entry.listeners.size) {
         const failure = error instanceof DatabaseError ? error : new DatabaseError('DATABASE_UNAVAILABLE', 'Could not refresh the database.');
-        entry.listeners.forEach(listener => { try { listener.error?.(failure); } catch {} });
+        entry.consecutiveErrors += 1;
+        if (entry.snapshot !== undefined && (failure.code === 'DATABASE_TIMEOUT' || failure.code === 'DATABASE_UNAVAILABLE') && entry.consecutiveErrors < 2) {
+          if (!entry.timer && !entry.retryTimer && entry.listeners.size) {
+            entry.retryTimer = setTimeout(() => { entry.retryTimer = undefined; void this.refresh(entry); }, 3000);
+          }
+        } else {
+          entry.hadError = true;
+          entry.listeners.forEach(listener => { try { listener.error?.(failure); } catch {} });
+        }
       }
     } finally {
       entry.loading = false;
@@ -261,6 +274,10 @@ export class DatabaseClient {
   }
 
   private scheduleRefresh(entry: Subscription) {
+    if (entry.retryTimer) {
+      clearTimeout(entry.retryTimer);
+      entry.retryTimer = undefined;
+    }
     if (entry.timer || !entry.listeners.size) return;
     entry.timer = setTimeout(() => { entry.timer = undefined; void this.refresh(entry); }, 50);
   }
@@ -300,7 +317,14 @@ export class DatabaseClient {
       this.restartStream();
     });
     // Polling keeps updates working through proxy buffering and interrupted SSE connections.
-    this.pollingTimer = setInterval(() => this.invalidate(), 15000);
+    this.pollingTimer = setInterval(() => {
+      if (typeof document === 'undefined' || !document.hidden) this.invalidate();
+    }, 15000);
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      const onVisibilityChange = () => { if (!document.hidden) this.invalidate(); };
+      document.addEventListener('visibilitychange', onVisibilityChange);
+      this.stopVisibilityWatch = () => document.removeEventListener('visibilitychange', onVisibilityChange);
+    }
   }
 
   private restartStream() {
@@ -351,6 +375,8 @@ export class DatabaseClient {
     if (this.pollingTimer) clearInterval(this.pollingTimer);
     this.stopAuthWatch?.();
     this.stopAuthWatch = undefined;
+    this.stopVisibilityWatch?.();
+    this.stopVisibilityWatch = undefined;
     this.reconnectTimer = undefined;
     this.pollingTimer = undefined;
     this.stream = undefined;

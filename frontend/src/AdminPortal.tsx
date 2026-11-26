@@ -652,18 +652,6 @@ export default function AdminPortal() {
         </header>
 
         <div className="p-8 flex-1 overflow-y-auto">
-          {adminRole === 'dev' && !(activeTab === 'settings' && teamSettingsView !== 'roles' && settingsInitialTab === 'dev') && (
-            <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50/80 px-4 py-2.5 text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2">
-              <span><strong>Developer Read-Only Mode:</strong> You can inspect all business sections, while edits are restricted to admins.</span>
-              <button
-                type="button"
-                onClick={() => { setTeamSettingsView('team'); setSettingsInitialTab('dev'); setActiveTab('settings'); }}
-                className="font-bold underline cursor-pointer hover:text-amber-950"
-              >
-                Open Dev Diagnostics →
-              </button>
-            </div>
-          )}
           {ordersReadError && (
             <div role="alert" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
               {ordersReadError} Orders will refresh automatically when the connection recovers.

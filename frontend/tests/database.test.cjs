@@ -281,3 +281,47 @@ test('sign-out clears cached settings snapshots without flashing menu, and colle
     unsubMenu();
   } finally { env.dispose(); }
 });
+
+test('transient background errors retry silently once and recovery re-delivers unchanged snapshots', async () => {
+  let failNext = false;
+  let reads = 0;
+  const env = setup(async (url, options) => {
+    if (url.endsWith('/events')) return events(options.signal);
+    reads++;
+    if (failNext) throw new TypeError('network hiccup');
+    return json({ docs: [{ id: 'ord1', path: 'orders/ord1', version: 1, data: { status: 'Pending' } }] });
+  }, user('staff'));
+  try {
+    const snapshots = [];
+    const errors = [];
+    const unsubscribe = env.api.onSnapshot(
+      env.api.collection(env.db, 'orders'),
+      snap => snapshots.push(snap.docs.map(d => d.id)),
+      err => errors.push(err.code)
+    );
+    await sleep(30);
+    assert.deepEqual(snapshots, [['ord1']]);
+    assert.deepEqual(errors, []);
+
+    // First transient error after an initial snapshot stays silent and avoids flapping UI error banners.
+    failNext = true;
+    env.poll();
+    await sleep(100);
+    assert.equal(reads, 2);
+    assert.deepEqual(errors, []);
+
+    // Second consecutive transient error surfaces to the listener.
+    env.poll();
+    await sleep(100);
+    assert.equal(reads, 3);
+    assert.deepEqual(errors, ['DATABASE_UNAVAILABLE']);
+
+    // Next successful poll with identical unchanged docs still re-delivers snapshot so listeners clear errors.
+    failNext = false;
+    env.poll();
+    await sleep(100);
+    assert.equal(reads, 4);
+    assert.deepEqual(snapshots, [['ord1'], ['ord1']]);
+    unsubscribe();
+  } finally { env.dispose(); }
+});

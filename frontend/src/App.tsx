@@ -1846,15 +1846,15 @@ export function MainApp() {
 
             {/* Menu Filters and Search */}
             <div id="gourmet-menu-section" className="space-y-6 scroll-mt-24">
-              <div className="flex flex-col md:flex-row justify-between items-start md:items-end border-b border-stone-200 pb-5 gap-y-4">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-end border-b border-stone-200 pb-5 gap-4">
                 <div>
                   <h2 className="font-serif text-2xl font-bold text-stone-900">Our Menu</h2>
                   <p className="text-xs text-stone-500 mt-1">Select from our fresh starters, mains, and beverages.</p>
                 </div>
 
                 {/* Search and Category filters */}
-                <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
-                  <div className="relative w-full sm:flex-1 sm:min-w-0 sm:max-w-xs self-stretch sm:self-start">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full md:w-auto min-w-0">
+                  <div className="relative w-full sm:w-56 md:w-64 shrink-0 self-stretch sm:self-start">
                     <span className="pointer-events-none absolute inset-y-0 left-3.5 flex items-center text-stone-400">
                       <Search className="w-4 h-4" />
                     </span>
@@ -1867,7 +1867,7 @@ export function MainApp() {
                     />
                   </div>
 
-                  <div className="flex flex-nowrap sm:flex-wrap gap-1.5 overflow-x-auto pb-1 sm:pb-0 max-w-full">
+                  <div className="flex flex-nowrap sm:flex-wrap items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 min-w-0 max-w-full">
                     {[{ id: 'all', name: 'All Items' }, ...categories].map(cat => (
                       <button
                         key={cat.id}

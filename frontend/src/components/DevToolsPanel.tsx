@@ -281,7 +281,6 @@ export default function DevToolsPanel({ can, permissions }: DevToolsPanelProps) 
           <div>
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-bold uppercase tracking-wider">Developer Diagnostics & Tools</h3>
-              <span className="text-[9px] font-mono uppercase px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-400/30">Dev Only</span>
             </div>
             <p className="text-[11px] text-stone-400 mt-1">Live integration probes, SMS & webhook delivery logs, stuck payment watchlist, and runtime metrics.</p>
           </div>

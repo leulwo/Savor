@@ -615,7 +615,6 @@ export default function MenuManager({ menu = [], onMenuUpdated, userRole, can, p
           <div className="bg-stone-50 p-3 border border-stone-200 rounded-xl space-y-2">
             <div className="text-xs font-bold text-stone-400 uppercase tracking-widest flex items-center justify-between">
               <span>Database Records ({filteredMenu.length} of {(menu || []).length})</span>
-              <span className="text-[10px] bg-stone-100 text-stone-600 px-2 py-0.5 rounded-full font-mono font-bold">LIVE SYNC</span>
             </div>
             <input
               type="text"
