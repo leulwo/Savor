@@ -262,7 +262,7 @@ test("real production server rejects unauthorized mutations and forged provider 
     const auth = await h.request("/__/auth/handler");
     assert.equal(auth.status, 503); // No configured Firebase upstream; no network.
     assert.equal(auth.headers.get("content-security-policy"), null);
-    assert.equal(auth.headers.get("cross-origin-opener-policy"), "same-origin-allow-popups");
+    assert.equal(auth.headers.get("cross-origin-opener-policy"), "unsafe-none");
     assert.match(auth.headers.get("cache-control") || "", /no-store/);
   });
 

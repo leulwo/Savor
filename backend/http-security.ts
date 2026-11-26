@@ -66,6 +66,12 @@ export function installHttpSecurity(app: Express, options: { origin: string; pro
     headers(req, res, () => {
       // Firebase's official same-origin helper has its own policy.
       if (req.path.startsWith("/__/auth/")) res.removeHeader("Content-Security-Policy");
+      if (req.path === "/__/auth/handler") {
+        // Match Firebase Hosting's popup handler so cross-origin local dev
+        // openers (http://localhost:*) keep window.opener intact instead of
+        // triggering auth/popup-closed-by-user.
+        res.setHeader("Cross-Origin-Opener-Policy", "unsafe-none");
+      }
       if (req.path === "/__/auth/iframe") {
         // Allow local dev origins to embed the Firebase Auth helper iframe when
         // sharing the production custom authDomain (e.g. freshmen.me).

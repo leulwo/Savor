@@ -122,7 +122,7 @@ test("production headers harden content while preserving Google OAuth popup comp
     assert.equal(helper.status, 200);
     assert.equal(helper.headers.get("x-frame-options"), "SAMEORIGIN");
     assert.equal(helper.headers.get("content-security-policy"), null);
-    assert.equal(helper.headers.get("cross-origin-opener-policy"), "same-origin-allow-popups");
+    assert.equal(helper.headers.get("cross-origin-opener-policy"), "unsafe-none");
     assert.match(helper.headers.get("cache-control") || "", /no-store/);
     const iframe = await h.request("/__/auth/iframe");
     assert.equal(iframe.status, 200);
