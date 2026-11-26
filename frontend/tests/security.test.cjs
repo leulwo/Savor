@@ -224,3 +224,19 @@ test('receipt QR rendering stays local and login never silently reseeds role per
   const qrData = require('qrcode').create(JSON.stringify({ orderId: 'SECURITY-TEST', total: '12.50 ETB' }), { errorCorrectionLevel: 'M' });
   assert.ok(qrData.modules.size > 0);
 });
+
+test('permissions define builtin read-only dev role with exclusive dev.view permission', () => {
+  const permissions = load('src/permissions.ts');
+  const devRole = permissions.DEFAULT_ROLES.find(r => r.id === 'dev');
+  const adminRole = permissions.DEFAULT_ROLES.find(r => r.id === 'admin');
+  assert.ok(devRole);
+  assert.ok(adminRole);
+  assert.equal(devRole.builtin, true);
+  assert.equal(devRole.permissions['dev.view'], true);
+  assert.equal(devRole.permissions['orders.view'], true);
+  assert.equal(devRole.permissions['settings.view'], true);
+  assert.equal(devRole.permissions['settings.edit'], undefined);
+  assert.equal(devRole.permissions['menu.edit'], undefined);
+  assert.equal(devRole.permissions['data.clear'], undefined);
+  assert.equal(adminRole.permissions['dev.view'], undefined);
+});

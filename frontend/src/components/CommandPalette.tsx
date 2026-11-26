@@ -17,6 +17,8 @@ interface CommandPaletteProps {
   orders?: Order[];
   menu?: MenuItem[];
   customers?: UserProfile[];
+  can?: (key: string) => boolean;
+  userRole?: string | null;
 }
 
 export default function CommandPalette({
@@ -25,7 +27,9 @@ export default function CommandPalette({
   onNavigate,
   orders = [],
   menu = [],
-  customers = []
+  customers = [],
+  can,
+  userRole,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -60,6 +64,7 @@ export default function CommandPalette({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
+  const canDev = userRole === "dev" && (!can || can("dev.view"));
   const quickNavItems = [
     { label: "Dashboard Overview", tab: "overview", icon: LayoutDashboard, category: "Navigation" },
     { label: "Revenue Analytics", tab: "analytics", icon: BarChart3, category: "Navigation" },
@@ -71,7 +76,7 @@ export default function CommandPalette({
     { label: "Live Customer Inbox", tab: "chat", icon: MessageSquare, category: "Navigation" },
     { label: "Table Reservations", tab: "reservations", icon: CalendarDays, category: "Navigation" },
     { label: "Marketing & Promos", tab: "marketing", icon: Percent, category: "Navigation" },
-    { label: "System Activity Audit Log", tab: "settings", subTab: "dev", icon: History, category: "Navigation" },
+    ...(canDev ? [{ label: "Developer Diagnostics & SMS Logs", tab: "settings", subTab: "dev", icon: History, category: "Navigation" }] : []),
     { label: "Global Settings", tab: "settings", icon: Settings, category: "Navigation" },
   ];
 

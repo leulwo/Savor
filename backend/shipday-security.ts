@@ -2,11 +2,31 @@ import crypto from "node:crypto";
 import type { Express, RequestHandler } from "express";
 import { orderCanBeFulfilled } from "./order-security";
 
+export type ShipdayTelemetryEvent = {
+  category: "sms" | "webhook" | "error";
+  status: "success" | "failed" | "warning";
+  source: string;
+  summary: string;
+  orderId?: string;
+  recipient?: string;
+  httpStatus?: number;
+  latencyMs?: number;
+  code?: string;
+  details?: Record<string, any>;
+};
+
 type Options = {
   getApiKey: () => string;
   getWebhookToken: () => string;
   fetcher?: typeof fetch;
+  onEvent?: (event: ShipdayTelemetryEvent) => void;
 };
+
+function maskPhone(phone: string): string {
+  const clean = phone.trim();
+  if (clean.length <= 6) return "***";
+  return `${clean.slice(0, 4)}***${clean.slice(-4)}`;
+}
 
 function failure(message: string, statusCode = 409, code = "SHIPDAY_REQUEST_REJECTED") {
   return Object.assign(new Error(message), { statusCode, code });
@@ -89,12 +109,16 @@ export function createShipdayService(db: any, options: Options) {
     const { order, settings } = claim;
     let contacted = false;
     let definitiveRejection = false;
+    let maskedRecipient: string | undefined;
+    let shipdayStartedAt = 0;
+    let lastHttpStatus: number | undefined;
     try {
       const items = Array.isArray(order.items) ? order.items : [];
       if (!items.length || items.length > 50) throw failure("Stored order items are invalid.", 409);
       const phone = text(order.customerPhone, 80);
       const customerPhoneNumber = /^0[79]\d{8}$/.test(phone) ? "+251" + phone.slice(1) : phone;
       if (!/^\+?[1-9]\d{8,14}$/.test(customerPhoneNumber)) throw failure("A valid customer phone number is required before dispatch.", 400);
+      maskedRecipient = maskPhone(customerPhoneNumber);
       const now = Date.now();
       const pickupMinutes = Math.min(240, Math.max(1, Number(settings.shipdayPickupMinutes) || 10));
       const deliveryTime = deliveryMinutes || Math.min(240, Math.max(1, Number(settings.shipdayDeliveryMinutes) || 20));
@@ -119,11 +143,13 @@ export function createShipdayService(db: any, options: Options) {
       };
       if (!payload.customerName || !payload.customerAddress || !Number.isFinite(payload.totalOrderCost) || payload.totalOrderCost <= 0 || payload.orderItem.some((line: any) => !Number.isFinite(line.unitPrice) || line.unitPrice < 0 || !Number.isInteger(line.quantity) || line.quantity < 1 || line.quantity > 99)) throw failure("Complete the stored delivery details before dispatch.", 400);
       contacted = true;
+      shipdayStartedAt = Date.now();
       const response = await fetcher("https://api.shipday.com/orders", {
         method: "POST", redirect: "error",
         headers: { Authorization: "Basic " + apiKey, "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify(payload), signal: AbortSignal.timeout(15000)
       });
+      lastHttpStatus = response.status;
       if (!response.ok) {
         await response.body?.cancel().catch(() => {});
         definitiveRejection = response.status >= 400 && response.status < 500 && ![408, 409, 429].includes(response.status);
@@ -138,6 +164,17 @@ export function createShipdayService(db: any, options: Options) {
         if (!snapshot.exists || snapshot.data()?.shipdayDispatchToken !== dispatchToken) throw failure("The delivery request changed while Shipday responded.");
         transaction.update(ref, { shipdayOrderId, shipdayStatus: "created", shipdayTrackingLink: trackingLink, shipdayDispatchState: "created", shipdayDispatchError: "", shipdaySyncedAt: new Date().toISOString(), shipdayLastUpdate: new Date().toISOString() });
       });
+      options.onEvent?.({
+        category: "sms",
+        status: "success",
+        source: "shipday-delivery-sms",
+        summary: `Delivery dispatch & SMS queued in Shipday (#${shipdayOrderId})`,
+        orderId,
+        recipient: maskedRecipient,
+        httpStatus: lastHttpStatus,
+        latencyMs: Date.now() - shipdayStartedAt,
+        details: { shipdayOrderId, trackingLinkValid: !!trackingLink }
+      });
       return { success: true, reused: false, shipdayOrderId, trackingLink };
     } catch (error: any) {
       await db.runTransaction(async (transaction: any) => {
@@ -145,6 +182,18 @@ export function createShipdayService(db: any, options: Options) {
         if (!snapshot.exists || snapshot.data()?.shipdayDispatchToken !== dispatchToken || snapshot.data()?.shipdayOrderId) return;
         transaction.update(ref, { shipdayDispatchState: contacted && !definitiveRejection ? "reconciling" : "failed", shipdayDispatchError: contacted && !definitiveRejection ? "The delivery request outcome is uncertain. Confirm it in Shipday before retrying." : "The delivery request was rejected before creation." });
       }).catch(() => {});
+      options.onEvent?.({
+        category: "sms",
+        status: "failed",
+        source: "shipday-delivery-sms",
+        summary: error?.message || "Shipday dispatch failed",
+        orderId,
+        recipient: maskedRecipient,
+        httpStatus: lastHttpStatus ?? error?.statusCode,
+        latencyMs: shipdayStartedAt ? Date.now() - shipdayStartedAt : undefined,
+        code: error?.code || "SHIPDAY_DISPATCH_FAILED",
+        details: { shipdayDispatchState: contacted && !definitiveRejection ? "reconciling" : "failed" }
+      });
       if (error?.statusCode) throw error;
       throw failure("The delivery request was interrupted. Confirm it in Shipday before retrying.", 502, "SHIPDAY_RECONCILING");
     }
@@ -155,9 +204,17 @@ export function createShipdayService(db: any, options: Options) {
     if (!configured(apiKey)) throw failure("Shipday API is not configured.", 503, "SHIPDAY_NOT_CONFIGURED");
     try {
       const response = await fetcher("https://api.shipday.com/orders", { method: "GET", redirect: "error", headers: { Authorization: "Basic " + apiKey, Accept: "application/json" }, signal: AbortSignal.timeout(15000) });
-      await response.body?.cancel().catch(() => {});
-      if (!response.ok) throw failure(response.status === 401 || response.status === 403 ? "Shipday rejected the configured API key." : "Shipday is temporarily unavailable.", 502);
-      return { success: true, message: "Successfully connected to Shipday API" };
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
+        throw failure(response.status === 401 || response.status === 403 ? "Shipday rejected the configured API key." : "Shipday is temporarily unavailable.", 502);
+      }
+      let orderCount: number | undefined;
+      try {
+        const bodyText = await response.text();
+        const parsed = bodyText ? JSON.parse(bodyText) : null;
+        if (Array.isArray(parsed)) orderCount = parsed.length;
+      } catch {}
+      return { success: true, message: "Successfully connected to Shipday API", ...(orderCount !== undefined ? { orderCount } : {}) };
     } catch (error: any) {
       if (error?.statusCode) throw error;
       throw failure("Could not reach Shipday. Please retry shortly.", 502);
@@ -194,13 +251,22 @@ export function createShipdayService(db: any, options: Options) {
       transaction.update(ref, { shipdayStatus: status, shipdayLastUpdate: now, ...(stamp !== null ? { shipdayLastEventTimestamp: stamp } : {}), ...(nextStatus !== current.status ? { status: nextStatus, updatedAt: now, statusHistory: [...(Array.isArray(current.statusHistory) ? current.statusHistory : []), { status: nextStatus, at: now }] } : {}) });
       changed = true;
     });
+    options.onEvent?.({
+      category: "webhook",
+      status: changed ? "success" : "warning",
+      source: "shipday-webhook",
+      summary: changed ? `Shipday webhook updated order to ${status}` : `Shipday webhook (${status}) ignored or unchanged`,
+      orderId: orderNumber,
+      httpStatus: 200,
+      details: { externalId, providerStatus: status, changed }
+    });
     return { success: true, changed };
   }
 
   return { create, testConnection, processWebhook, webhookToken: () => options.getWebhookToken() };
 }
 
-export function installShipdayRoutes(app: Express, service: ReturnType<typeof createShipdayService>, options: { requireStaffAuth: RequestHandler; requireStaffPermission: (permission: string) => RequestHandler }) {
+export function installShipdayRoutes(app: Express, service: ReturnType<typeof createShipdayService>, options: { requireStaffAuth: RequestHandler; requireStaffPermission: (permission: string) => RequestHandler; requireDevRole?: RequestHandler }) {
   const reject = (res: any, error: any) => res.status(error?.statusCode || 502).json({ success: false, code: error?.code || "SHIPDAY_UNAVAILABLE", error: error?.statusCode ? error.message : "Shipday is temporarily unavailable." });
   app.post("/api/shipday/order", options.requireStaffAuth, options.requireStaffPermission("orders.updateStatus"), async (req, res) => {
     try {
@@ -209,7 +275,7 @@ export function installShipdayRoutes(app: Express, service: ReturnType<typeof cr
       res.json(await service.create(requestedId, req.body?.deliveryMinutes));
     } catch (error) { reject(res, error); }
   });
-  app.get("/api/shipday/test", options.requireStaffAuth, options.requireStaffPermission("orders.updateStatus"), async (_req, res) => {
+  app.get("/api/shipday/test", options.requireStaffAuth, options.requireDevRole || options.requireStaffPermission("dev.view"), async (_req, res) => {
     try { res.json(await service.testConnection()); } catch (error) { reject(res, error); }
   });
   app.post("/api/shipday/webhook", async (req, res) => {

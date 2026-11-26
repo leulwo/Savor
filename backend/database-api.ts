@@ -219,8 +219,14 @@ async function authorizedWrite(ctx: Context, write: any, previous: any, tx: Loca
     case "carts": if (id !== ctx.actor.uid) deny(); return data;
     case "roles":
       if (!permitted(ctx, "roles.edit")) deny();
+      if (id === "dev") {
+        fault(409, "BUILTIN_ROLE_PROTECTED", "The built-in developer role cannot be edited or deleted.");
+      }
       if (id === "admin" && ctx.primaryAdminEmail) {
         fault(409, "PRIMARY_ADMIN_MANAGED", "The primary admin role always has full access and cannot be edited.");
+      }
+      if (!removing && data.permissions?.["dev.view"] === true) {
+        fault(403, "DATABASE_FORBIDDEN", "Developer access is exclusive to the built-in dev role.");
       }
       if (id === "admin" && ctx.staff?.role !== "admin") deny();
       if (ctx.staff?.role !== "admin" && previous) checkRoleGrant(ctx, previous);

@@ -101,6 +101,8 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
 
 export const ALL_PERMISSIONS: string[] = PERMISSION_GROUPS.flatMap(g => g.permissions.map(p => p.key));
 
+export const DEV_ONLY_PERMISSION = "dev.view";
+
 export type PermissionMap = Record<string, boolean>;
 
 export interface RoleDefinition {
@@ -115,6 +117,23 @@ function allPermissions(): PermissionMap {
   return Object.fromEntries(ALL_PERMISSIONS.map(key => [key, true]));
 }
 
+export const DEV_READONLY_PERMISSIONS: PermissionMap = {
+  "analytics.view": true,
+  "menu.view": true,
+  "orders.view": true,
+  "orders.receipts": true,
+  "kds.view": true,
+  "chat.view": true,
+  "reservations.view": true,
+  "promos.view": true,
+  "customers.view": true,
+  "reports.view": true,
+  "team.view": true,
+  "settings.view": true,
+  "audit.view": true,
+  "dev.view": true,
+};
+
 export const DEFAULT_ROLES: RoleDefinition[] = [
   {
     id: "admin",
@@ -122,6 +141,13 @@ export const DEFAULT_ROLES: RoleDefinition[] = [
     description: "Full access to every module and setting.",
     builtin: true,
     permissions: allPermissions(),
+  },
+  {
+    id: "dev",
+    name: "Developer",
+    description: "Read-only access across all admin sections plus exclusive access to Developer Diagnostics & Tools.",
+    builtin: true,
+    permissions: { ...DEV_READONLY_PERMISSIONS },
   },
 ];
 

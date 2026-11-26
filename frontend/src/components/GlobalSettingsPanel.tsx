@@ -12,7 +12,7 @@ import { hasPermission, PermissionMap } from "../permissions";
 import { logAudit } from "../utils/auditLogger";
 import SquareImageCropper from "./SquareImageCropper";
 import ImageUploadField from "./ImageUploadField";
-import AuditLog from "./AuditLog";
+import DevToolsPanel from "./DevToolsPanel";
 import { confirmDialog, toastError, toastSuccess } from "../notify";
 import { authedFetch } from "../firebase";
 import { getBusinessFilename } from "../utils/businessName";
@@ -42,12 +42,14 @@ export interface GlobalSettings {
 interface GlobalSettingsPanelProps {
   can?: (key: string) => boolean;
   permissions?: PermissionMap;
+  userRole?: string | null;
   actor?: { email: string; role: string };
   initialTab?: 'general' | 'checkout' | 'features' | 'dev' | 'privacy';
 }
 
-export default function GlobalSettingsPanel({ can, permissions, actor, initialTab }: GlobalSettingsPanelProps) {
+export default function GlobalSettingsPanel({ can, permissions, userRole, actor, initialTab }: GlobalSettingsPanelProps) {
   const canEdit = can ? can("settings.edit") : hasPermission(permissions, "settings.edit");
+  const canAccessDev = userRole === "dev" && (can ? can("dev.view") : hasPermission(permissions, "dev.view"));
   const [settings, setSettings] = useState<GlobalSettings>({
     restaurantName: "",
     logoUrl: "",
@@ -71,14 +73,23 @@ export default function GlobalSettingsPanel({ can, permissions, actor, initialTa
   const [loading, setLoading] = useState(false);
 
   // Tab state for categories
-  const [activeTab, setActiveTab] = useState<'general' | 'checkout' | 'features' | 'dev' | 'privacy'>(initialTab || 'general');
-
-  const [shipdayTestLoading, setShipdayTestLoading] = useState(false);
-  const [mailchimpTestLoading, setMailchimpTestLoading] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string; orderCount?: number } | null>(null);
-  const [mailchimpTestResult, setMailchimpTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [activeTab, setActiveTab] = useState<'general' | 'checkout' | 'features' | 'dev' | 'privacy'>(
+    initialTab && (initialTab !== 'dev' || canAccessDev) ? initialTab : 'general'
+  );
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+
+  useEffect(() => {
+    if (!initialTab) return;
+    if (initialTab === 'dev' && !canAccessDev) return;
+    setActiveTab(initialTab);
+  }, [initialTab, canAccessDev]);
+
+  useEffect(() => {
+    if (activeTab === 'dev' && !canAccessDev) {
+      setActiveTab('general');
+    }
+  }, [activeTab, canAccessDev]);
 
   // Privacy / data export + clear
   const [exporting, setExporting] = useState(false);
@@ -118,6 +129,7 @@ export default function GlobalSettingsPanel({ can, permissions, actor, initialTa
   }, []);
 
   const handleChange = (field: keyof GlobalSettings, value: any) => {
+    if (!canEdit) return;
     setSettings(prev => ({ ...prev, [field]: value }));
   };
 
@@ -184,38 +196,6 @@ export default function GlobalSettingsPanel({ can, permissions, actor, initialTa
       null,
       "Save"
     );
-  };
-
-  const testMailchimp = async () => {
-    setMailchimpTestLoading(true);
-    setMailchimpTestResult(null);
-    try {
-      const res = await authedFetch("/api/mailchimp/test");
-      const data = await res.json();
-      setMailchimpTestResult({ success: data.success, message: data.message || data.error });
-    } catch (e) {
-      setMailchimpTestResult({ success: false, message: "Network error while testing connection." });
-    } finally {
-      setMailchimpTestLoading(false);
-    }
-  };
-
-  const testShipday = async () => {
-    setShipdayTestLoading(true);
-    setTestResult(null);
-    try {
-      const res = await authedFetch("/api/shipday/test");
-      const data = await res.json();
-      setTestResult({
-        success: data.success,
-        message: data.message || data.error,
-        orderCount: data.orderCount
-      });
-    } catch (e) {
-      setTestResult({ success: false, message: "Connection error" });
-    } finally {
-      setShipdayTestLoading(false);
-    }
   };
 
   const downloadBusinessData = async () => {
@@ -337,14 +317,16 @@ export default function GlobalSettingsPanel({ can, permissions, actor, initialTa
         >
           Features
         </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('dev')}
-          className={`px-6 py-3 text-xs font-bold uppercase tracking-wider whitespace-nowrap border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'dev' ? 'border-stone-900 text-stone-900' : 'border-transparent text-stone-400 hover:text-stone-600'}`}
-        >
-          <Settings className="w-3.5 h-3.5" />
-          <span>Dev</span>
-        </button>
+        {canAccessDev && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('dev')}
+            className={`px-6 py-3 text-xs font-bold uppercase tracking-wider whitespace-nowrap border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'dev' ? 'border-stone-900 text-stone-900' : 'border-transparent text-stone-400 hover:text-stone-600'}`}
+          >
+            <Settings className="w-3.5 h-3.5" />
+            <span>Dev</span>
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setActiveTab('privacy')}
@@ -357,7 +339,7 @@ export default function GlobalSettingsPanel({ can, permissions, actor, initialTa
 
       <form onSubmit={handleSave} className="p-6">
         {activeTab === 'general' && (
-          <div className="space-y-6 animate-in fade-in">
+          <fieldset disabled={!canEdit} className="space-y-6 animate-in fade-in disabled:opacity-75">
             <div>
               <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1.5">
                 Restaurant Name
@@ -430,11 +412,11 @@ export default function GlobalSettingsPanel({ can, permissions, actor, initialTa
                 Shown on the customer footer, the contact section, and on printed receipts.
               </p>
             </div>
-          </div>
+          </fieldset>
         )}
 
         {activeTab === 'checkout' && (
-          <div className="space-y-6 animate-in fade-in">
+          <fieldset disabled={!canEdit} className="space-y-6 animate-in fade-in disabled:opacity-75">
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-[10px] font-bold text-stone-500 uppercase tracking-wide mb-1.5">
@@ -521,7 +503,7 @@ export default function GlobalSettingsPanel({ can, permissions, actor, initialTa
                   <span id="cash-payment-description" className="mt-1 block text-xs leading-relaxed text-stone-500">Offer cash on delivery at checkout.</span>
                 </span>
               </span>
-              <SettingSwitch label="Cash payment" checked={!!settings.enableCOD} onChange={checked => handleChange("enableCOD", checked)} />
+              <SettingSwitch label="Cash payment" disabled={!canEdit} checked={!!settings.enableCOD} onChange={checked => handleChange("enableCOD", checked)} />
             </label>
 
             {/* Online Ordering: one control, admin picks manual or scheduled */}
@@ -590,15 +572,15 @@ export default function GlobalSettingsPanel({ can, permissions, actor, initialTa
                       <span className="text-[9px] text-stone-400 font-medium">Manual control</span>
                     </div>
                   </div>
-                  <SettingSwitch label="Accept orders" checked={!!settings.isOpen} onChange={checked => handleChange("isOpen", checked)} />
+                  <SettingSwitch label="Accept orders" disabled={!canEdit} checked={!!settings.isOpen} onChange={checked => handleChange("isOpen", checked)} />
                 </label>
               )}
             </div>
-          </div>
+          </fieldset>
         )}
 
         {activeTab === 'features' && (
-          <div className="space-y-4 animate-in fade-in">
+          <fieldset disabled={!canEdit} className="space-y-4 animate-in fade-in disabled:opacity-75">
             <p className="text-xs text-stone-500 mb-4">Toggle optional features across the application. When disabled, their respective tabs and user-facing UI will be hidden.</p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <label className="flex items-center justify-between p-4 bg-stone-50 border border-stone-200 rounded-2xl cursor-pointer hover:bg-stone-100 transition-all">
@@ -611,7 +593,7 @@ export default function GlobalSettingsPanel({ can, permissions, actor, initialTa
                     <span className="text-[9px] text-stone-400 font-medium">Newsletter signups</span>
                   </div>
                 </div>
-                <SettingSwitch label="Marketing" checked={!!settings.enableMarketing} onChange={checked => handleChange("enableMarketing", checked)} />
+                <SettingSwitch label="Marketing" disabled={!canEdit} checked={!!settings.enableMarketing} onChange={checked => handleChange("enableMarketing", checked)} />
               </label>
 
               <label className="flex items-center justify-between p-4 bg-stone-50 border border-stone-200 rounded-2xl cursor-pointer hover:bg-stone-100 transition-all">
@@ -624,7 +606,7 @@ export default function GlobalSettingsPanel({ can, permissions, actor, initialTa
                     <span className="text-[9px] text-stone-400 font-medium">Table bookings</span>
                   </div>
                 </div>
-                <SettingSwitch label="Reservations" checked={!!settings.enableReservations} onChange={checked => handleChange("enableReservations", checked)} />
+                <SettingSwitch label="Reservations" disabled={!canEdit} checked={!!settings.enableReservations} onChange={checked => handleChange("enableReservations", checked)} />
               </label>
 
               <label className="flex items-center justify-between p-4 bg-stone-50 border border-stone-200 rounded-2xl cursor-pointer hover:bg-stone-100 transition-all">
@@ -637,81 +619,15 @@ export default function GlobalSettingsPanel({ can, permissions, actor, initialTa
                     <span className="text-[9px] text-stone-400 font-medium">Customer assistant</span>
                   </div>
                 </div>
-                <SettingSwitch label="Chatbot" checked={!!settings.enableChatbot} onChange={checked => handleChange("enableChatbot", checked)} />
+                <SettingSwitch label="Chatbot" disabled={!canEdit} checked={!!settings.enableChatbot} onChange={checked => handleChange("enableChatbot", checked)} />
               </label>
             </div>
-          </div>
+          </fieldset>
         )}
 
-        {activeTab === 'dev' && (
-          <div className="space-y-6 animate-in fade-in">
-            <div className="flex flex-col space-y-3 p-4 bg-blue-50/30 rounded-2xl border border-blue-100">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2 text-blue-700">
-                  <Truck className="w-4 h-4" />
-                  <div>
-                    <span className="block text-[10px] font-bold uppercase tracking-wide">Shipday Delivery</span>
-                    <span className="block text-[8px] text-blue-500 font-mono">INTEGRATION STATUS</span>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={testShipday}
-                  disabled={shipdayTestLoading}
-                  className="bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold uppercase tracking-wider px-4 py-2 rounded-xl transition-all disabled:opacity-50 flex items-center space-x-2 shadow-sm"
-                >
-                  {shipdayTestLoading ? <RotateCcw className="w-3 h-3 animate-spin" /> : <Truck className="w-3 h-3" />}
-                  <span>{shipdayTestLoading ? "Testing..." : "Verify Status"}</span>
-                </button>
-              </div>
-              {testResult && (
-                <div className={`p-3 rounded-xl border flex items-start space-x-2 animate-in fade-in slide-in-from-top-1 ${testResult.success
-                  ? 'bg-emerald-50 border-emerald-100 text-emerald-800'
-                  : 'bg-rose-50 border-rose-100 text-rose-800'
-                  }`}>
-                  {testResult.success ? (
-                    <CheckCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-                  ) : (
-                    <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-                  )}
-                  <div className="text-[10px]">
-                    <p className="font-bold">{testResult.success ? "Connection Active" : "Connection Error"}</p>
-                    <p className="opacity-90">{testResult.message}</p>
-                    {testResult.success && testResult.orderCount !== undefined && (
-                      <p className="mt-1 font-mono text-[9px]">Total Orders in Shipday: {testResult.orderCount}</p>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="flex flex-col space-y-3 p-4 bg-emerald-50/30 rounded-2xl border border-emerald-100">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2 text-emerald-700">
-                  <Settings className="w-4 h-4" />
-                  <span className="text-[10px] font-bold uppercase tracking-wide">Website-Mailchimp Link</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={testMailchimp}
-                  disabled={mailchimpTestLoading}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold uppercase tracking-wider px-4 py-2 rounded-xl transition-all disabled:opacity-50 flex items-center space-x-2 shadow-sm"
-                >
-                  {mailchimpTestLoading ? <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <RotateCcw className="w-3 h-3" />}
-                  <span>Test Connection</span>
-                </button>
-              </div>
-              {mailchimpTestResult && (
-                <div className={`flex items-center space-x-2 p-2 rounded-lg border ${mailchimpTestResult.success ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-rose-50 border-rose-100 text-rose-700'}`}>
-                  {mailchimpTestResult.success ? <CheckCircle className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
-                  <span className="text-[10px] font-medium leading-tight">{mailchimpTestResult.message}</span>
-                </div>
-              )}
-            </div>
-
-            <div className="pt-4 border-t border-stone-200">
-              <AuditLog can={can} permissions={permissions} />
-            </div>
+        {activeTab === 'dev' && canAccessDev && (
+          <div className="animate-in fade-in">
+            <DevToolsPanel can={can} permissions={permissions} />
           </div>
         )}
 
@@ -837,7 +753,9 @@ export default function GlobalSettingsPanel({ can, permissions, actor, initialTa
               </div>
             )}
           </div>
-          {canEdit ? (
+          {activeTab === 'dev' ? (
+            <span className="text-[11px] text-stone-400 font-medium">Developer diagnostics and logs are read-only tools.</span>
+          ) : canEdit ? (
             activeTab === 'privacy' ? (
               <span className="text-[11px] text-stone-400 font-medium">Privacy actions are applied immediately. There is nothing to save.</span>
             ) : (

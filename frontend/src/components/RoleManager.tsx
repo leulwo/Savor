@@ -295,13 +295,15 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
           {roles.map(role => {
             const isExpanded = expandedRole === role.id;
             const isAdmin = role.id === 'admin';
+            const isDev = role.id === 'dev';
+            const isLockedRole = isAdmin || isDev;
 
             return (
               <div key={role.id} className="border border-stone-200 rounded-2xl overflow-hidden">
                 <div className="w-full flex items-center justify-between px-4 py-3 bg-white hover:bg-stone-50/60 transition-colors cursor-pointer" onClick={() => setExpandedRole(isExpanded ? null : role.id)}>
                   <div className="flex items-center space-x-3">
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center ${isAdmin ? 'bg-amber-100 text-amber-700' : 'bg-stone-100 text-stone-600'}`}>
-                      {isAdmin ? <Lock className="w-4 h-4" /> : <ShieldCheck className="w-4 h-4" />}
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center ${isLockedRole ? 'bg-amber-100 text-amber-700' : 'bg-stone-100 text-stone-600'}`}>
+                      {isLockedRole ? <Lock className="w-4 h-4" /> : <ShieldCheck className="w-4 h-4" />}
                     </div>
                     <div>
                       <div className="flex items-center space-x-2">
@@ -318,9 +320,11 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
                   </div>
                   <div className="flex items-center space-x-2">
                     <span className="text-[10px] font-mono text-stone-400 hidden sm:inline">
-                      {Object.values(getPerms(role.id) || {}).filter(Boolean).length}/{ALL_PERMISSIONS.length} permissions
+                      {isDev
+                        ? "Read-only + Dev Tools"
+                        : `${Object.entries(getPerms(role.id) || {}).filter(([k, v]) => v === true && ALL_PERMISSIONS.includes(k)).length}/${ALL_PERMISSIONS.length} permissions`}
                     </span>
-                    {canEditRoles && !isAdmin && (
+                    {canEditRoles && !isLockedRole && (
                       <button
                         onClick={(e) => { e.stopPropagation(); handleDeleteRole(role.id); }}
                         className="p-1.5 text-stone-400 hover:text-rose-600 transition-colors cursor-pointer"
@@ -335,7 +339,7 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
 
                 {isExpanded && (
                   <div className="border-t border-stone-100 bg-stone-50/50 p-4 space-y-4">
-                    {canEditRoles && !isAdmin && (
+                    {canEditRoles && !isLockedRole && (
                       <div className="flex flex-wrap gap-2">
                         <input
                           type="text"
@@ -355,7 +359,9 @@ export default function RoleManager({ can = () => false }: RoleManagerProps) {
                     )}
 
                     {isAdmin ? (
-                      <p className="text-xs text-stone-500 italic">The Admin role always has full access and cannot be modified.</p>
+                      <p className="text-xs text-stone-500 italic">The Admin role always has full business access (excluding Developer Diagnostics) and cannot be modified.</p>
+                    ) : isDev ? (
+                      <p className="text-xs text-stone-600 italic">The built-in Developer role grants strictly read-only access across all other admin sections plus exclusive access to Developer Diagnostics &amp; Tools, and cannot be modified.</p>
                     ) : (
                       PERMISSION_GROUPS.map((group, gi) => {
                         const enabledCount = group.permissions.filter(p => hasPermission(getPerms(role.id), p.key)).length;

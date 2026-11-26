@@ -1,6 +1,13 @@
 import type { LocalStore, LocalTransaction } from "./local-store";
 
 export const PRIMARY_ADMIN_SETTING = "PRIMARY_ADMIN_EMAIL";
+export const DEV_ONLY_PERMISSION = "dev.view";
+export const devReadOnlyPermissionKeys = [
+  "analytics.view", "menu.view", "orders.view", "orders.receipts",
+  "kds.view", "chat.view", "reservations.view", "promos.view",
+  "customers.view", "reports.view", "team.view", "settings.view", "audit.view"
+] as const;
+
 export const adminPermissionKeys = [
   "analytics.view", "menu.view", "menu.create", "menu.edit", "menu.editPrice",
   "menu.editAvailability", "menu.delete", "menu.categories", "orders.view",
@@ -10,6 +17,11 @@ export const adminPermissionKeys = [
   "customers.view", "reports.view", "team.view", "team.invite", "team.remove",
   "roles.edit", "settings.view", "settings.edit", "audit.view", "data.export", "data.clear"
 ];
+
+export const devRolePermissions: Record<string, boolean> = {
+  ...Object.fromEntries(adminPermissionKeys.map(key => [key, (devReadOnlyPermissionKeys as readonly string[]).includes(key)])),
+  [DEV_ONLY_PERMISSION]: true
+};
 
 export function parsePrimaryAdminEmail(value: unknown): string {
   if (value === undefined || value === null || value === "") return "";
@@ -64,6 +76,22 @@ export async function syncPrimaryAdmin(db: LocalStore, configuredEmail: string):
   });
 }
 
+export async function ensureDevRole(db: LocalStore): Promise<void> {
+  const roleRef = db.doc("roles/dev");
+  await db.runTransaction(async transaction => {
+    const existing = await transaction.get(roleRef);
+    const prior = existing.data() || {};
+    transaction.set(roleRef, {
+      ...prior,
+      id: "dev",
+      name: "Developer",
+      description: "Read-only access across all admin sections plus exclusive access to Developer Diagnostics & Tools.",
+      builtin: true,
+      permissions: { ...devRolePermissions }
+    });
+  });
+}
+
 export async function resolveLocalStaffPermissions(db: LocalStore, email: string, primaryEmail: string, transaction?: LocalTransaction) {
   const normalized = email.trim().toLowerCase();
   if (!normalized || normalized.length > 254 || !/^[^\s@/\\<>()[\],:;"]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(normalized)) return null;
@@ -74,6 +102,7 @@ export async function resolveLocalStaffPermissions(db: LocalStore, email: string
   const role = account.role;
   if (typeof role !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(role)) return null;
   if (role === "admin") return { role, permissions: {}, disabled: false };
+  if (role === "dev") return { role: "dev", permissions: { ...devRolePermissions }, disabled: false };
   const roleRef = db.doc(`roles/${role}`);
   const roleAccount = (transaction ? await transaction.get(roleRef) : await roleRef.get()).data();
   if (!activeGrant(roleAccount)) return null;

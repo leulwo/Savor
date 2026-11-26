@@ -12,7 +12,7 @@ import { initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { createLocalStore } from "./local-store";
 import { initializeLocalData } from "./local-data";
-import { parsePrimaryAdminEmail, syncPrimaryAdmin, resolveLocalStaffPermissions, isPrimaryAdminProtectedPath } from "./primary-admin";
+import { parsePrimaryAdminEmail, syncPrimaryAdmin, ensureDevRole, resolveLocalStaffPermissions, isPrimaryAdminProtectedPath } from "./primary-admin";
 import { installDatabaseApi, assertMenuWritePermissions } from "./database-api";
 import { assertImageFields } from "./image-security";
 import fs from "fs";
@@ -26,6 +26,9 @@ import { buildStaffOrderUpdate } from "./order-security";
 import { acceptCashOrderPromotion, reserveOrderPromotion, completeOrderPromotion, releaseOrderPromotion, promotionCapacity, promotionDiscount } from "./promotion-security";
 import { isChapaCheckoutUrl, assertChapaWebhookSignature, createChapaVerificationClient, chapaPaymentMatchDiagnostics as securePaymentDiagnostics, assertVerifiedChapaSettlement, isFinalPaymentStatus, isChapaAdjustmentStatus, buildChapaAdjustmentReconciliation, assertNewChapaAttemptCapacity, assertNoActivePendingOrder, hasConfirmedChapaFailure, readChapaJsonResponse, validPaymentReference, cancelChapaTransaction, generateOrderId } from "./chapa-security";
 import { createShipdayService, installShipdayRoutes } from "./shipday-security";
+import { createDevHttpTelemetryMiddleware, installDevDiagnosticRoutes, maskPhone, recordDevEvent } from "./dev-diagnostics";
+
+const SERVER_STARTED_AT = Date.now();
 
 const appRoot = process.env.APP_ROOT || (fs.existsSync(path.join(process.cwd(), "frontend")) ? process.cwd() : path.resolve(process.cwd(), ".."));
 dotenv.config({ path: path.join(appRoot, ".env") });
@@ -86,6 +89,7 @@ app.use((req: any, _res: any, next: any) => {
   req.requestStartedAt = Date.now();
   next();
 });
+app.use(createDevHttpTelemetryMiddleware(db));
 
 function withinDeadline<T>(operation: Promise<T>, deadlineAt: number, stage: string): Promise<T> {
   const remainingMs = deadlineAt - Date.now();
@@ -149,6 +153,14 @@ app.use("/__/auth", async (req, res) => {
     return res.status(upstream.status).send(Buffer.from(upstream.data));
   } catch (error: any) {
     console.error("[FIREBASE AUTH PROXY] Upstream request failed.");
+    void recordDevEvent(db, {
+      category: "auth",
+      status: "failed",
+      source: "firebase-auth-proxy",
+      summary: "Firebase auth proxy upstream request failed",
+      httpStatus: 502,
+      code: error?.code || "AUTH_PROXY_ERROR"
+    });
     return res.status(502).send("Firebase authentication service is temporarily unavailable.");
   }
 });
@@ -275,11 +287,20 @@ async function resolveStaffPermissions(email: string, transaction?: any): Promis
   }
 }
 
-// True when the caller's role holds the given permission (admin always passes).
+// True when the caller's role holds the given permission (admin always passes except dev-exclusive permission).
 function staffHas(permCtx: { role: string; permissions: Record<string, boolean> } | null, perm: string): boolean {
   if (!permCtx) return false;
+  if (perm === "dev.view") return permCtx.role === "dev" && permCtx.permissions?.["dev.view"] === true;
   if (permCtx.role === "admin") return true;
   return permCtx.permissions[perm] === true;
+}
+
+function requireDevRole(_req: any, res: any, next: any) {
+  const staff = res.locals.staff;
+  if (!staff || staff.role !== "dev" || staff.permissions?.["dev.view"] !== true) {
+    return res.status(403).json({ error: "Forbidden: developer role access is required." });
+  }
+  next();
 }
 
 // True when an env secret is unset or still a known dev placeholder. Webhook /
@@ -311,7 +332,8 @@ async function sweepStaleOrdersLazy() {
 // All delivery creation paths share the same persisted concurrency claim.
 const shipdayService = createShipdayService(db, {
   getApiKey: () => getCleanEnv("SHIPDAY_API_KEY"),
-  getWebhookToken: () => getCleanEnv("SHIPDAY_WEBHOOK_TOKEN")
+  getWebhookToken: () => getCleanEnv("SHIPDAY_WEBHOOK_TOKEN"),
+  onEvent: event => { void recordDevEvent(db, event); }
 });
 async function triggerShipday(orderId: string, _db: any, deliveryMinutes?: number) {
   return shipdayService.create(orderId, deliveryMinutes || undefined);
@@ -1166,6 +1188,14 @@ app.post("/api/chapa/webhook", async (req: any, res) => {
     if (isMissingOrPlaceholderSecret(webhookSecret)) return res.status(503).send("Webhook secret is not configured.");
     if (!assertChapaWebhookSignature(req.rawBody, req.get("x-chapa-signature"), req.get("chapa-signature"), webhookSecret)) {
       console.warn("[CHAPA WEBHOOK] Rejected request with an invalid or missing signature.");
+      void recordDevEvent(db, {
+        category: "webhook",
+        status: "failed",
+        source: "chapa-webhook",
+        summary: "Rejected Chapa webhook with invalid or missing signature",
+        httpStatus: 401,
+        code: "INVALID_SIGNATURE"
+      });
       return res.status(401).send("Invalid signature");
     }
 
@@ -1220,6 +1250,15 @@ app.post("/api/chapa/webhook", async (req: any, res) => {
       }
       await markChapaOrderPaid(orderRef, payment);
       console.log("[CHAPA WEBHOOK] Payment confirmed for order " + txRef + ".");
+      void recordDevEvent(db, {
+        category: "webhook",
+        status: "success",
+        source: "chapa-webhook",
+        summary: "Chapa webhook verified & settled order",
+        orderId: txRef,
+        httpStatus: 200,
+        details: { eventName: eventName || "charge.success" }
+      });
       return res.status(200).send("Webhook received");
     }
 
@@ -1606,6 +1645,17 @@ app.post("/api/chapa/initialize", requireCustomerAuth, customerOrderLimit, async
       }));
       persistenceMs = Date.now() - failurePersistenceStartedAt;
       console.info(JSON.stringify({ event: "chapa_initialize", txRef, attemptVersion: order.attemptVersion, amountType: typeof chapaPayload.amount, callbackHostKind: isLocalRequestOrigin && callbackBaseUrl !== requestOrigin ? "configured_public_origin" : (isLocalRequestOrigin ? "local" : "public_request_origin"), phoneIncluded: !!chapaPayload.phone_number, bodyBytes: checkoutRequest.checkoutBodyBytes, bodyMs: Number(checkoutRequest.checkoutBodyParsedAt || startedAt) - Number(checkoutRequest.checkoutBodyStartedAt || startedAt), authMs: res.locals.authMs, pricingMs, claimMs, httpStatus: response.status, chapaMs, persistenceMs, stageMs, totalMs: Date.now() - startedAt, code: failure.code, reasonClass: failure.reasonClass, providerHint: process.env.NODE_ENV === "development" ? safeChapaDiagnostic(chapaData, [secretKey, txRef, chapaEmail, chapaFirstName, chapaLastName, customerPhone, String(chapaAmount), callbackUrl, returnUrl]) : undefined }));
+      void recordDevEvent(db, {
+        category: "payment",
+        status: "failed",
+        source: "chapa-initialize",
+        summary: `Chapa initialization rejected (${failure.code})`,
+        orderId: txRef,
+        recipient: customerPhone ? maskPhone(customerPhone) : undefined,
+        httpStatus: response.status,
+        latencyMs: chapaMs,
+        code: failure.code
+      });
       return res.status(response.status >= 500 ? 502 : (response.status === 401 ? 502 : 400)).json({ success: false, code: failure.code, error: message, txRef, retryAction: failure.retryAction });
     }
 
@@ -1627,6 +1677,28 @@ app.post("/api/chapa/initialize", requireCustomerAuth, customerOrderLimit, async
     persistenceMs = Date.now() - persistenceStartedAt;
     order = { ...order, chapaCheckoutUrl: checkoutUrl, checkoutReturnUrl: returnUrl, paymentInitError: false, paymentAttemptStatus: "ready", failureReason: "" };
     console.info(JSON.stringify({ event: "chapa_initialize", txRef, attemptVersion: order.attemptVersion, amountType: typeof chapaPayload.amount, callbackHostKind: isLocalRequestOrigin && callbackBaseUrl !== requestOrigin ? "configured_public_origin" : (isLocalRequestOrigin ? "local" : "public_request_origin"), phoneIncluded: !!chapaPayload.phone_number, bodyBytes: checkoutRequest.checkoutBodyBytes, bodyMs: Number(checkoutRequest.checkoutBodyParsedAt || startedAt) - Number(checkoutRequest.checkoutBodyStartedAt || startedAt), authMs: res.locals.authMs, pricingMs, claimMs, httpStatus: response.status, chapaMs, persistenceMs, stageMs, totalMs: Date.now() - startedAt }));
+    if (chapaPayload.phone_number) {
+      void recordDevEvent(db, {
+        category: "sms",
+        status: "success",
+        source: "chapa-payment-sms",
+        summary: "Chapa hosted checkout initialized with customer phone",
+        orderId: txRef,
+        recipient: maskPhone(customerPhone),
+        httpStatus: response.status,
+        latencyMs: chapaMs
+      });
+    } else {
+      void recordDevEvent(db, {
+        category: "payment",
+        status: "success",
+        source: "chapa-initialize",
+        summary: "Chapa hosted checkout initialized",
+        orderId: txRef,
+        httpStatus: response.status,
+        latencyMs: chapaMs
+      });
+    }
     return res.json({ success: true, mode: "hosted", checkoutUrl, txRef, order: customerOrderSummary(txRef, order) });
   } catch (error: any) {
     const timedOut = error && (error.name === "TimeoutError" || error.name === "AbortError");
@@ -1668,6 +1740,16 @@ app.post("/api/chapa/initialize", requireCustomerAuth, customerOrderLimit, async
       code,
       ...(PRODUCTION ? { errorName: String(error?.name || "Error").slice(0, 64) } : { errorMessage: error?.message, errorStack: error?.stack })
     }));
+    void recordDevEvent(db, {
+      category: "payment",
+      status: "failed",
+      source: "chapa-initialize",
+      summary: `${code}: ${safeError}`,
+      orderId: order?.id || txRef || undefined,
+      httpStatus: statusCode,
+      latencyMs: Date.now() - startedAt,
+      code
+    });
     return res.status(statusCode).json({
       success: false,
       code,
@@ -2034,6 +2116,7 @@ app.post("/api/business/clear", requireStaffAuth, async (req, res) => {
     };
     try { await db.collection("settings").doc("global").set(defaultSettings); } catch (e: any) { console.warn("[BUSINESS CLEAR] Could not reset settings/global:", e?.message); }
     try { await db.collection("settings").doc("checkout").set(defaultSettings); } catch (e: any) { console.warn("[BUSINESS CLEAR] Could not reset settings/checkout:", e?.message); }
+    try { await ensureDevRole(db); } catch (e: any) { console.warn("[BUSINESS CLEAR] Could not restore dev role:", e?.message); }
 
     res.json({ success: true, counts, clearedAt: new Date().toISOString() });
   } catch (error: any) {
@@ -2053,7 +2136,7 @@ app.get("/api/customers", requireStaffAuth, requireStaffPermission("customers.vi
 });
 
 // Mailchimp Connection Test Endpoint
-app.get("/api/mailchimp/test", requireStaffAuth, requireStaffPermission("settings.edit"), async (req, res) => {
+app.get("/api/mailchimp/test", requireStaffAuth, requireDevRole, async (req, res) => {
   try {
     const apiKey = getCleanEnv("MAILCHIMP_API_KEY");
     const listId = getCleanEnv("MAILCHIMP_LIST_ID");
@@ -2090,13 +2173,25 @@ app.get("/api/mailchimp/test", requireStaffAuth, requireStaffPermission("setting
 });
 
 // Provider webhooks and staff dispatch use associated, stored orders only.
-installShipdayRoutes(app, shipdayService, { requireStaffAuth, requireStaffPermission });
+installShipdayRoutes(app, shipdayService, { requireStaffAuth, requireStaffPermission, requireDevRole });
+installDevDiagnosticRoutes(app, db, {
+  requireStaffAuth,
+  requireDevRole,
+  getCleanEnv,
+  isMissingOrPlaceholderSecret,
+  appUrl: APP_PUBLIC_ORIGIN,
+  databasePath,
+  firebaseConfig,
+  shipdayService,
+  startedAt: SERVER_STARTED_AT
+});
 app.use("/api", (_req, res) => res.status(404).json({ error: "API endpoint not found." }));
 
 // Vite or Static Files Handler
 async function startServer() {
   await initializeLocalData(db, appRoot);
   await syncPrimaryAdmin(db, PRIMARY_ADMIN_EMAIL);
+  await ensureDevRole(db);
   console.log("[DATABASE] SQLite ready; business data is stored locally.");
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");

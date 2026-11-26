@@ -240,7 +240,10 @@ export default function AdminPortal() {
               setAdminRole(role);
               setPermissions(perms);
               const can = (key: string) => hasPermission(perms, key);
-              if (role === "admin") {
+              if (role === "dev" && can("dev.view")) {
+                setActiveTab("settings");
+                setSettingsInitialTab("dev");
+              } else if (role === "admin") {
                 setActiveTab("overview");
               } else if (role === "kitchen" && can("kds.view")) {
                 setActiveTab("kds");
@@ -576,12 +579,21 @@ export default function AdminPortal() {
           )}
 
           {/* PLATFORM */}
-          {(can('team.view') || can('settings.view')) && (
+          {(can('team.view') || can('settings.view') || (adminRole === 'dev' && can('dev.view'))) && (
             <div className="space-y-1">
               <p className="px-2 text-[10px] font-bold uppercase tracking-widest text-stone-400">Platform</p>
-              {(can('team.view') || can('settings.view')) && (
+              {adminRole === 'dev' && can('dev.view') && (
                 <button
-                  onClick={() => setActiveTab('settings')}
+                  onClick={() => { setTeamSettingsView('team'); setSettingsInitialTab('dev'); setActiveTab('settings'); }}
+                  className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'settings' && settingsInitialTab === 'dev' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'}`}
+                >
+                  <BarChart3 className="w-4 h-4" />
+                  <span>Dev Diagnostics</span>
+                </button>
+              )}
+              {(can('team.view') || can('settings.view') || (adminRole === 'dev' && can('dev.view'))) && (
+                <button
+                  onClick={() => { setSettingsInitialTab('general'); setActiveTab('settings'); }}
                   className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${activeTab === 'settings' ? 'bg-amber-50 text-amber-900 font-bold' : 'text-stone-600 hover:bg-stone-50 font-medium'
                     }`}
                 >
@@ -597,7 +609,12 @@ export default function AdminPortal() {
           <div className="px-4 py-2 mb-2">
             <p className="text-xs text-stone-500">Logged in as</p>
             <p className="text-sm font-bold text-stone-900 truncate">{adminUser?.email}</p>
-            <p className="text-[10px] font-mono text-stone-400 uppercase mt-0.5">{adminRole}</p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <p className="text-[10px] font-mono text-stone-400 uppercase">{adminRole}</p>
+              {adminRole === 'dev' && (
+                <span className="text-[9px] font-mono uppercase bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-bold">READ-ONLY</span>
+              )}
+            </div>
           </div>
           <button
             onClick={handleAdminLogout}
@@ -635,6 +652,18 @@ export default function AdminPortal() {
         </header>
 
         <div className="p-8 flex-1 overflow-y-auto">
+          {adminRole === 'dev' && !(activeTab === 'settings' && teamSettingsView !== 'roles' && settingsInitialTab === 'dev') && (
+            <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50/80 px-4 py-2.5 text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2">
+              <span><strong>Developer Read-Only Mode:</strong> You can inspect all business sections, while edits are restricted to admins.</span>
+              <button
+                type="button"
+                onClick={() => { setTeamSettingsView('team'); setSettingsInitialTab('dev'); setActiveTab('settings'); }}
+                className="font-bold underline cursor-pointer hover:text-amber-950"
+              >
+                Open Dev Diagnostics →
+              </button>
+            </div>
+          )}
           {ordersReadError && (
             <div role="alert" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
               {ordersReadError} Orders will refresh automatically when the connection recovers.
@@ -660,7 +689,7 @@ export default function AdminPortal() {
                   />
                 )}
                 {can('settings.view') && teamSettingsView !== 'roles' && (
-                  <GlobalSettingsPanel can={can} actor={actor} initialTab={settingsInitialTab} />
+                  <GlobalSettingsPanel can={can} actor={actor} userRole={adminRole} initialTab={settingsInitialTab} />
                 )}
               </div>
             )}
@@ -752,6 +781,8 @@ export default function AdminPortal() {
         orders={orders}
         menu={menu}
         customers={customers}
+        can={can}
+        userRole={adminRole}
       />
     </div>
   );
